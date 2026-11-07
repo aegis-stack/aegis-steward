@@ -34,10 +34,6 @@ from typing import Any
 # that quietly becomes a crawler.
 CANDIDATE_BUDGET = 4
 TIMEOUT_SECONDS = 4.0
-# Who is asking, said plainly. Sites block the bare python-httpx agent:
-# Maple's page answered 403 to it and 200 to this (2026-09-23). Never
-# a browser's string - a lookup that disguises itself is a scraper.
-USER_AGENT = "AegisSteward/1.0 (household records; contact lookup)"
 
 # Where an organization puts its contact details, in the order worth
 # trying. A site that hides them behind a search form is a site this
@@ -95,28 +91,21 @@ async def _read(url: str, host: str) -> str | None:
     model's choice, so it is resolved, checked public and dialled at the
     checked address, and the redirect is resolved and checked again.
     """
-    import httpx
-
-    from app.core.safe_fetch import guarded_follow, read_capped
+    from app.core.safe_fetch import fetch_text
 
     try:
-        async with httpx.AsyncClient(
-            timeout=TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT}
-        ) as client:
-            async with guarded_follow(
-                client, url, redirects=1, same_host=host
-            ) as response:
-                if response.status_code != 200:
-                    return None
-                # Text only, judged before a byte of the body is read.
-                # A PDF or an image proves nothing about the name.
-                if "text" not in response.headers.get("content-type", "text/html"):
-                    return None
-                return await read_capped(response)
+        _, body = await fetch_text(
+            url,
+            purpose="household records; contact lookup",
+            timeout=TIMEOUT_SECONDS,
+            redirects=1,
+            same_host=host,
+        )
     except Exception:
         # A dead host, a typo, no network: all the same answer. A lookup
         # is a convenience and must never be an outage.
         return None
+    return body
 
 
 def _known_marks(known: set[str] | None) -> set[str]:

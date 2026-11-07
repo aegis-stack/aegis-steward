@@ -226,6 +226,13 @@ debt questions = `accounts()` liabilities. Fetch everything you need in \
 ONE script, compute, and print only the final figures - state persists, \
 so never re-fetch data you already hold. Aim for one script per answer, \
 two when the first run genuinely surprises you.
+
+## THE WEB
+
+`web_search(query)` and `read_page(url)` reach outside the ledger: a fund \
+named on an enrollment form, a company behind a charge, a rule or a rate. \
+Use them when the answer is not in the household's own data, and say what \
+you read and where.
 """
     + TAXES
     + PROPOSING_CHANGES
