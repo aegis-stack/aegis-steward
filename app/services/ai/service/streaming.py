@@ -60,6 +60,9 @@ from app.services.ai.service.trace import (
     record_tool_result,
 )
 
+# The agent a conversation is held with, in its metadata.
+AGENT_KEY = "agent_slug"
+
 
 class StreamingMixin(ChatMixin):
     """Streaming variant of the chat turn."""
@@ -174,12 +177,6 @@ class StreamingMixin(ChatMixin):
             # Get fresh config for metadata (reflects current .env after use-provider)
             current = self.config
 
-            # Resolve the requested agent definition (DB row or code default)
-            if agent_slug:
-                agent_config = await resolve_agent(agent_slug)
-            else:
-                agent_config = await resolve_agent()
-
             # Setup conversation and add user message. The stored text
             # carries the attachment marker; the bytes ride only this
             # turn's model call (history replays as text).
@@ -197,6 +194,17 @@ class StreamingMixin(ChatMixin):
                 surface=surface,
                 metadata=stored_metadata,
             )
+
+            # A conversation is held with one agent, and a turn that
+            # names none is hers: "I approved: ..." came back to the
+            # thread as the bare default agent, no tools, and the filing
+            # she had promised once the card was approved ended as "I
+            # can't do that from here". Recorded every turn, so any
+            # follow-up (an approval, a job's nudge) resumes as her.
+            agent_slug = agent_slug or conversation.metadata.get(AGENT_KEY)
+            held = agent_slug or DEFAULT_AGENT_SLUG
+            agent_config = await resolve_agent(held)
+            conversation.metadata[AGENT_KEY] = held
 
             # Create streaming conversation wrapper
             streaming_conv = StreamingConversation(conversation=conversation)

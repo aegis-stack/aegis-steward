@@ -9,6 +9,8 @@ under that claim, an HTML or SVG file is a page on this origin.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import HTTPException, UploadFile, status
 from starlette.responses import Response
 
@@ -56,6 +58,16 @@ def _sniff(data: bytes, claimed: str | None) -> str | None:
     return None
 
 
+def _filename(name: str) -> str:
+    """The filename parameter, as Starlette's FileResponse writes it: a
+    header is latin-1, so a name with anything beyond it (a title's em
+    dash) goes RFC 5987 encoded, and a plain one stays plain."""
+    quoted = quote(name)
+    if quoted != name:
+        return f"filename*=utf-8''{quoted}"
+    return f'filename="{name}"'
+
+
 def stored_file(
     data: bytes,
     filename: str,
@@ -73,7 +85,7 @@ def stored_file(
     disposition = "inline" if media_type and not download else "attachment"
     served = {
         **(headers or {}),
-        "Content-Disposition": f'{disposition}; filename="{safe_filename(filename)}"',
+        "Content-Disposition": f"{disposition}; {_filename(safe_filename(filename))}",
     }
     if media_type != "application/pdf":
         served["Content-Security-Policy"] = "sandbox"

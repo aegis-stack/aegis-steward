@@ -131,6 +131,16 @@ class TestStoredFile:
 
         assert "\n" not in response.headers["content-disposition"]
 
+    def test_a_title_with_an_em_dash_still_serves(self) -> None:
+        """A header is latin-1; a document titled with an em dash (every
+        form she reads off a letterhead) was a 500 and a blank viewer."""
+        response = stored_file(PDF, "Plan \u2014 Enrollment Form")
+
+        assert response.status_code == 200
+        assert response.headers["content-disposition"] == (
+            "inline; filename*=utf-8''Plan%20%E2%80%94%20Enrollment%20Form"
+        )
+
     def test_extra_headers_ride_along(self) -> None:
         response = stored_file(PNG, "p", headers={"Cache-Control": "no-store"})
 
