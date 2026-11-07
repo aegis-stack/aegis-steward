@@ -476,10 +476,15 @@ async def delegate(said: Said) -> Response:
         )
     except Exception:
         logger.exception("A live delegation failed")
-        return JSONResponse({"speak": LIVE_SORRY, "conversation_id": None})
+        return JSONResponse(
+            {"speak": LIVE_SORRY, "conversation_id": None, "cost": None}
+        )
     return JSONResponse(
         {
             "speak": to_spoken(readable(reply.content), LIVE_ANSWER_CHARS),
             "conversation_id": reply.metadata.get("conversation_id"),
+            # The turn's price, for the call bar: the voice's minutes are
+            # not the call's whole cost (#595).
+            "cost": reply.metadata.get("cost"),
         }
     )
