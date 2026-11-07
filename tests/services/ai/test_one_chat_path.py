@@ -68,3 +68,40 @@ async def test_a_turn_through_chat_keeps_what_she_did(
     assert [step["tool"] for step in trace] == ["run_code"]
     assert "42" in trace[0]["result"]
     assert reply.metadata.get("model") and reply.metadata.get("provider")
+
+
+@pytest.mark.asyncio
+@pytest.mark.queryspy(threshold=3)  # two whole turns, each its own queries
+async def test_a_follow_up_that_names_no_agent_speaks_as_the_conversations(
+    finance_agent: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "I approved: Open a matter" came back to her conversation as the
+    bare default agent - no tools - so the filing she said she would do
+    once the card was approved ended as "I can't do that from here". A
+    conversation is held with one agent; a turn that names none (any
+    post-approval follow-up, any job's nudge) is hers to answer."""
+    offered: list[list[str]] = []
+
+    async def _stream(messages: Any, info: Any) -> AsyncIterator[str]:
+        offered.append([t.name for t in info.function_tools])
+        yield "ok."
+
+    monkeypatch.setattr(settings, "AI_PROVIDER", "ollama")
+    monkeypatch.setattr(
+        "app.services.ai.domains.llm.agents._ollama_model",
+        lambda config, settings: FunctionModel(stream_function=_stream),
+    )
+    service = AIService(settings)
+    first = await service.chat(
+        "Open a matter.", user_id=OWNER, agent_slug=finance_agent, surface="finance"
+    )
+    conversation_id = first.metadata["conversation_id"]
+
+    await service.chat(
+        "I approved: Open a matter - Brookemeade.",
+        conversation_id=conversation_id,
+        user_id=OWNER,
+    )
+
+    assert offered[1] == offered[0], offered
+    assert "run_code" in offered[1]

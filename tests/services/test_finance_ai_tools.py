@@ -795,7 +795,7 @@ async def test_transaction_detail_carries_the_ids_a_proposal_needs(
     txn = await svc.create_transaction(
         account_id=account.id,
         amount=-1_296,
-        txn_date=date(2026, 8, 21),
+        txn_date=current_date() - timedelta(days=7),
         owner_user_id=1,
         name="Target",
     )
@@ -862,14 +862,14 @@ async def test_ledger_rows_say_uncategorized_outright(
     await svc.create_transaction(
         account_id=account.id,
         amount=-100,
-        txn_date=date(2026, 8, 1),
+        txn_date=current_date() - timedelta(days=3),
         owner_user_id=1,
         name="Bare",
     )
     bucketed = await svc.create_transaction(
         account_id=account.id,
         amount=-200,
-        txn_date=date(2026, 8, 2),
+        txn_date=current_date() - timedelta(days=2),
         owner_user_id=1,
         name="Bucketed",
     )
@@ -877,7 +877,7 @@ async def test_ledger_rows_say_uncategorized_outright(
     filed = await svc.create_transaction(
         account_id=account.id,
         amount=-300,
-        txn_date=date(2026, 8, 3),
+        txn_date=current_date() - timedelta(days=1),
         owner_user_id=1,
         name="Filed",
     )
@@ -972,14 +972,16 @@ async def test_a_transaction_says_which_bill_it_pays(
     candidate - and with nothing saying so, she took that to mean the bill
     did not exist. Both tools that read rows say so."""
     account = await seed_account(svc)
+    today = current_date()
+    paid, unpaid = today - timedelta(days=2), today - timedelta(days=1)
     stream = await seed_stream(
-        svc, name="Card", expected_amount=25_000, next_expected_date=date(2026, 11, 5)
+        svc, name="Card", expected_amount=25_000, next_expected_date=today
     )
-    for day, bill in ((5, stream.id), (6, None)):
+    for day, bill in ((paid, stream.id), (unpaid, None)):
         txn = await svc.create_transaction(
             account_id=account.id,
             amount=-25_000,
-            txn_date=date(2026, 10, day),
+            txn_date=day,
             owner_user_id=1,
             name="CARD PAYMENT",
         )
@@ -992,8 +994,8 @@ async def test_a_transaction_says_which_bill_it_pays(
 
     for rows in (found, read):
         assert {t["date"]: t["bill_id"] for t in rows} == {
-            "2026-10-05": stream.id,
-            "2026-10-06": None,
+            paid.isoformat(): stream.id,
+            unpaid.isoformat(): None,
         }
 
 
@@ -1136,7 +1138,9 @@ async def test_ledger_rows_carry_their_tags(
     from app.services.finance.domains.ledger.transactions import tag_transactions
 
     account = await seed_account(svc)
-    txn = await seed_txn(svc, account.id, -900, date(2026, 8, 24), name="Link.com")
+    txn = await seed_txn(
+        svc, account.id, -900, current_date() - timedelta(days=7), name="Link.com"
+    )
     await tag_transactions(session, [txn.id], "Business", owner_user_id=None)
     await session.commit()
 
