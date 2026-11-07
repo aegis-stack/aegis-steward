@@ -166,6 +166,7 @@ class TestDoingTheWork:
                 metadata={
                     "conversation_id": "c-9",
                     "tool_trace": [{"tool": "run_code"}],
+                    "cost": 0.0047,
                 },
             )
 
@@ -188,9 +189,12 @@ class TestDoingTheWork:
         assert turns[0]["user_id"] == STANDALONE_USER_ID
         assert turns[0]["conversation_id"] == "c-9"
         # What GPT-Live is handed to say: plain speech, within its limit.
+        # ... and what the turn cost, for the call bar to add to the voice's
+        # minutes (#595): the bar otherwise shows the voice alone.
         assert response.json() == {
             "speak": "Robin. $60 left this week.",
             "conversation_id": "c-9",
+            "cost": 0.0047,
         }
 
     def test_a_long_answer_is_cut_to_what_gpt_live_takes(
@@ -213,7 +217,11 @@ class TestDoingTheWork:
         self._answers(monkeypatch, "unused", fail=True)
         response = client.post(DELEGATIONS, json={"text": "How am I doing?"})
         assert response.status_code == 200
-        assert response.json() == {"speak": LIVE_SORRY, "conversation_id": None}
+        assert response.json() == {
+            "speak": LIVE_SORRY,
+            "conversation_id": None,
+            "cost": None,
+        }
         assert SECRET not in response.text
 
 

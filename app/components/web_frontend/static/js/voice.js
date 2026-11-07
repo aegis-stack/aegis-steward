@@ -378,20 +378,29 @@
   };
   // --- The call bar (issue 273): the composer row gives way to it for the
   // call. Timer and running cost from the engine's per-second rate (the
-  // server's); a token-billed engine is priced after the call.
+  // server's) plus her delegated turns (issue 595), the split on hover; a
+  // token-billed engine is priced after the call.
   const field = (name) => callBar()?.querySelector(`[data-call-${name}]`);
-  const showCost = (dollars) => { field('cost').textContent = `$${dollars.toFixed(2)}`; };
+  const money = (dollars) => `$${dollars.toFixed(2)}`;
+  const showCost = (dollars, split = null) => {
+    field('cost').textContent = money(dollars);
+    field('cost').title = split ? `voice ${money(split.voice)} · thinking ${money(split.thinking)}` : '';
+  };
   const clock = (seconds) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
   const tick = () => {
     if (!call) return;
     const seconds = Math.max((Date.now() - call.started) / 1000, call.billed || 0);
     field('timer').textContent = clock(seconds);
-    if (call.rate) showCost(seconds * call.rate);
+    if (call.rate) {
+      const voice = seconds * call.rate;
+      showCost(voice + call.thinking, { voice, thinking: call.thinking });
+    }
     if (call.state.nudged) sayState(); // the countdown
   };
   const startBar = (engine) => {
     call.started = Date.now();
     call.rate = engine?.per_second || null;
+    call.thinking = 0; // her delegated turns' cost so far
     field('engine').textContent = engine?.label || '';
     field('cost').textContent = '';
     field('cost-later').hidden = Boolean(call.rate);
@@ -519,6 +528,7 @@
     if (call !== asked) return; // that call is over
     stepped();
     answer(id, data.speak || phone().dataset.sorry);
+    if (data.cost) { call.thinking += data.cost; tick(); }
     showTurns(data.conversation_id);
   };
   // Every live minute is metered (issue 270): OpenAI reports the call's
