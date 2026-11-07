@@ -236,6 +236,11 @@ FINANCE_CHAT_TOOL_NAMES = (
     # Policies and the claims on them, with the ids claim.record names.
     "policies",
     "claim_candidates",
+    # The web (#593): a fund off an enrollment form, a company behind a
+    # charge, a rule. Search names the thing, never the household; a
+    # page comes back as text, public hosts only.
+    "web_search",
+    "read_page",
 )
 
 

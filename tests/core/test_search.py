@@ -38,6 +38,20 @@ def brave(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 class TestSearch:
     @pytest.mark.asyncio
+    async def test_one_cached_search_serves_any_limit(
+        self, brave: list[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A first ask for 1 hit must not pin the query to 1 hit for 90 days."""
+        cache = CacheService()
+        monkeypatch.setattr(search, "get_cache", lambda: cache)
+
+        first = await search.search("maple nursing", limit=1)
+        second = await search.search("maple nursing", limit=5)
+
+        assert len(first) == 1 and second
+        assert brave == ["maple nursing"]
+
+    @pytest.mark.asyncio
     async def test_no_key_means_off_and_asks_nobody(
         self, brave: list[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -198,6 +212,7 @@ async def test_the_app_says_who_it_is_when_it_reads_a_page(
     a browser disguise."""
     import httpx
 
+    from app.core import safe_fetch
     from app.services.matters import domain_lookup
     from tests._fake_dns import answering, resolving_to
 
@@ -205,8 +220,10 @@ async def test_the_app_says_who_it_is_when_it_reads_a_page(
     sent = answering(monkeypatch, httpx.Response(200, text="Maple"))
     await domain_lookup._read("https://example.org/", "example.org")
 
-    assert sent[0].headers["user-agent"] == domain_lookup.USER_AGENT
-    assert "AegisSteward" in domain_lookup.USER_AGENT
+    assert sent[0].headers["user-agent"] == safe_fetch.user_agent(
+        "household records; contact lookup"
+    )
+    assert sent[0].headers["user-agent"].startswith("AegisSteward/1.0 (")
 
 
 class TestBravesAnswerIsParsed:

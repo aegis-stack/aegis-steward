@@ -170,6 +170,9 @@ EXPECTED_EFFECTS = {
     "claim_candidates": "read",
     "policies": "read",
     "arrivals": "read",
+    # the web (#593)
+    "web_search": "read",
+    "read_page": "read",
 }
 
 

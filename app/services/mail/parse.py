@@ -14,14 +14,13 @@ from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import parseaddr, parsedate_to_datetime
 import hashlib
-from html.parser import HTMLParser
 from itertools import islice
 import mailbox
 from pathlib import Path
-import re
 import tempfile
 
 from app.core.config import settings
+from app.core.html_text import flatten
 from app.core.log import logger
 
 MAIL_SUFFIXES = (".mbox", ".eml")
@@ -156,46 +155,5 @@ def _body(mail: EmailMessage) -> str:
         return ""
     content = str(part.get_content())
     if part.get_content_type() == "text/html":
-        return _flatten(content)
+        return flatten(content)
     return content.strip()
-
-
-# Tags that end a line when flattened. A phone or an address on its own
-# line is what the identity rules read; a <p> is a line.
-_BLOCKS = frozenset(
-    {"p", "br", "div", "tr", "li", "h1", "h2", "h3", "h4", "td", "table", "blockquote"}
-)
-
-
-class _Words(HTMLParser):
-    """HTML to the words a person would read off it. Styles and scripts
-    are not words; block tags are line breaks."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.out: list[str] = []
-        self.quiet = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in ("style", "script", "head"):
-            self.quiet += 1
-        if tag in _BLOCKS:
-            self.out.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("style", "script", "head"):
-            self.quiet = max(0, self.quiet - 1)
-        if tag in _BLOCKS:
-            self.out.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if not self.quiet:
-            self.out.append(data)
-
-
-def _flatten(html: str) -> str:
-    words = _Words()
-    words.feed(html)
-    text = re.sub(r"[ \t]+", " ", "".join(words.out))
-    lines = [line.strip() for line in text.splitlines()]
-    return "\n".join(line for line in lines if line)
