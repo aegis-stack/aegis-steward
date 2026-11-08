@@ -16,6 +16,7 @@ from app.services.finance.domains.planning import (
     goals,
 )
 from app.services.finance.domains.planning.allocation import MonthlyFigures
+from app.services.finance.domains.planning.debts import Debt
 from app.services.finance.domains.planning.goals import DEFAULT_PRIORITY
 from app.services.finance.models import FinanceAccount
 from app.services.finance.service.base import FinanceServiceBase
@@ -35,12 +36,16 @@ class GoalsMixin(FinanceServiceBase):
         owner_user_id: int | None,
         today: date,
         figures: MonthlyFigures | None = None,
+        accounts: list[FinanceAccount] | None = None,
+        debts: dict[int, Debt] | None = None,
     ) -> dict[int, int]:
         return await allocation.goal_allocations(
             self.db,
             owner_user_id=owner_user_id,
             today=today,
             figures=figures,
+            accounts=accounts,
+            debts=debts,
         )
 
     async def goal_month_figures(
@@ -49,6 +54,9 @@ class GoalsMixin(FinanceServiceBase):
         return await allocation.month_figures(
             self.db, owner_user_id=owner_user_id, today=today
         )
+
+    async def goal_debts(self, accounts: list[FinanceAccount]) -> dict[int, Debt]:
+        return await goals.goal_debts(self.db, accounts)
 
     async def goal_rate(self, account: FinanceAccount, *, today: date) -> int | None:
         return await goals.goal_rate(self.db, account, today=today)

@@ -116,6 +116,7 @@ async def goal_response(
     allocations: dict[int, int] | None = None,
     rates: dict[int, int | None] | None = None,
     figures: MonthlyFigures | None = None,
+    debts: dict[int, Any] | None = None,
 ) -> GoalResponse:
     """``allocations`` is the engine's run over the WHOLE goal set (surplus
     rules depend on the other goals) - a caller without one in hand lets
@@ -125,7 +126,8 @@ async def goal_response(
     from app.services.finance.domains.planning.goals import (
         GOAL_ACCOUNT_TYPE,
         goal_auto_contribute,
-        goal_eta,
+        goal_balance,
+        goal_landing,
         goal_metadata,
         goal_progress,
     )
@@ -140,11 +142,22 @@ async def goal_response(
     # Resolved here, not read from storage: a months-of-expenses target
     # moves with the month's figures, and progress/ETA must move with it.
     meta = resolved_meta(stored, figures)
-    balance = account.current_balance or 0
+    # A pay-down goal (#349) reads its debt: what is paid down so far,
+    # and a landing date from the loan's own schedule plus the extra.
     if allocations is None:
+        goal_accounts = await service.list_goals(owner_user_id=account.owner_user_id)
+        debts = await service.goal_debts(goal_accounts)
         allocations = await service.goal_allocations(
-            owner_user_id=account.owner_user_id, today=now, figures=figures
+            owner_user_id=account.owner_user_id,
+            today=now,
+            figures=figures,
+            accounts=goal_accounts,
+            debts=debts,
         )
+    elif debts is None:
+        debts = await service.goal_debts([account])
+    debt = debts.get(account.id)
+    balance = goal_balance(meta, account, debt)
     ask = allocations.get(account.id, 0)
     # The evaluated ask IS the plan's saving rate; only a goal asking
     # nothing falls back to the observed trailing rate.
@@ -168,11 +181,8 @@ async def goal_response(
         balance=balance,
         progress=goal_progress(balance=balance, target=meta.target_amount),
         monthly_need=ask,
-        eta=goal_eta(
-            balance=balance,
-            target=meta.target_amount,
-            monthly_rate=rate,
-            today=now,
+        eta=goal_landing(
+            meta, balance=balance, debt=debt, ask=ask, rate=rate, today=now
         ),
         auto_contribute=goal_auto_contribute(account.metadata_),
         contribution_kind=meta.contribution_kind,
@@ -220,14 +230,24 @@ async def list_goals(
     # target on it resolves against the same numbers, and the engine
     # below is handed them rather than querying for them again.
     figures = await service.goal_month_figures(owner_user_id=owner_user_id, today=today)
+    debts = await service.goal_debts(accounts)
     allocations = await service.goal_allocations(
-        owner_user_id=owner_user_id, today=today, figures=figures
+        owner_user_id=owner_user_id,
+        today=today,
+        figures=figures,
+        accounts=accounts,
+        debts=debts,
     )
     # One snapshot fetch covers every goal's observed rate - never one per row.
     rates = await service.goal_rates(accounts, today=today)
     items = [
         await goal_response(
-            service, a, allocations=allocations, rates=rates, figures=figures
+            service,
+            a,
+            allocations=allocations,
+            rates=rates,
+            figures=figures,
+            debts=debts,
         )
         for a in accounts
     ]

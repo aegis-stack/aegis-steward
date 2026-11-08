@@ -18,8 +18,10 @@ from app.services.finance.domains.detection.analyst.sections import (
 )
 from app.services.finance.domains.ledger import networth
 from app.services.finance.domains.ledger import queries as ledger_queries
+from app.services.finance.domains.planning.allocation import goal_allocations
 from app.services.finance.domains.planning.envelopes import ENVELOPE_ACCOUNT_TYPE
 from app.services.finance.domains.planning.goals import (
+    goal_debts,
     goal_metadata,
     goal_rates,
 )
@@ -44,6 +46,7 @@ async def load_report_context(
     recent, transactions_total = await service.list_transactions(
         owner_user_id=owner_user_id, page_size=_RECENT_TRANSACTIONS
     )
+    debts = await goal_debts(db, goal_accounts) if goal_accounts else {}
     return ReportContext(
         today=today,
         accounts=accounts,
@@ -75,5 +78,13 @@ async def load_report_context(
         transactions_total=transactions_total,
         goal_rates=(
             await goal_rates(db, goal_accounts, today=today) if goal_accounts else {}
+        ),
+        goal_debts=debts,
+        goal_asks=await goal_allocations(
+            db,
+            owner_user_id=owner_user_id,
+            today=today,
+            accounts=goal_accounts,
+            debts=debts,
         ),
     )

@@ -140,6 +140,15 @@ if TYPE_CHECKING:
     )
     from app.services.finance.domains.planning.budgets import strip
     from app.services.finance.domains.planning.budgets.closing import ClosedMonth
+    from app.services.finance.domains.planning.debts import (
+        METHODS as PAYOFF_METHODS,
+    )
+    from app.services.finance.domains.planning.debts import (
+        Debt,
+        amortize,
+        extra_buys,
+    )
+    from app.services.finance.domains.planning.debts import plan as payoff_plan
     from app.services.finance.domains.planning.envelope_tags import tag_name
     from app.services.finance.domains.planning.envelopes import envelope_metadata
     from app.services.finance.domains.planning.goals import goal_metadata

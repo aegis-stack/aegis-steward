@@ -1,0 +1,50 @@
+{# The cover's "Paying it down" card: how the lender treats
+   paying down, then what the terms say - when it ends, the interest left,
+   the schedule - and what paying more would buy, priced from the same
+   schedule before a dollar of it is paid. Unconfirmed is drawn as
+   unconfirmed: a loan nobody has asked about must not read as a loan
+   with no penalty, because that is the reading a payoff plan gets built on.
+   The extra box re-asks this page (pattern 3) and swaps this one card. #}
+{% from "components/macros/layout.html" import card, stats_strip, page_link %}
+{% from "components/macros/table.html" import data_table %}
+{% from "components/macros/form.html" import field, money_input %}
+{% call card("Paying it down", id="payoff") %}
+  <dl class="grid gap-3 sm:grid-cols-2">
+    {% for row in payoff %}
+    <div>
+      <dt class="micro-label text-aegis-muted">{{ row.label }}</dt>
+      <dd class="text-sm {{ 'text-aegis-muted italic' if row.unknown else 'text-aegis-text' }}" data-payoff>{{ row.value }}</dd>
+    </div>
+    {% endfor %}
+  </dl>
+  {% if payoff_schedule is not none %}
+  {{ stats_strip(payoff_strip) }}
+  <form {{ hx_filter(here, "#payoff") }} hx-trigger="change, keyup changed delay:400ms from:input"
+        class="grid gap-4 sm:grid-cols-2" aria-label="What paying more buys">
+    {% call field("Extra each month") %}{{ money_input("extra", payoff_extra) }}{% endcall %}
+    {% call field("Lump sum now") %}{{ money_input("lump", payoff_lump) }}{% endcall %}
+  </form>
+  {% if payoff_saving %}
+  <p class="text-sm {{ 'text-aegis-muted' if not payoff_saving.applies else 'text-aegis-text' }}"
+     data-saving="{{ 'none' if not payoff_saving.applies else 'yes' }}"
+     {% if payoff_saving.unconfirmed %}data-unconfirmed{% endif %}
+     {% if payoff_saving.penalty %}data-penalty{% endif %}>
+    {%- if not payoff_saving.applies -%}
+      This lender puts extra money toward future instalments, not the principal: paying more pays ahead and saves nothing.
+    {%- elif payoff_saving.months_sooner > 0 -%}
+      Paid off {{ payoff_saving.months_sooner }} month{{ "s" if payoff_saving.months_sooner != 1 }} sooner, saving {{ payoff_saving.interest_saved|money }} of interest.
+    {%- else -%}
+      That changes nothing: the loan ends the same month.
+    {%- endif -%}
+    {%- if payoff_saving.unconfirmed %} Assumes extra goes to principal, which is not confirmed with the lender.{% endif -%}
+    {%- if payoff_saving.penalty %} An early payoff carries a penalty here.{% endif -%}
+  </p>
+  {% endif %}
+  {% if payoff_rows %}
+  {{ data_table(payoff_columns, payoff_rows, scroll=True) }}
+  {% endif %}
+  {% else %}
+  <p class="text-xs text-aegis-muted" data-no-schedule>No schedule yet: the rate and the payment are what it takes. Set them under Terms.</p>
+  {% endif %}
+  <p class="text-xs text-aegis-muted">{{ page_link(payoff_page, "Every debt in payoff order") }}</p>
+{% endcall %}

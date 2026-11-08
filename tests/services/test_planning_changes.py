@@ -116,6 +116,43 @@ class TestGoals:
         assert "$100.00 a month is not used while it has a date" in said["Forecast"]
 
     @pytest.mark.asyncio
+    async def test_a_pay_down_goal_card_asks_the_extra_not_the_payment(
+        self, async_db_session: AsyncSession
+    ) -> None:
+        """The card runs the same engine as the Budget page (#349): for a
+        loan goal that is the extra above the loan's own payment, not the
+        whole remainder spread over the months."""
+        from app.services.finance.constants import add_months
+        from app.services.finance.domains.planning import debts
+        from app.services.finance.domains.writes.planning import (
+            GoalUpdatePayload,
+            goal_update_describe,
+        )
+        from app.services.finance.service import FinanceService
+        from app.services.finance.utils import current_date
+        from tests.services._finance_factories import seed_loan
+
+        svc = FinanceService(async_db_session)
+        today = current_date()
+        by = add_months(today, 6)
+        loan_id = await seed_loan(svc, async_db_session, current_balance=-100_000)
+        await svc.flag_account_as_goal(loan_id, owner_user_id=1, target_amount=100_000)
+        await async_db_session.commit()
+        debt = (
+            await svc.goal_debts([await svc.get_account(loan_id, owner_user_id=1)])
+        )[loan_id]
+        extra = debts.extra_to_finish_by(debt, start=today, by=by)
+        assert extra
+
+        said = await _said(
+            goal_update_describe,
+            async_db_session,
+            GoalUpdatePayload(account_id=loan_id, target_date=by),
+        )
+
+        assert said["Forecast"].startswith(f"sets aside ${extra / 100:,.2f} on the 1st")
+
+    @pytest.mark.asyncio
     async def test_pausing_a_goal_says_the_forecast_stops_asking(
         self, async_db_session: AsyncSession
     ) -> None:

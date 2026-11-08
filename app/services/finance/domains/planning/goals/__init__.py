@@ -24,7 +24,10 @@ from app.services.finance.domains.planning.goals.meta import (
     set_goal_metadata,
 )
 from app.services.finance.domains.planning.goals.reads import (
+    goal_balance,
+    goal_debts,
     goal_eta,
+    goal_landing,
     goal_monthly_need,
     goal_progress,
     goal_rate,
@@ -42,7 +45,10 @@ __all__ = [
     "create_virtual_goal",
     "flag_account_as_goal",
     "goal_auto_contribute",
+    "goal_balance",
+    "goal_debts",
     "goal_eta",
+    "goal_landing",
     "goal_metadata",
     "goal_monthly_need",
     "goal_progress",

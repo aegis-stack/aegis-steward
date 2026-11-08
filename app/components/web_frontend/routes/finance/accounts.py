@@ -72,6 +72,7 @@ from app.services.finance.service import (
 )
 
 SECTION = section("accounts")
+PAYOFF = SECTION.path + "/payoff"
 router = APIRouter()
 
 # The Manage menu's labels live with the rule that orders them, so this
@@ -153,6 +154,7 @@ async def _accounts(
     sites = await websites(service.db, {a.institution_id for a in everything.items})
     return listing.items, {
         "section": SECTION,
+        "payoff_page": PAYOFF,
         **await subjects.chips(service, seeing),
         # Which accounts hold rows the reader has not seen: the register
         # marks the rows, this marks where they landed, by one rule.

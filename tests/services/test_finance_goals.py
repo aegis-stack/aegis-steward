@@ -33,7 +33,7 @@ from app.services.finance.domains.planning.goals import (
 )
 from app.services.finance.models import FinanceTransaction, FinanceTransfer
 from app.services.finance.service import FinanceService
-from tests.services._finance_factories import seed_stream
+from tests.services._finance_factories import seed_account, seed_loan, seed_stream
 
 
 class TestMetadataContract:
@@ -1447,3 +1447,93 @@ class TestLoanPaymentsSurviveTheMeasuredPath:
         # $2,500 mortgage + $300 groceries over three months = $933.33/mo,
         # and not one cent of the card payment.
         assert figures.observed_by_account == {checking.id: 93_333}
+
+
+class TestAPayDownGoal:
+    """A loan flagged as a goal (#349): the target is the balance to
+    clear, progress is what has been paid down, and the month is asked
+    only for the EXTRA above the loan's own payment - the payment is a
+    bill already, and must not be counted twice."""
+
+    @pytest.mark.asyncio
+    async def test_the_ask_is_the_extra_not_the_payment(
+        self, svc: FinanceService, async_db_session: AsyncSession
+    ) -> None:
+        from app.services.finance.constants import add_months
+        from app.services.finance.domains.planning import debts
+        from app.services.finance.domains.planning.allocation import goal_allocations
+        from app.services.finance.utils import current_date
+
+        today = current_date()
+        loan_id = await seed_loan(svc, async_db_session, current_balance=-100_000)
+        # Eleven payments on its own; asked to be done in seven.
+        by = add_months(today, 6)
+        await svc.flag_account_as_goal(
+            loan_id, owner_user_id=1, target_amount=100_000, target_date=by
+        )
+        await async_db_session.commit()
+
+        asks = await goal_allocations(async_db_session, owner_user_id=1, today=today)
+
+        debt = (
+            await svc.goal_debts([await svc.get_account(loan_id, owner_user_id=1)])
+        )[loan_id]
+        extra = debts.extra_to_finish_by(debt, start=today, by=by)
+        assert extra is not None and 0 < extra <= 5_000
+        assert asks[loan_id] == extra
+        # Not the remainder over the months, which would count the
+        # payment a second time.
+        assert asks[loan_id] < 100_000 // 7
+
+    @pytest.mark.asyncio
+    async def test_progress_is_what_has_been_paid_down(
+        self, svc: FinanceService, async_db_session: AsyncSession
+    ) -> None:
+        from app.services.finance.domains.planning.goals import goal_balance
+
+        loan_id = await seed_loan(svc, async_db_session, current_balance=-100_000)
+        await svc.flag_account_as_goal(loan_id, owner_user_id=1, target_amount=120_000)
+        await async_db_session.commit()
+        account = await svc.get_account(loan_id, owner_user_id=1)
+        assert account is not None
+        meta = goal_metadata(account.metadata_)
+        assert meta is not None
+
+        debt = (await svc.goal_debts([account]))[loan_id]
+        balance = goal_balance(meta, account, debt)
+
+        # $1,200 to clear, $1,000 still owed: $200 paid down.
+        assert balance == 20_000
+        assert (
+            goal_progress(balance=balance, target=meta.target_amount)
+            == 20_000 / 120_000
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_loan_without_terms_asks_the_plain_remainder(
+        self, svc: FinanceService, async_db_session: AsyncSession
+    ) -> None:
+        from app.services.finance.constants import add_months
+        from app.services.finance.domains.planning.allocation import goal_allocations
+        from app.services.finance.utils import current_date
+
+        today = current_date()
+        loan = await seed_account(
+            svc,
+            name="Mystery loan",
+            account_type="loan",
+            classification="liability",
+            current_balance=-60_000,
+        )
+        assert loan.id is not None
+        await svc.flag_account_as_goal(
+            loan.id,
+            owner_user_id=1,
+            target_amount=60_000,
+            target_date=add_months(today, 5),
+        )
+        await async_db_session.commit()
+
+        asks = await goal_allocations(async_db_session, owner_user_id=1, today=today)
+
+        assert asks[loan.id] == 12_000

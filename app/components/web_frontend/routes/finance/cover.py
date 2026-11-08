@@ -25,6 +25,7 @@ from app.components.web_frontend.routes.finance.accounts import (
     _one_account,
     balance,
 )
+from app.components.web_frontend.routes.finance.payoff import payoff_context
 from app.components.web_frontend.routes.finance.subjects import who_and_where
 from app.components.web_frontend.routes.finance.valuations import (
     VALUATION_COLUMNS,
@@ -184,10 +185,13 @@ async def cover(
     request: Request,
     account_id: int,
     days: int = ranges.ALL,
+    extra: str = "",
+    lump: str = "",
     service: FinanceService = Depends(get_finance_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> Response:
-    """The account's cover sheet: everything true about it, by kind."""
+    """The account's cover sheet: everything true about it, by kind.
+    ``extra`` and ``lump`` are what the payoff card was asked (#348)."""
     accounts, selected, context = await _one_account(service, owner_user_id, account_id)
     filed = await _filed_count()(service, account_id)
     valuations = await valuation_history(service, selected, owner_user_id)
@@ -219,6 +223,7 @@ async def cover(
                 totalled((await scheduled_by_account(service.db)).get(account_id, [])),
             ),
             "payoff": payoff_terms(selected),
+            **payoff_context(selected, extra=extra, lump=lump),
             "valuations": valuations,
             "valuation_chart": valuation_chart(valuations, selected),
             "secured": await secured_strip(service, selected, accounts, owner_user_id),
