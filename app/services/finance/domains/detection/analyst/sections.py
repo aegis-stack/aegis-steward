@@ -56,6 +56,10 @@ class ReportContext(BaseModel):
     recent_transactions: list[FinanceTransaction]
     transactions_total: int
     goal_rates: dict[int, int | None]
+    # The debt each pay-down goal clears (#349), and the engine's ask
+    # this month, by account id: the same figures the Goals tab shows.
+    goal_debts: dict[int, Any]
+    goal_asks: dict[int, int]
 
 
 _NET_WORTH_WINDOW_DAYS = 90

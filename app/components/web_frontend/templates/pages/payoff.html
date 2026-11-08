@@ -1,0 +1,46 @@
+{% extends layout %}
+{% from "components/macros/layout.html" import page_header, stats_strip, card, page_link %}
+{% from "components/macros/table.html" import data_table %}
+{% from "components/macros/form.html" import range_chips, field, money_input %}
+{% from "components/macros/feedback.html" import empty_state %}
+
+{% block title %}Paying down - {{ project_name }}{% endblock %}
+
+{# Every debt in payoff order: which one the next dollar should go
+   to, by rate (avalanche) or by balance (snowball), with each payment kept
+   up and the extra plus every freed payment rolling onto the first debt
+   still open. The chips and the extra box re-ask this page and swap the
+   plan (pattern 3), so the numbers shown are the numbers computed. #}
+{% block app_content %}
+{{ page_header("Paying down", "Which debt the next dollar should go to") }}
+
+<form {{ hx_filter(payoff_page, "#payoff-plan") }} hx-trigger="change, keyup changed delay:400ms from:input"
+      class="flex flex-wrap items-end gap-6 mb-6" aria-label="How to pay down">
+  {{ range_chips(methods, method, field="method", aria="Payoff order") }}
+  {% call field("Extra each month") %}{{ money_input("extra", extra) }}{% endcall %}
+</form>
+
+<div id="payoff-plan" class="space-y-6">
+  {% if plan.lines %}
+  {{ stats_strip(plan_strip) }}
+  <p class="text-sm text-aegis-text" data-next-dollar>
+    The next dollar goes to {{ page_link(next_url, plan.next.name) }}:
+    {{ method_label }}. A paid-off debt's payment rolls onto the next.
+  </p>
+  {% call card("In order") %}
+  {{ data_table(plan_columns, plan_rows) }}
+  {% endcall %}
+  {% elif not unplanned %}
+  {{ empty_state("Nothing owed", "A loan or card with a balance shows up here.") }}
+  {% endif %}
+  {% if unplanned %}
+  {% call card("Terms not yet on file") %}
+  <ul class="text-sm space-y-1">
+    {% for debt in unplanned %}
+    <li data-unplanned>{{ debt.name }} · {{ debt.owed|money }} owed · {{ page_link(debt.url, "set its rate and payment") }}</li>
+    {% endfor %}
+  </ul>
+  {% endcall %}
+  {% endif %}
+</div>
+{% endblock %}

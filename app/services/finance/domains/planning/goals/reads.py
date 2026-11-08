@@ -11,6 +11,7 @@ from app.services.finance.constants import (
     add_months,
 )
 from app.services.finance.domains.ledger import queries as ledger_queries
+from app.services.finance.domains.planning import debts
 from app.services.finance.domains.planning.goals.meta import GoalMeta, goal_metadata
 from app.services.finance.models import (
     FinanceAccount,
@@ -60,6 +61,56 @@ def goal_eta(
         return None
     months = -(-remaining // monthly_rate)  # ceil division
     return add_months(today, months)
+
+
+async def goal_debts(
+    db: AsyncSession, accounts: list[FinanceAccount]
+) -> dict[int, debts.Debt]:
+    """The debt each liability goal account pays down (#349), from its
+    terms in one query. A pay-down goal is a loan or card flagged as a
+    goal with the balance to clear as its target; everything a goal
+    reads - balance, ask, landing date - asks the debt instead of the
+    account's negative balance."""
+    owed = [
+        a.id for a in accounts if a.classification == "liability" and a.id is not None
+    ]
+    details = await ledger_queries.liability_details_by_account(db, owed)
+    return {
+        debt.account_id: debt
+        for account in accounts
+        if (debt := debts.Debt.of(account, details.get(account.id))) is not None
+    }
+
+
+def goal_balance(
+    meta: GoalMeta, account: FinanceAccount, debt: debts.Debt | None
+) -> int:
+    """What the goal has so far: the account's balance, or for a debt
+    what has been paid down of the target (the target less what is still
+    owed), so progress climbs as the balance falls."""
+    if debt is None:
+        return account.current_balance or 0
+    return meta.target_amount - debt.owed
+
+
+def goal_landing(
+    meta: GoalMeta,
+    *,
+    balance: int,
+    debt: debts.Debt | None,
+    ask: int,
+    rate: int | None,
+    today: date,
+) -> date | None:
+    """When the goal lands, for every surface that says so: a pay-down
+    goal from its loan's own schedule plus the extra asked (#349), any
+    other at ``rate`` cents a month. None is never."""
+    if debt is not None and debt.planned:
+        schedule = debts.amortize(debt, start=today, extra=ask)
+        return schedule.paid_off if schedule is not None else None
+    return goal_eta(
+        balance=balance, target=meta.target_amount, monthly_rate=rate, today=today
+    )
 
 
 async def list_goals(

@@ -20,8 +20,12 @@
 {{ whose_bar(whose_options, whose, section.path, also_held) }}
 
 <div class="flex items-baseline justify-between gap-4 mb-6">
-  <a href="{{ account_url(section.path) }}" {{ hx_page(account_url(section.path)) }}
-     class="text-sm text-aegis-muted hover:text-aegis-text transition-colors">All transactions →</a>
+  <span class="flex flex-wrap gap-x-6 text-sm">
+    <a href="{{ account_url(section.path) }}" {{ hx_page(account_url(section.path)) }}
+       class="text-aegis-muted hover:text-aegis-text transition-colors">All transactions →</a>
+    <a href="{{ payoff_page }}" {{ hx_page(payoff_page) }}
+       class="text-aegis-muted hover:text-aegis-text transition-colors">Paying down →</a>
+  </span>
   <p class="text-right">
     <span class="block micro-label text-aegis-muted">Net worth</span>
     <span data-net-worth class="block text-2xl font-semibold tabular-nums {{ 'text-error' if total < 0 else 'text-aegis-text' }}">{{ total|money }}</span>

@@ -51,6 +51,7 @@ class LiabilitySummary(BaseModel):
     # so a debt's cost had nowhere to appear.
     outstanding_balance: int | None = None
     interest_rate_bps: int | None = None
+    escrow_amount: int | None = None
     origination_date: date | None = None
     origination_principal: int | None = None
     loan_term_months: int | None = None
@@ -82,6 +83,7 @@ class LiabilitySummary(BaseModel):
             aprs=row.aprs or [],
             outstanding_balance=row.outstanding_balance,
             interest_rate_bps=row.interest_rate_bps,
+            escrow_amount=row.escrow_amount,
             origination_date=row.origination_date,
             origination_principal=row.origination_principal,
             loan_term_months=row.loan_term_months,

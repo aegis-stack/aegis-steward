@@ -14,7 +14,7 @@ import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.finance.service import FinanceService
-from tests.services._finance_factories import seed_account
+from tests.services._finance_factories import seed_account, seed_loan
 from tests.web.conftest import Ledger
 from tests.web.dom import none, one, portfolio_row, select, table_rows, text, triggers
 
@@ -568,30 +568,19 @@ class TestADebtSaysWhatItCosts:
     ) -> None:
         from datetime import date
 
-        from app.services.finance.domains.writes.terms import (
-            LoanTermsPayload,
-            loan_terms_execute,
-        )
-
-        account = await seed_account(
-            finance, name="GreenSky", account_type="loan", classification="liability"
-        )
-        await loan_terms_execute(
+        account_id = await seed_loan(
+            finance,
             async_db_session,
-            LoanTermsPayload(
-                account_id=int(account.id),
-                outstanding_balance=987_366,
-                interest_rate_bps=799,
-                minimum_payment_amount=22_400,
-                next_payment_due_date=date(2026, 10, 12),
-                origination_date=date(2019, 3, 1),
-                loan_term_months=84,
-            ),
-            1,
+            "GreenSky",
+            outstanding_balance=987_366,
+            interest_rate_bps=799,
+            minimum_payment_amount=22_400,
+            next_payment_due_date=date(2026, 10, 12),
+            origination_date=date(2019, 3, 1),
+            loan_term_months=84,
         )
-        await async_db_session.commit()
 
-        page = hx.get(f"/accounts/{account.id}").text
+        page = hx.get(f"/accounts/{account_id}").text
 
         shown = {
             text(one(cell, "dt")): text(select(cell, "dd")[0])
@@ -657,28 +646,16 @@ class TestTheCoverSheet:
     async def test_a_loan_shows_its_terms_and_how_it_pays_down(
         self, hx: TestClient, finance: FinanceService, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains.writes.terms import (
-            LoanTermsPayload,
-            loan_terms_execute,
-        )
-
-        account = await seed_account(
-            finance, name="GreenSky", account_type="loan", classification="liability"
-        )
-        await loan_terms_execute(
+        account_id = await seed_loan(
+            finance,
             async_db_session,
-            LoanTermsPayload(
-                account_id=int(account.id),
-                outstanding_balance=987_366,
-                interest_rate_bps=799,
-                prepayment_penalty="none",
-                extra_payment_treatment="principal",
-            ),
-            1,
+            "GreenSky",
+            outstanding_balance=987_366,
+            interest_rate_bps=799,
+            minimum_payment_amount=None,
         )
-        await async_db_session.commit()
 
-        page = hx.get(f"/accounts/{account.id}/overview").text
+        page = hx.get(f"/accounts/{account_id}/overview").text
 
         said = [text(el) for el in select(page, "[data-payoff]")]
         assert "no penalty for paying it off early" in said
@@ -690,22 +667,19 @@ class TestTheCoverSheet:
     ) -> None:
         """A loan nobody has asked about must not read as a loan with no
         penalty - that is the reading a payoff plan gets built on."""
-        from app.services.finance.domains.writes.terms import (
-            LoanTermsPayload,
-            loan_terms_execute,
-        )
-
-        account = await seed_account(
-            finance, name="AMEX", account_type="credit_card", classification="liability"
-        )
-        await loan_terms_execute(
+        account_id = await seed_loan(
+            finance,
             async_db_session,
-            LoanTermsPayload(account_id=int(account.id), outstanding_balance=3_195_605),
-            1,
+            "AMEX",
+            account_type="credit_card",
+            outstanding_balance=3_195_605,
+            interest_rate_bps=None,
+            minimum_payment_amount=None,
+            extra_payment_treatment=None,
+            prepayment_penalty=None,
         )
-        await async_db_session.commit()
 
-        page = hx.get(f"/accounts/{account.id}/overview").text
+        page = hx.get(f"/accounts/{account_id}/overview").text
 
         said = [text(el) for el in select(page, "[data-payoff]")]
         assert said == ["not confirmed with the lender"] * 2

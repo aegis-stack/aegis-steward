@@ -27,6 +27,7 @@ from app.components.web_frontend.routes.finance import (
     imports,
     institutions,
     overview,
+    payoff,
     projected,
     receipts,
     register_views,
@@ -58,6 +59,7 @@ router.include_router(account_merge.router)
 router.include_router(account_state.router)
 router.include_router(account_naming.router)
 router.include_router(cover.router)
+router.include_router(payoff.router)
 router.include_router(documents.router)
 router.include_router(imports.router)
 router.include_router(institutions.router)

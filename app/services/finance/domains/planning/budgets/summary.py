@@ -275,7 +275,13 @@ async def budget_summary(
         owner_user_id=owner_user_id,
         today=today,
     )
-    asks = allocation.asks_by_account(goal_accounts, figures, today=today)
+    asks = await allocation.goal_allocations(
+        db,
+        owner_user_id=owner_user_id,
+        today=today,
+        figures=figures,
+        accounts=goal_accounts,
+    )
     goal_asks = [
         GoalAsk(
             account_id=account.id,

@@ -31,12 +31,16 @@ from app.services.finance.domains.detection.insights.commitments import (
 )
 from app.services.finance.domains.ledger import queries as ledger_queries
 from app.services.finance.domains.planning import recurring
+from app.services.finance.domains.planning.debts import Debt, extra_to_finish_by
 from app.services.finance.domains.planning.goals import (
     GoalMeta,
+    goal_balance,
+    goal_debts,
     goal_metadata,
     goal_monthly_need,
     list_goals,
 )
+from app.services.finance.models import FinanceAccount
 from app.services.finance.utils import (
     current_date,
     current_period_month,
@@ -152,6 +156,7 @@ def allocate_month(
     goals: list[tuple[str, GoalMeta, int]],
     *,
     today: date | None = None,
+    debts: dict[str, Debt] | None = None,
 ) -> dict[str, int]:
     """This month's ask per goal, evaluated in priority order.
 
@@ -162,9 +167,15 @@ def allocate_month(
     it, floored at zero. Every ask caps at remaining-to-target, against
     the RESOLVED target - a fund sized in months of expenses asks again
     when expenses grow. Paused/reached goals ask nothing. Deterministic:
-    priority then key.
+    priority then key. A key in ``debts`` is a pay-down goal (#349): with
+    a date and terms to schedule on, its fixed ask is the EXTRA above the
+    loan's own payment that clears it by then - the payment is a bill
+    already, counted once; a lender that only pays ahead with extra
+    cannot be hurried, so nothing is asked. Otherwise it asks as any
+    goal does, on what has been paid down so far.
     """
     today = today or current_date()
+    debts = debts or {}
     asks: dict[str, int] = {}
     room = figures.income_total - figures.committed
     for key, stored, balance in sorted(
@@ -175,7 +186,15 @@ def allocate_month(
         if meta.status != "active" or remaining <= 0:
             asks[key] = 0
             continue
-        if meta.contribution_kind == "percent_income":
+        debt = debts.get(key)
+        if (
+            debt is not None
+            and debt.planned
+            and meta.target_date is not None
+            and meta.contribution_kind == "fixed"
+        ):
+            ask = extra_to_finish_by(debt, start=today, by=meta.target_date) or 0
+        elif meta.contribution_kind == "percent_income":
             ask = figures.income_total * (meta.contribution_bps or 0) // 10_000
         elif meta.contribution_kind == "surplus":
             ask = max(0, room)
@@ -188,19 +207,29 @@ def allocate_month(
 
 
 def asks_by_account(
-    accounts: list[Any], figures: MonthlyFigures, *, today: date
+    accounts: list[Any],
+    figures: MonthlyFigures,
+    *,
+    today: date,
+    debts: dict[int, Debt],
 ) -> dict[int, int]:
     """This month's ask per goal ACCOUNT ID. The one place account rows
     become engine rows, so the budget header and the goals API cannot
-    build them differently."""
+    build them differently. ``debts`` (``goal_debts``) names the
+    pay-down goals among them, and is required: a caller that forgot it
+    would price a pay-down goal as savings."""
     rows = [
-        (str(account.id), meta, account.current_balance or 0)
+        (str(account.id), meta, goal_balance(meta, account, debts.get(account.id)))
         for account in accounts
         if (meta := goal_metadata(account.metadata_)) is not None
     ]
-    return {
-        int(key): ask for key, ask in allocate_month(figures, rows, today=today).items()
-    }
+    asks = allocate_month(
+        figures,
+        rows,
+        today=today,
+        debts={str(account_id): debt for account_id, debt in debts.items()},
+    )
+    return {int(key): ask for key, ask in asks.items()}
 
 
 OBSERVED_WINDOW_MONTHS = 3
@@ -327,15 +356,20 @@ async def goal_allocations(
     owner_user_id: int | None,
     today: date,
     figures: MonthlyFigures | None = None,
+    accounts: list[FinanceAccount] | None = None,
+    debts: dict[int, Debt] | None = None,
 ) -> dict[int, int]:
     """This month's evaluated ask per goal account id - the engine run
     once over the whole goal set, against the same income/committed
-    figures the budget header shows. A caller holding those figures
-    already (the goals listing resolves targets from them) passes them
-    in rather than paying for the same two queries twice."""
-    goal_accounts = await list_goals(db, owner_user_id=owner_user_id)
-    if not goal_accounts:
+    figures the budget header shows. A caller holding those figures,
+    the goal accounts or their debts already passes them in rather than
+    paying for the same queries twice."""
+    if accounts is None:
+        accounts = await list_goals(db, owner_user_id=owner_user_id)
+    if not accounts:
         return {}
     if figures is None:
         figures = await month_figures(db, owner_user_id=owner_user_id, today=today)
-    return asks_by_account(goal_accounts, figures, today=today)
+    if debts is None:
+        debts = await goal_debts(db, accounts)
+    return asks_by_account(accounts, figures, today=today, debts=debts)

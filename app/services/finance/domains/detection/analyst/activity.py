@@ -21,9 +21,9 @@ from app.services.finance.domains.detection.insights import (
 from app.services.finance.domains.ledger import queries as ledger_queries
 from app.services.finance.domains.planning.envelopes import envelope_metadata
 from app.services.finance.domains.planning.goals import (
-    goal_eta,
+    goal_balance,
+    goal_landing,
     goal_metadata,
-    goal_monthly_need,
     goal_progress,
 )
 from app.services.finance.models.planning import STILL_OPEN
@@ -209,7 +209,7 @@ def _goals_section(ctx: ReportContext) -> str | None:
         meta = goal_metadata(account.metadata_)
         if meta is None:
             continue
-        balance = account.current_balance or 0
+        balance = goal_balance(meta, account, ctx.goal_debts.get(account.id))
         pct = round(goal_progress(balance=balance, target=meta.target_amount) * 100)
         base = (
             f"- {account.name}: {_amount(balance)} of "
@@ -221,14 +221,18 @@ def _goals_section(ctx: ReportContext) -> str | None:
         if meta.status == "paused":
             lines.append(f"{base} (paused)")
             continue
-        rate = ctx.goal_rates.get(account.id)
-        eta = goal_eta(
+        # The evaluated ask is the plan's saving rate; a goal asking
+        # nothing lands at its observed rate, as the Goals tab says.
+        need = ctx.goal_asks.get(account.id, 0)
+        rate = need if need > 0 else ctx.goal_rates.get(account.id)
+        eta = goal_landing(
+            meta,
             balance=balance,
-            target=meta.target_amount,
-            monthly_rate=rate,
+            debt=ctx.goal_debts.get(account.id),
+            ask=need,
+            rate=rate,
             today=today,
         )
-        need = goal_monthly_need(meta, balance=balance, today=today)
         if eta is None:
             lines.append(f"{base}, at {_amount(rate or 0)}/mo: never")
         else:

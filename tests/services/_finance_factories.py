@@ -43,6 +43,47 @@ async def seed_account(
     )
 
 
+async def seed_loan(
+    svc: FinanceService,
+    db: Any,
+    name: str = "Pool loan",
+    *,
+    account_type: str = "loan",
+    current_balance: int | None = None,
+    owner_user_id: int = 1,
+    **terms: Any,
+) -> int:
+    """A liability with its lender's terms on file: by default the
+    hand-checked loan of the debt tests ($1,000 at 12%, $100 a month,
+    extra to principal, no penalty). ``terms`` are ``LoanTermsPayload``
+    fields; pass one as None to leave it unstated."""
+    from app.services.finance.domains.writes.terms import (
+        LoanTermsPayload,
+        loan_terms_execute,
+    )
+
+    account = await seed_account(
+        svc,
+        name=name,
+        account_type=account_type,
+        classification="liability",
+        owner_user_id=owner_user_id,
+        **({"current_balance": current_balance} if current_balance is not None else {}),
+    )
+    stated: dict[str, Any] = {
+        "outstanding_balance": 100_000,
+        "interest_rate_bps": 1_200,
+        "minimum_payment_amount": 10_000,
+        "extra_payment_treatment": "principal",
+        "prepayment_penalty": "none",
+    } | terms
+    await loan_terms_execute(
+        db, LoanTermsPayload(account_id=int(account.id), **stated), owner_user_id
+    )
+    await db.commit()
+    return int(account.id)
+
+
 async def seed_category(db: Any, name: str) -> FinanceCategory:
     """An expense category with the FULL slug normalization - one copy had
     "&" handling and two did not, which is exactly the drift this fixes."""

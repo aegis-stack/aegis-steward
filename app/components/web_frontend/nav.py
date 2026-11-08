@@ -371,6 +371,16 @@ def contact_tabs(
     }
 
 
+def account_path(account_id: int) -> str:
+    """The account's own URL; its pages hang off it."""
+    return f"{section('accounts').path}/{account_id}"
+
+
+def account_cover(account_id: int) -> str:
+    """The account's cover sheet: the one door every list opens."""
+    return f"{account_path(account_id)}/overview"
+
+
 def account_tabs(account_id: int, current: str, filed: int = 0) -> dict[str, Any]:
     """An account's two faces, as the sub-nav every section uses.
 
@@ -383,13 +393,13 @@ def account_tabs(account_id: int, current: str, filed: int = 0) -> dict[str, Any
     know about an account's paper before you click is whether there is
     any.
     """
-    base = f"{section('accounts').path}/{account_id}"
+    base = account_path(account_id)
     return {
         "nav_label": "Account",
         "nav_id": "account-tabs",
         "current_tab": current,
         "sub_nav": [
-            {"key": "cover", "label": "Overview", "href": f"{base}/overview"},
+            {"key": "cover", "label": "Overview", "href": account_cover(account_id)},
             {
                 "key": "documents",
                 "label": "Documents",

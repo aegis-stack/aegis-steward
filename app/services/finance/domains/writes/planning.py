@@ -53,11 +53,12 @@ async def _forecast(
     if meta.status != "active":
         return f"sets nothing aside while it is {meta.status}"
     today = current_date()
+    goal_accounts = await goals.list_goals(db, owner_user_id=None)
     rows = [
         SimpleNamespace(
             id=one.id, metadata_=one.metadata_, current_balance=one.current_balance
         )
-        for one in await goals.list_goals(db, owner_user_id=None)
+        for one in goal_accounts
         if one.id != account_id
     ]
     rows.append(
@@ -68,7 +69,9 @@ async def _forecast(
         )
     )
     figures = await allocation.month_figures(db, owner_user_id=None, today=today)
-    ask = allocation.asks_by_account(rows, figures, today=today).get(account_id or 0, 0)
+    ask = allocation.asks_by_account(
+        rows, figures, today=today, debts=await goals.goal_debts(db, goal_accounts)
+    ).get(account_id or 0, 0)
     said = f"sets aside {format_usd(ask)} on the 1st of each month"
     if (
         meta.target_date
