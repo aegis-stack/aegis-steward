@@ -22,6 +22,9 @@ from app.services.finance.domains.planning.recurring.book import (
     StreamBook,
     stream_book,
 )
+from app.services.finance.domains.planning.recurring.categories import (
+    stream_category_names,
+)
 from app.services.finance.domains.planning.recurring.forecast import (
     budget_drawdowns,
     goal_drawdowns,
@@ -49,7 +52,6 @@ from app.services.finance.domains.planning.recurring.streams import (
     pause_recurring,
     payment_stream_ids,
     resume_recurring,
-    stream_category_names,
     transfer_stream_ids,
     unmute_recurring,
     update_recurring,

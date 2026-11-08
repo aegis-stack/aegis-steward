@@ -7,6 +7,7 @@ from app.services.finance.jobs import (
     finance_envelope_credit_job,
     finance_file_blank_rows_job,
     finance_goal_auto_contribute_job,
+    finance_plan_check_job,
     finance_recompute_snapshots_job,
     finance_sync_connections_job,
 )
@@ -74,6 +75,15 @@ JOBS: tuple[ServiceJob, ...] = (
         "Finance: Email Bills Coming Due",
         {"trigger": "cron", "hour": 7, "minute": 0},
         server_only=True,
+    ),
+    # The plan checks itself (#354): the first morning of each quarter,
+    # actual net worth and saving against the saved path, after the
+    # night's snapshots so the figure is the one the pages show.
+    ServiceJob(
+        finance_plan_check_job,
+        "finance_plan_check",
+        "Finance: Check the Plan",
+        {"trigger": "cron", "month": "1,4,7,10", "day": 1, "hour": 3, "minute": 15},
     ),
     # No nightly analyst note: steward writes it on request (#232).
 )

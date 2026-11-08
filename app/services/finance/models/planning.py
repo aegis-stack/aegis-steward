@@ -18,6 +18,7 @@ from sqlalchemy import (
 from sqlmodel import Field, SQLModel
 
 from app.core.time import utcnow
+from app.services.finance.constants import DEFAULT_END_AGE, DEFAULT_RETIRE_AGE
 from app.services.finance.models.base import (
     _FK,
     _SCHEMA,
@@ -448,5 +449,44 @@ class FinanceInsight(SQLModel, table=True):
     metadata_: dict[str, Any] = Field(
         default_factory=dict, sa_column=Column("metadata", JSON)
     )
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class FinancePlan(SQLModel, table=True):
+    """The household's stated plan to retirement (#351): who is planning
+    (a birth year, the ages), what each kind of asset is assumed to earn
+    and take in, what retirement is assumed to cost, and the path those
+    assumptions drew when they were last saved - the line a quarter's
+    actual figure is checked against (#354). One row per owner."""
+
+    __tablename__ = "finance_plan"
+    __table_args__ = (
+        Index("uq_finance_plan_owner", "owner_user_id", unique=True),
+        {"schema": _SCHEMA},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    owner_user_id: int = Field()
+    birth_year: int | None = Field(default=None)
+    retire_age: int = Field(default=DEFAULT_RETIRE_AGE)
+    end_age: int = Field(default=DEFAULT_END_AGE)
+    # Basis points a year by type (``retirement.TYPES``).
+    returns: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column("returns", JSON)
+    )
+    volatility: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column("volatility", JSON)
+    )
+    # Cents a month by type, until retirement; None leaves the ledger's
+    # measured figure in charge.
+    contributions: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column("contributions", JSON)
+    )
+    spending: int | None = _bigint("spending")
+    # ``[[day, net_worth], ...]``: today and each year's end, as drawn
+    # when the plan was saved (``retirement.Path.saved``).
+    path: list[Any] = Field(default_factory=list, sa_column=Column("path", JSON))
+    path_saved_on: date | None = Field(default=None)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

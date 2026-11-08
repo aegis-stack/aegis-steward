@@ -109,20 +109,19 @@ async def propose_reading(
 ) -> Any | None:
     """Read a document and put what it says in front of somebody.
 
-    Two readings, and each stands on its own. What the document says
-    about ITSELF is read by pattern, always - one session, start to
-    finish. What it DEMANDS is read by a model, and only when the
-    document is filed on a matter - a request with no matter has nothing
-    to be a request on, and a model call on every scrap of paper is a
-    bill nobody agreed to.
+    Two readings, each on its own. What the document says about ITSELF
+    is read by pattern, always - one session, start to finish. What it
+    DEMANDS is read by a model, and only when the document is filed on
+    a matter - a request with no matter has nothing to be a request on,
+    and a model call on every scrap of paper is a bill nobody agreed to.
 
     Takes a way to OPEN a database rather than an open one, because the
     second reading waits on a model and must not be inside a transaction
     while it does - see ``OpenSession``.
     """
-    # Its own module, imported here: it reads with this module's helpers.
-    from app.services.documents.domains.reading import receipts
+    from app.services.documents.domains.reading import receipts  # reads with ours
     from app.services.documents.domains.reading.banks import propose_bank
+    from app.services.documents.domains.reading.benefits import propose_benefit
     from app.services.documents.domains.reading.statements import (
         check_filed_statement,
         record_card_statement,
@@ -130,12 +129,13 @@ async def propose_reading(
 
     async with open_session() as db:
         stranger = await _propose_contact(db, document_id, owner_user_id)
-        stated = await stated_balance(db, document_id)  # read once, used thrice
+        stated = await stated_balance(db, document_id)  # once, used thrice
         figure = stated and await propose_figure(
             db, document_id, owner_user_id, asked=_already_asked, stated=stated
         )
         metadata = await _propose_metadata(db, document_id, owner_user_id)
         bank = await propose_bank(db, document_id, owner_user_id)
+        benefit = await propose_benefit(db, document_id, owner_user_id)
         if stated is not None:
             await record_card_statement(db, document_id, stated)  # due (#341)
             await check_filed_statement(db, document_id, stated)  # agrees? (#321)
@@ -145,7 +145,7 @@ async def propose_reading(
     request = await _propose_demands(
         open_session, document_id, owner_user_id=owner_user_id, read_letter=read_letter
     )
-    return metadata or stranger or figure or bank or request
+    return metadata or stranger or figure or bank or benefit or request
 
 
 async def _propose_demands(

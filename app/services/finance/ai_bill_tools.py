@@ -28,12 +28,15 @@ async def bills() -> Bills:
     """
     # Not the raw expected_amount: null unless typed, 40 bills read "no amount".
     from app.services.finance.domains.ledger.queries.accounts import account_names
-    from app.services.finance.domains.planning.recurring import queries, streams
+    from app.services.finance.domains.planning.recurring import queries
+    from app.services.finance.domains.planning.recurring.categories import (
+        stream_category_names,
+    )
 
     async with get_async_session() as session:
         rows = await queries.active_streams(session, owner_user_id=None)
         accounts = await account_names(session, [s.account_id for s in rows])
-        categories = await streams.stream_category_names(session, {s.id for s in rows})
+        categories = await stream_category_names(session, {s.id for s in rows})
     return {
         "bills": [
             {

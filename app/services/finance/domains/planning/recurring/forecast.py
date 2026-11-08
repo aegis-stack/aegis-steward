@@ -28,11 +28,13 @@ from app.services.finance.domains.ledger import queries as ledger_queries
 from app.services.finance.domains.ledger.queries.accounts import EVERYONE, HOUSEHOLD
 from app.services.finance.domains.planning import allocation, budgets, goals, queries
 from app.services.finance.domains.planning.recurring import queries as recurring_queries
+from app.services.finance.domains.planning.recurring.categories import (
+    stream_category_names,
+)
 from app.services.finance.domains.planning.recurring.schedule import occurrences
 from app.services.finance.domains.planning.recurring.streams import (
     in_account_scope,
     payment_stream_ids,
-    stream_category_names,
     transfer_stream_ids,
 )
 from app.services.finance.models import FinanceRecurringStream

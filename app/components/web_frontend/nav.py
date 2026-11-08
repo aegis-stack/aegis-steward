@@ -214,13 +214,34 @@ SETTINGS_TABS: tuple[tuple[str, str, str], ...] = (
 
 def settings_nav(current: str) -> dict[str, Any]:
     """The Settings sub-nav context, for whichever module owns a tab."""
-    settings = section("settings")
+    return tabs_nav("settings", "Settings sections", SETTINGS_TABS, current)
+
+
+# The Projected section's two faces (#351): the cash walk, and the plan
+# to retirement.
+PROJECTED_TABS: tuple[tuple[str, str, str], ...] = (
+    ("cash", "Next two years", ""),
+    ("plan", "To retirement", "/plan"),
+)
+
+
+def projected_nav(current: str) -> dict[str, Any]:
+    """The Projected sub-nav context, for either of its routes."""
+    return tabs_nav("projected", "Projected views", PROJECTED_TABS, current)
+
+
+def tabs_nav(
+    key: str, label: str, tabs: tuple[tuple[str, str, str], ...], current: str
+) -> dict[str, Any]:
+    """A section's sub-nav context (``components/sub_nav.html``): its
+    ``(key, label, path suffix)`` tabs under the section's path."""
+    base = section(key).path
     return {
-        "nav_id": "settings-nav",
-        "nav_label": "Settings sections",
+        "nav_id": f"{key}-nav",
+        "nav_label": label,
         "sub_nav": [
-            {"key": key, "label": label, "href": settings.path + suffix, "count": 0}
-            for key, label, suffix in SETTINGS_TABS
+            {"key": tab, "label": text, "href": base + suffix, "count": 0}
+            for tab, text, suffix in tabs
         ],
         "current_tab": current,
     }

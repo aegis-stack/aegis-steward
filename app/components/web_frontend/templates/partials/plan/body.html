@@ -1,0 +1,65 @@
+{% from "components/macros/layout.html" import stats_strip, card, chart_panel, page_link %}
+{% from "components/macros/table.html" import data_table %}
+{% from "components/macros/form.html" import field, money_input, number_input, text_input, date_input, select, primary_button %}
+{% from "components/macros/feedback.html" import error_banner, empty_state %}
+<div id="plan" class="space-y-6">
+  {{ stats_strip(strip) }}
+  {% if not outcome.row %}
+  <p class="text-sm text-aegis-muted" data-unstated>Nothing stated yet: the line below runs on the defaults. State a birth year and what you expect to spend, and it becomes your plan.</p>
+  {% endif %}
+  {{ chart_panel("plan", "Net worth", "line", chart, subtitle="likely, and the band ordinary markets open") }}
+  {% call card("By type") %}
+  {{ data_table(type_columns, type_rows) }}
+  {% endcall %}
+
+  <div class="grid gap-6 lg:grid-cols-2">
+  {% call card("Assumptions", "stated by you; the greyed figures are what the ledger measures") %}
+  <form id="assumptions" {{ hx_swap(plan_page, "#plan", "post") }} class="space-y-4" aria-label="Plan assumptions">
+    {{ error_banner(errors) }}
+    <div class="grid grid-cols-3 gap-4">
+      {% call field("Birth year") %}{{ number_input("birth_year", values.birth_year, min=1900, max=today.year) }}{% endcall %}
+      {% call field("Retire at") %}{{ number_input("retire_age", values.retire_age, min=30, max=100) }}{% endcall %}
+      {% call field("Plan to age") %}{{ number_input("end_age", values.end_age, min=40, max=120) }}{% endcall %}
+    </div>
+    <table class="w-full text-sm">
+      <thead class="text-aegis-muted micro-label text-left"><tr><th class="py-1"></th><th class="py-1">Return %</th><th class="py-1">Swing %</th><th class="py-1">Put in a month</th></tr></thead>
+      <tbody>
+      {% for kind, label in types %}
+      <tr>
+        <th scope="row" class="py-1 pr-3 text-left font-normal text-aegis-text">{{ label }}</th>
+        <td class="py-1 pr-3">{{ number_input("return_" ~ kind, values["return_" ~ kind], step=0.25) }}</td>
+        <td class="py-1 pr-3">{{ number_input("swing_" ~ kind, values["swing_" ~ kind], step=0.25) }}</td>
+        <td class="py-1">{{ money_input("put_" ~ kind, values["put_" ~ kind], placeholder=values["put_" ~ kind ~ "_measured"]) }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% call field("Spending a month, in retirement") %}{{ money_input("spending", values.spending, placeholder=values.spending_measured) }}{% endcall %}
+    {{ primary_button("Save the plan", type="submit") }}
+  </form>
+  {% endcall %}
+
+  {% call card("Retirement income", "pensions and Social Security, from the day each starts") %}
+  {% if incomes %}
+  <ul class="text-sm space-y-1">
+    {% for income in incomes %}
+    <li data-income>{{ income.name }} · {{ income.monthly|money }} a month from {{ income.starts }} · {{ income.kind }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="text-sm text-aegis-muted">None declared. A benefit estimate on a filed statement proposes one; or state it here.</p>
+  {% endif %}
+  <form {{ hx_swap(income_page, "#plan", "post") }} class="space-y-4" aria-label="Declare retirement income">
+    {{ error_banner(income_errors) }}
+    <div class="grid grid-cols-2 gap-4">
+      {% call field("Name") %}{{ text_input("name", "", required=True) }}{% endcall %}
+      {% call field("Kind") %}{{ select("kind", income_kinds|as_options, "pension", blank=None, block=True) }}{% endcall %}
+      {% call field("A month") %}{{ money_input("monthly") }}{% endcall %}
+      {% call field("Starts") %}{{ date_input("starts", block=True) }}{% endcall %}
+    </div>
+    {{ primary_button("Add the income", type="submit") }}
+  </form>
+  <p class="text-xs text-aegis-muted">Edit or remove one on {{ page_link("/bills?tab=income", "Bills & Income") }}.</p>
+  {% endcall %}
+  </div>
+</div>

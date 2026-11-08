@@ -16,15 +16,12 @@ import pytest
 
 from app.services.documents.domains.reading.figures import balances
 from tests._session import opens
-
-
-def _pages(*lines: str) -> list[dict]:
-    return [{"page": 1, "text": "\n".join(lines)}]
+from tests.services._document_factories import pages
 
 
 class TestWhatAStatementSaysItHolds:
     def test_a_labelled_balance_with_its_own_date(self) -> None:
-        found = balances(_pages("New balance as of 09/07/26: $7,857.27"))
+        found = balances(pages("New balance as of 09/07/26: $7,857.27"))
         assert [(one.value_cents, one.as_of) for one in found] == [
             (785727, date(2026, 9, 7))
         ]
@@ -39,7 +36,7 @@ class TestWhatAStatementSaysItHolds:
             ("Current balance $0.00", 0),
             ("Statement balance: $912.10", 91210),
         ):
-            found = balances(_pages(line))
+            found = balances(pages(line))
             assert [one.value_cents for one in found] == [cents], line
 
     def test_money_that_is_not_a_balance(self) -> None:
@@ -53,10 +50,10 @@ class TestWhatAStatementSaysItHolds:
             "Credit limit $34,600",
             "Purchases +$0.00",
         ):
-            assert balances(_pages(line)) == [], line
+            assert balances(pages(line)) == [], line
 
     def test_a_line_with_no_money_is_not_a_figure(self) -> None:
-        assert balances(_pages("New balance as of 09/07/26:")) == []
+        assert balances(pages("New balance as of 09/07/26:")) == []
 
     def test_only_the_front_of_the_document(self) -> None:
         pages = [{"page": n, "text": "x"} for n in (1, 2)]
@@ -68,7 +65,7 @@ class TestWhatAStatementSaysItHolds:
         the detail. One figure, read once, from where it is first
         printed."""
         found = balances(
-            _pages("New balance: $7,857.27", "New balance as of 09/07/26: $7,857.27")
+            pages("New balance: $7,857.27", "New balance as of 09/07/26: $7,857.27")
         )
         assert len(found) == 1
         assert found[0].because == "New balance: $7,857.27"
@@ -80,30 +77,9 @@ class TestItReachesTheQueue:
     against the paper rather than taken on faith."""
 
     async def _statement(self, db, *lines: str):
-        from app.services.documents.models import Document, DocumentPage
+        from tests.services._document_factories import seed_paper
 
-        text = "\n".join(lines)
-        document = Document(
-            title="statement-9.pdf",
-            filename="statement-9.pdf",
-            storage_key=f"testcase/{abs(hash(text))}.pdf",
-            media_type="application/pdf",
-            content_hash=f"testcase-fig-{abs(hash(text))}",
-            size_bytes=9,
-        )
-        db.add(document)
-        await db.flush()
-        db.add(
-            DocumentPage(
-                document_id=document.id,
-                page_number=1,
-                status="read",
-                method="text",
-                text=text,
-            )
-        )
-        await db.flush()
-        return document
+        return await seed_paper(db, *lines)
 
     async def _held_account(self, db, mask: str, whose: str):
         from app.services.finance.domains.ledger.subjects import (

@@ -14,11 +14,7 @@ nothing is guessed from a name.
 import pytest
 
 from app.services.documents.domains.reading.identity import Known, identify
-
-
-def _pages(*lines: str) -> list[dict]:
-    return [{"page": 1, "text": "\n".join(lines)}]
-
+from tests.services._document_factories import pages
 
 ACCOUNT = Known(kind="account", target=47, how="mask", value="3639")
 DENTAL = Known(kind="party", target=7, how="domain", value="deltadentalins.com")
@@ -34,18 +30,18 @@ class TestTheAccountAStatementIsFor:
             "Card Account: ****3639",
             "ACCT #XXXX3639",
         ):
-            found = identify(_pages(line), [ACCOUNT])
+            found = identify(pages(line), [ACCOUNT])
             assert [one.target for one, _ in found] == [47], line
 
     def test_the_whole_number_printed_bare(self) -> None:
         """A real Chase statement prints "000000123403639" on every page
         with no label at all. Fifteen digits ending in the last four on
         file is not a year, an amount or a coincidence (2026-09-19)."""
-        found = identify(_pages("000000123403639"), [ACCOUNT])
+        found = identify(pages("000000123403639"), [ACCOUNT])
         assert [one.target for one, _ in found] == [47]
 
     def test_a_long_number_that_ends_somewhere_else(self) -> None:
-        assert identify(_pages("000000123401164"), [ACCOUNT]) == []
+        assert identify(pages("000000123401164"), [ACCOUNT]) == []
 
     def test_four_digits_alone_are_not_an_account(self) -> None:
         """A statement is full of four-digit numbers - a year, an amount,
@@ -56,20 +52,20 @@ class TestTheAccountAStatementIsFor:
             "Statement period 08/01/2026 - 3639",
             "3639",
         ):
-            assert identify(_pages(line), [ACCOUNT]) == []
+            assert identify(pages(line), [ACCOUNT]) == []
 
     def test_a_different_account_is_not_this_one(self) -> None:
-        assert identify(_pages("Account ending 1164"), [ACCOUNT]) == []
+        assert identify(pages("Account ending 1164"), [ACCOUNT]) == []
 
 
 class TestTheSenderByWhatTheyPrint:
     def test_a_website_on_the_letterhead(self) -> None:
-        found = identify(_pages("deltadentalins.com"), [DENTAL])
+        found = identify(pages("deltadentalins.com"), [DENTAL])
         assert [one.target for one, _ in found] == [7]
 
     def test_a_website_however_it_is_written(self) -> None:
         for line in ("www.deltadentalins.com", "https://deltadentalins.com/members"):
-            assert identify(_pages(line), [DENTAL]), line
+            assert identify(pages(line), [DENTAL]), line
 
     def test_a_phone_however_it_is_punctuated(self) -> None:
         for line in (
@@ -77,18 +73,18 @@ class TestTheSenderByWhatTheyPrint:
             "555.555.0161",
             "1-555-555-0161",
         ):
-            found = identify(_pages(line), [DSS])
+            found = identify(pages(line), [DSS])
             assert [one.target for one, _ in found] == [2], line
 
     def test_a_number_that_is_not_theirs(self) -> None:
-        assert identify(_pages("Call us at (555) 555-0165"), [DSS]) == []
+        assert identify(pages("Call us at (555) 555-0165"), [DSS]) == []
 
     def test_a_routing_number_names_the_bank(self) -> None:
-        found = identify(_pages("Routing #011000015"), [BANK])
+        found = identify(pages("Routing #011000015"), [BANK])
         assert [one.target for one, _ in found] == [1]
 
     def test_nine_digits_that_are_not_a_routing_number(self) -> None:
-        assert identify(_pages("Member since 221979364"), [BANK]) == []
+        assert identify(pages("Member since 221979364"), [BANK]) == []
 
 
 class TestWhatItCites:
@@ -114,7 +110,7 @@ class TestWhatItCites:
     def test_one_hit_per_thing(self) -> None:
         """A phone printed in the header and again in the footer is one
         sender, not two."""
-        found = identify(_pages("(555) 555-0161", "Questions? (555) 555-0161"), [DSS])
+        found = identify(pages("(555) 555-0161", "Questions? (555) 555-0161"), [DSS])
         assert len(found) == 1
 
 
@@ -239,15 +235,15 @@ class TestTheSenderByTheirAddress:
 
     def test_the_address_on_a_letters_first_line(self) -> None:
         found = identify(
-            _pages("From: Delta Dental <Claims@DeltaDentalIns.com>"), [ADDRESS]
+            pages("From: Delta Dental <Claims@DeltaDentalIns.com>"), [ADDRESS]
         )
         assert [(k.kind, k.target) for k, _ in found] == [("party", 7)]
 
     def test_case_is_the_senders_and_nobodys_to_match_on(self) -> None:
-        assert identify(_pages("CLAIMS@DELTADENTALINS.COM"), [ADDRESS])
+        assert identify(pages("CLAIMS@DELTADENTALINS.COM"), [ADDRESS])
 
     def test_a_different_mailbox_at_the_same_company_is_not_this_one(self) -> None:
-        assert identify(_pages("billing@deltadentalins.com"), [ADDRESS]) == []
+        assert identify(pages("billing@deltadentalins.com"), [ADDRESS]) == []
 
     @pytest.mark.asyncio
     async def test_addresses_on_file_are_known_strings(self, async_db_session) -> None:

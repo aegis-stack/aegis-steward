@@ -314,6 +314,72 @@ def test_every_planning_card_is_registered_and_advertised() -> None:
         "goal.update",
         "envelope.create",
         "envelope.update",
+        "plan.save",
     ):
         assert change_type in writes.registered_change_types()
         assert f"`{change_type}`" in PROPOSING_CHANGES
+
+
+class TestThePlanToRetirement:
+    """``plan.save``: the assumptions the Projected page's form takes,
+    as a card (#353). Only what is sent changes."""
+
+    @pytest.mark.queryspy(threshold=5)  # saved, described, changed, read back
+    @pytest.mark.asyncio
+    async def test_the_card_shows_before_and_after_and_keeps_the_rest(
+        self, async_db_session: AsyncSession
+    ) -> None:
+        from datetime import date
+
+        from sqlmodel import select
+
+        from app.services.finance.domains.planning import plan as plans
+        from app.services.finance.domains.writes.plan import (
+            PlanSavePayload,
+            plan_save_describe,
+            plan_save_execute,
+        )
+        from app.services.finance.models import FinancePlan
+
+        today = date(2026, 11, 8)
+        await plans.save_plan(
+            async_db_session,
+            owner_user_id=None,
+            today=today,
+            birth_year=1966,
+            retire_age=67,
+            contributions={"investments": 100_000},
+            spending=300_000,
+            runs=1,
+        )
+        payload = PlanSavePayload(retire_age=65, returns_bps={"investments": 550})
+
+        said = await _said(plan_save_describe, async_db_session, payload)
+        assert said == {
+            "Retirement age": "67 → 65",
+            "Investments return": "6.00% → 5.50%",
+        }
+
+        await plan_save_execute(async_db_session, payload, None)
+        stated = (
+            await plans.run_plan(
+                async_db_session, owner_user_id=None, today=today, runs=1
+            )
+        ).assumptions
+        assert (stated.birth_year, stated.retire_age) == (1966, 65)
+        assert (stated.rate("investments"), stated.rate("cash")) == (550, 200)
+        assert stated.spending == 300_000
+        # A type never stated stays unstated, so the ledger's measured
+        # figure keeps standing in for it; the card wrote no zero.
+        row = (await async_db_session.exec(select(FinancePlan))).one()
+        assert row.contributions == {"investments": 100_000}
+
+    def test_nothing_to_change_and_an_unknown_type_are_refused(self) -> None:
+        from pydantic import ValidationError
+
+        from app.services.finance.domains.writes.plan import PlanSavePayload
+
+        with pytest.raises(ValidationError):
+            PlanSavePayload()
+        with pytest.raises(ValidationError):
+            PlanSavePayload(returns_bps={"gold": 100})

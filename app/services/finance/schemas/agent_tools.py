@@ -12,7 +12,7 @@ display text, never computed on.
 
 from __future__ import annotations
 
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 
 class TransactionRow(TypedDict):
@@ -122,3 +122,33 @@ class Projection(TypedDict):
     upcoming_total_usd: NotRequired[str]
     bills: list[DueBill]
     points: list[ProjectionPoint]
+
+
+class PlanPoint(TypedDict):
+    year: int
+    age: int | None
+    net_worth_cents: int
+
+
+class RetirementIncome(TypedDict):
+    name: str
+    kind: str | None
+    monthly_cents: int
+    starts: str
+
+
+class RetirementPlan(TypedDict):
+    """The plan to retirement (#351-#353): what was assumed, where the
+    money stands by type, the line to the end age and the band of
+    simulated returns around it, with the chance the plan holds."""
+
+    as_of: str
+    plan_saved: bool
+    assumptions: dict[str, Any]
+    today: dict[str, Any]
+    at_retirement: PlanPoint | None
+    at_end: PlanPoint
+    band: dict[str, list[Any]]
+    chance_of_holding: float
+    runs: int
+    incomes: list[RetirementIncome]

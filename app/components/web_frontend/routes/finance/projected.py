@@ -15,7 +15,7 @@ from starlette.responses import Response
 
 from app.components.web_frontend import ranges
 from app.components.web_frontend.filters import dollars, short_date
-from app.components.web_frontend.nav import section
+from app.components.web_frontend.nav import projected_nav, section
 from app.components.web_frontend.rendering import render
 from app.components.web_frontend.routes.finance import subjects
 from app.services.finance.deps import get_finance_service, get_owner_user_id
@@ -134,6 +134,7 @@ async def page(
         "pages/projected.html",
         {
             "section": SECTION,
+            **projected_nav("cash"),
             **await subjects.chips(service, whose),
             "days": days,
             "ranges": RANGES,

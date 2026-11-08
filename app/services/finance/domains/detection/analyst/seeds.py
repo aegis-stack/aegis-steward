@@ -153,6 +153,9 @@ FINANCE_CHAT_TOOL_NAMES = (
     # the briefing, so "the balance six months out" got hand-rolled
     # from the bill list and then disowned as untrustworthy.
     "projection",
+    # The plan to retirement, computed: the band and the chance it holds
+    # are read, never estimated (#353).
+    "retirement",
     # The ids a proposal's payload takes - names alone cannot propose.
     "categories",
     # The bill surface: live streams, and the ranked shortlist of

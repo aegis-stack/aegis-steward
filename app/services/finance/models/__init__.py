@@ -61,6 +61,7 @@ from app.services.finance.models.planning import (
     FinanceBudgetCategory,
     FinanceBudgetMonth,
     FinanceInsight,
+    FinancePlan,
     FinanceRecurringStream,
     FinanceSpendingBaseline,
 )
@@ -105,6 +106,7 @@ __all__ = [
     "FinanceMerchantAlias",
     "FinanceNetWorthSnapshot",
     "FinancePendingChange",
+    "FinancePlan",
     "FinanceRecurringStream",
     "FinanceRule",
     "FinanceSecurity",

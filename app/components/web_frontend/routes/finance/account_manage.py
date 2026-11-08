@@ -24,6 +24,7 @@ from app.components.backend.api.finance.accounts import (
     update_secured_debt,
 )
 from app.components.web_frontend.filters import (
+    bps_to_input,
     cents_to_input,
     money_to_cents,
 )
@@ -429,7 +430,7 @@ def _as_input(term: Any, value: Any) -> str:
     if term.kind == "money":
         return cents_to_input(value)
     if term.kind == "rate":
-        return f"{value / 100:g}"
+        return bps_to_input(value)
     if term.kind == "date":
         return value.isoformat()
     return str(value)

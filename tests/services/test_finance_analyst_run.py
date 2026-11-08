@@ -316,6 +316,7 @@ class TestRunAnalystNote:
         assert note is None
         assert await _notes(async_db_session) == []
 
+    @pytest.mark.queryspy(threshold=3)  # yesterday's note, then today's
     @pytest.mark.asyncio
     async def test_the_note_is_not_fed_back_as_an_anomaly(
         self, async_db_session: AsyncSession, monkeypatch, use_test_session
@@ -343,6 +344,7 @@ class TestRunAnalystNote:
         anomalies = snapshot.split("OPEN ANOMALIES")[1].split("\n\n")[0]
         assert NOTE_TEXT not in anomalies
 
+    @pytest.mark.queryspy(threshold=3)  # yesterday's note, then today's
     @pytest.mark.asyncio
     async def test_yesterdays_headline_comes_back_as_memory(
         self, async_db_session: AsyncSession, monkeypatch, use_test_session

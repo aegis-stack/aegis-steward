@@ -308,7 +308,7 @@ RECONCILE_MARKER = "reconcile"
 # How accounts group in any account list (sidebar, filter, report), in
 # display order. Keyed by ``account_type``; unknown types fall into "Other".
 ACCOUNT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Banking", ("checking", "savings", "cash")),
+    ("Banking", ("checking", "savings", "cash", "money_market")),
     ("Credit Cards", ("credit_card",)),
     ("Investments", ("investment", "brokerage", "crypto")),
     ("Property", ("property", "vehicle")),
@@ -317,6 +317,17 @@ ACCOUNT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 PROPERTY_ACCOUNT_TYPE = "property"
+
+# The plan to retirement (#351): the ages it assumes before a household
+# states its own, and what marks a stream as retirement income
+# (``metadata_[INCOME_KIND]``, one of INCOME_KINDS).
+DEFAULT_RETIRE_AGE = 67
+DEFAULT_END_AGE = 95
+INCOME_KIND = "income_kind"
+INCOME_KINDS: dict[str, str] = {
+    "pension": "Pension",
+    "social_security": "Social Security",
+}
 
 # Account types whose detail view is holdings (positions), not transactions.
 INVESTMENT_ACCOUNT_TYPES = frozenset({"brokerage", "investment", "crypto"})
