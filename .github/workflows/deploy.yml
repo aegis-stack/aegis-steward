@@ -1,0 +1,57 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      rolling:
+        description: Deploy without downtime (aegis deploy --rolling)
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Load deploy SSH key
+      uses: webfactory/ssh-agent@v0.9.1
+      with:
+        ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+    - name: Trust server host key
+      run: ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Write the deploy config
+      env:
+        DEPLOY_CONFIG: ${{ secrets.DEPLOY_CONFIG }}
+      run: mkdir -p .aegis && printf '%s\n' "$DEPLOY_CONFIG" > .aegis/deploy.yml
+
+    - name: Write the deploy env
+      env:
+        DEPLOY_ENV: ${{ secrets.DEPLOY_ENV }}
+      run: if [ -n "$DEPLOY_ENV" ]; then printf '%s\n' "$DEPLOY_ENV" > .env.deploy; fi
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+
+    - name: Resolve the aegis-stack this project is on
+      id: aegis
+      run: |
+        # Not .copier-answers.yml: its _commit still says v0.13.0, which
+        # predates rolling deploys (the project's real base moved with
+        # #505). Pinned to the release that wrote this workflow until the
+        # answers file is brought up to date by an aegis update.
+        ref=v0.19.1
+        echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+    - name: Deploy
+      env:
+        ROLLING: ${{ github.event_name != 'workflow_dispatch' || inputs.rolling }}
+      run: |
+        flags=; if [ "$ROLLING" = true ]; then flags=--rolling; fi
+        uvx --from git+https://github.com/lbedner/aegis-stack@${{ steps.aegis.outputs.ref }} aegis deploy $flags
