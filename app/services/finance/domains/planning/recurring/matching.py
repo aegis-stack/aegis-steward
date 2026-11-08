@@ -27,6 +27,22 @@ from app.services.finance.models import (
 from app.services.finance.utils import current_date
 
 
+def named_for(
+    name: str | None, merchant_id: int | None, txn: FinanceTransaction
+) -> bool:
+    """Whether a row carries a bill's own payee, or its name in the
+    descriptor: the matcher's first cut, and the only kind of candidate
+    the cleanup read calls evidence (the amount shortlist offered ATM
+    withdrawals to the car wash, confirmed live)."""
+    if merchant_id is not None and txn.merchant_id == merchant_id:
+        return True
+    name_cf = (name or "").casefold()
+    if not name_cf:
+        return False
+    haystack = f"{txn.name or ''} {txn.original_description or ''}".casefold()
+    return name_cf in haystack
+
+
 async def recurring_match_candidates(
     db: AsyncSession,
     stream_id: int,
@@ -103,17 +119,6 @@ async def recurring_match_candidates(
     # even when a stranger's amount lands a dollar nearer - ranked
     # purely on figures, last year's Etsy outranked rows literally
     # named after the bill (confirmed live).
-    def named_for(
-        name: str | None, merchant_id: int | None, txn: FinanceTransaction
-    ) -> bool:
-        if merchant_id is not None and txn.merchant_id == merchant_id:
-            return True
-        name_cf = (name or "").casefold()
-        if not name_cf:
-            return False
-        haystack = f"{txn.name or ''} {txn.original_description or ''}".casefold()
-        return name_cf in haystack
-
     def named_alike(txn: FinanceTransaction) -> bool:
         return named_for(stream.name, stream.merchant_id, txn)
 

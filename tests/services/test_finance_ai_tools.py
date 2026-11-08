@@ -58,8 +58,9 @@ def _tools_use_test_session(
     # The balance sheet and the write tools live in their own modules,
     # each with their own import of the session opener.
     from app.services.finance import ai_account_tools, ai_bill_tools, ai_write_tools
+    from app.services.finance.domains.ledger import cleanup
 
-    for module in (ai_account_tools, ai_bill_tools, ai_write_tools):
+    for module in (ai_account_tools, ai_bill_tools, cleanup, ai_write_tools):
         monkeypatch.setattr(module, "get_async_session", opens(session))
 
 
@@ -1047,7 +1048,7 @@ async def test_bill_candidates_returns_the_ranked_shortlist(
         account.id,
         -100_000,
         date(2026, 7, 31),
-        name="Recurring Withdrawal CK *Maple Nursing Ca",
+        name="Recurring Withdrawal CK *Maple Nursing Care",
         owner_user_id=None,
     )
     await seed_txn(  # wrong direction: never a candidate
@@ -1068,6 +1069,138 @@ async def test_bill_candidates_returns_the_ranked_shortlist(
     assert top["amount_cents"] == -100_000
     assert top["date"] == "2026-07-31"
     assert bill["stream_id"] == stream.id
+
+
+@pytest.mark.asyncio
+async def test_cleanup_candidates_says_what_the_ledger_already_knows(
+    svc: FinanceService, session: AsyncSession
+) -> None:
+    """One read for "clean up" (#597): every uncategorized row in the
+    window, each with the best evidence the ledger holds for it - the
+    payee's precedent, or the overdue bill it could be paying, with that
+    bill's category - and none for a row nothing speaks to. A feed's
+    duplicate row and a row before the window stay out."""
+    from app.services.finance.domains.ledger.two_feeds import pair
+
+    account = await seed_account(svc)
+    groceries = await seed_category(session, "Food:Groceries")
+    nursing = await seed_category(session, "Health:Nursing")
+    today = current_date()
+    filed = await seed_txn(
+        svc,
+        account.id,
+        -4_000,
+        today - timedelta(days=50),
+        name="Shoprite",
+        category_id=groceries.id,
+        owner_user_id=None,
+    )
+    precedent = await seed_txn(
+        svc,
+        account.id,
+        -4_200,
+        today - timedelta(days=9),
+        name="Shoprite",
+        owner_user_id=None,
+    )
+    stream = await seed_stream(
+        svc,
+        name="Maple Nursing Care",
+        expected_amount=100_000,
+        next_expected_date=today - timedelta(days=1),
+        account_id=account.id,
+    )
+    paid = await seed_txn(  # last month's payment: the bill's category
+        svc,
+        account.id,
+        -100_000,
+        today - timedelta(days=31),
+        name="Recurring Withdrawal CK *Maple Nursing Care",
+        category_id=nursing.id,
+        owner_user_id=None,
+    )
+    paid.recurring_stream_id = stream.id
+    session.add(paid)
+    payment = await seed_txn(
+        svc,
+        account.id,
+        -100_000,
+        today - timedelta(days=1),
+        name="Recurring Withdrawal CK *Maple Nursing Care",
+        owner_user_id=None,
+    )
+    nothing = await seed_txn(
+        svc,
+        account.id,
+        -700,
+        today - timedelta(days=2),
+        name="Flyt Smoke",
+        owner_user_id=None,
+    )
+    stranger = await seed_txn(  # the bill's band admits it; its name does not
+        svc,
+        account.id,
+        -100_000,
+        today - timedelta(days=3),
+        name="Dental Village",
+        owner_user_id=None,
+    )
+    twin = await seed_txn(
+        svc,
+        account.id,
+        -4_200,
+        today - timedelta(days=8),
+        name="Shoprite",
+        owner_user_id=None,
+    )
+    pair(precedent, twin)
+    session.add(twin)
+    await seed_txn(  # before the window
+        svc,
+        account.id,
+        -900,
+        today - timedelta(days=40),
+        name="Old",
+        owner_user_id=None,
+    )
+    waiting = await seed_txn(  # a card for it is already on the queue
+        svc,
+        account.id,
+        -4_300,
+        today - timedelta(days=4),
+        name="Shoprite",
+        owner_user_id=None,
+    )
+    await svc.propose_change(
+        "transaction.categorize",
+        {"transaction_id": waiting.id, "category_id": groceries.id},
+    )
+    await session.commit()
+
+    result = await ai_tools.cleanup_candidates(days=30)
+
+    rows = {r["id"]: r for r in result["uncategorized"]}
+    assert set(rows) == {precedent.id, payment.id, nothing.id, stranger.id}
+    assert filed.id not in rows and twin.id not in rows
+    assert (
+        rows[precedent.id]["evidence"],
+        rows[precedent.id]["suggested_category_id"],
+    ) == ("precedent", groceries.id)
+    assert (rows[payment.id]["evidence"], rows[payment.id]["candidate_bill_id"]) == (
+        "bill",
+        stream.id,
+    )
+    # The match files the category; the name is for her to say, not to send.
+    assert rows[payment.id]["suggested_category"] == nursing.name
+    assert rows[payment.id]["suggested_category_id"] is None
+    assert rows[nothing.id]["evidence"] is None
+    # Live: the matcher's amount shortlist offered ATM withdrawals and a
+    # dentist to the car wash; a bill is evidence only for a row that
+    # carries its name (2026-11-07).
+    assert rows[stranger.id]["evidence"] is None
+    # "Clean up" twice filed every card twice (live, 2026-11-07).
+    assert waiting.id not in rows
+    assert result["total"] == 4
 
 
 @pytest.mark.asyncio

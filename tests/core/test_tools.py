@@ -146,6 +146,7 @@ EXPECTED_EFFECTS = {
     "categories": "read",
     "bills": "read",
     "bill_candidates": "read",
+    "cleanup_candidates": "read",
     "tags": "read",
     # Reads the change types' contracts; files nothing.
     "change_types": "read",

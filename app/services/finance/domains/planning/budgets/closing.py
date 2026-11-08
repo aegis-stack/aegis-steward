@@ -16,6 +16,7 @@ from datetime import timedelta
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.finance.domains.planning.budgets import queries
+from app.services.finance.domains.planning.budgets.months import Tally
 from app.services.finance.domains.planning.budgets.summary import (
     budget_summary,
     month_actuals,
@@ -39,28 +40,57 @@ async def close_month(
 async def _record(
     db: AsyncSession, owner_user_id: int | None, period_month: int
 ) -> FinanceBudgetMonth:
-    _start, end = queries.month_bounds(period_month)
+    record = FinanceBudgetMonth(
+        owner_user_id=stored_owner(owner_user_id), period_month=period_month
+    )
+    await _write(db, record, owner_user_id)
+    db.add(record)
+    await db.flush()
+    return record
+
+
+async def _write(
+    db: AsyncSession, record: FinanceBudgetMonth, owner_user_id: int | None
+) -> None:
+    """The month as of its own last day, onto its record."""
+    _start, end = queries.month_bounds(record.period_month)
     summary = await budget_summary(
         db,
         owner_user_id=owner_user_id,
-        period_month=period_month,
+        period_month=record.period_month,
         today=end - timedelta(days=1),
     )
     # Read as of its last day, which still has that day left; recorded,
     # the month is over.
     summary.stats.days_left_in_period = 0
     actuals = await month_actuals(
-        db, owner_user_id=owner_user_id, period_month=period_month
+        db, owner_user_id=owner_user_id, period_month=record.period_month
     )
-    record = FinanceBudgetMonth(
-        owner_user_id=stored_owner(owner_user_id),
-        period_month=period_month,
-        summary=summary.model_dump(mode="json"),
-        actuals=actuals.model_dump(mode="json"),
-    )
-    db.add(record)
-    await db.flush()
-    return record
+    actuals.filed = await _filed(db, owner_user_id, record.period_month)
+    record.summary = summary.model_dump(mode="json")
+    record.actuals = actuals.model_dump(mode="json")
+
+
+async def _filed(
+    db: AsyncSession, owner_user_id: int | None, period_month: int
+) -> dict[int, int]:
+    """What the month's own rows say each category spent: the part of the
+    record the user can change by hand. Re-filing rows moves it; a
+    bill changing later does not."""
+    start, end = queries.month_bounds(period_month)
+    tally = Tally()
+    for (
+        cat_id,
+        merchant,
+        description,
+        name,
+        amount,
+        _stream,
+    ) in await queries.outflow_tuples(
+        db, owner_user_id=owner_user_id, start=start, end=end
+    ):
+        tally.add(cat_id, merchant, description, name, amount)
+    return tally.by_category
 
 
 @dataclass(frozen=True)
@@ -96,6 +126,19 @@ async def month_as_closed(
     if record is None:
         return None
     was = BudgetMonthActuals.model_validate(record.actuals)
+    # A row the user re-filed is the month's own truth, so the record is
+    # rewritten as of its last day (five October withdrawals approved
+    # into a category, the page unmoved - live, 2026-11-07). A row merely
+    # added since is said below, not written in (#319).
+    if was.filed != await _filed(db, owner_user_id, period_month):
+        await _write(db, record, owner_user_id)
+        await db.flush()
+        # Just written from the rows as they are: nothing changed since.
+        return ClosedMonth(
+            summary=BudgetSummaryResponse.model_validate(record.summary),
+            actuals=BudgetMonthActuals.model_validate(record.actuals),
+            now=None,
+        )
     now = await month_actuals(
         db, owner_user_id=owner_user_id, period_month=period_month
     )

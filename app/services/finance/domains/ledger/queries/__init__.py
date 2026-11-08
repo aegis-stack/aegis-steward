@@ -60,6 +60,7 @@ from app.services.finance.domains.ledger.queries.categories import (
     category_names_by_id,
     category_spend_totals,
     category_usage_rows,
+    paired_duplicates,
     spending_rows,
 )
 from app.services.finance.domains.ledger.queries.changes import (
@@ -171,6 +172,7 @@ __all__ = [
     "balance_snapshots_between",
     "categories",
     "categorized_history",
+    "paired_duplicates",
     "category_alias_ids",
     "category_by_id",
     "category_by_slug",

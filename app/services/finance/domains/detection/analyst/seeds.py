@@ -160,6 +160,8 @@ FINANCE_CHAT_TOOL_NAMES = (
     # proposed FROM the shortlist, never from lookalike guessing.
     "bills",
     "bill_candidates",
+    # "clean up": the uncategorized with the ledger's evidence (#597)
+    "cleanup_candidates",
     # The limits the user actually SET, and spend against them. Asked
     # "what is our budget for Medicine/Drugs?" the agent answered that
     # the budget target "isn't exposed here" - correctly: every other

@@ -452,6 +452,16 @@ async def suggest_categories(
         key = row_payee_key(row)
         if key:
             tally[key][row.category_id] += 1
+    # A bank row the two-feeds rule paired with a filed export row is
+    # that charge under the bank's name: "GOTHAM CIGARS" learns what
+    # "GOTHAM" was filed as, so the bank-only charges after the exports
+    # stop are not strangers (#597).
+    filed = {row.id: row.category_id for row in categorized_rows}
+    for twin in await queries.paired_duplicates(db, owner_user_id=owner_user_id):
+        category_id = filed.get(twin.canonical_transaction_id)
+        key = row_payee_key(twin)
+        if key and category_id is not None:
+            tally[key][category_id] += 1
 
     candidates, _total = await transactions.uncategorized_transactions(
         db, owner_user_id=owner_user_id, limit=None

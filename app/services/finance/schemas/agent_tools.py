@@ -71,6 +71,23 @@ class BillCandidates(TypedDict):
     bills: list[BillWithCandidates]
 
 
+class CleanupRow(TransactionRow):
+    """An uncategorized row with the best evidence the ledger holds for
+    it: the payee's precedent, or the overdue bill it could be paying."""
+
+    evidence: str | None  # precedent | bill | None
+    suggested_category: str | None
+    suggested_category_id: int | None  # a transaction.categorize's category_id
+    candidate_bill_id: int | None  # the stream a recurring.match takes
+    bill_name: str | None
+
+
+class Cleanup(TypedDict):
+    days: int
+    total: int
+    uncategorized: list[CleanupRow]  # newest first
+
+
 class DueBill(TypedDict):
     name: str
     date: str  # when the walk pays it (an overdue bill lands today)

@@ -951,6 +951,46 @@ class TestAPastMonth:
         assert "$200.00" in changed and "$230.00" in changed
 
     @pytest.mark.queryspy(threshold=3)  # recorded, then read back
+    async def test_refiling_a_row_of_a_closed_month_rewrites_its_record(
+        self,
+        client: TestClient,
+        finance: FinanceService,
+        async_db_session: AsyncSession,
+        budget: Budget,
+        ledger: Ledger,
+    ) -> None:
+        """Live: five October withdrawals approved into Canibus, and the
+        October page still showed the line as recorded on the 31st
+        (2026-11-07). A row the user re-files is the month's own truth:
+        the record is rewritten as of its last day. A row merely added is
+        still said, not written in (the test above)."""
+        from sqlmodel import select
+
+        from app.services.finance.domains.planning.budgets import close_month
+        from app.services.finance.models import FinanceTransaction
+
+        period = await self._two_months_back(finance, async_db_session, budget, ledger)
+        await close_month(async_db_session, owner_user_id=None, period_month=period)
+        await async_db_session.commit()
+        market = (
+            await async_db_session.exec(
+                select(FinanceTransaction).where(
+                    FinanceTransaction.name == "Market",
+                    FinanceTransaction.category_id == budget.groceries,
+                    FinanceTransaction.amount == -8_000,
+                )
+            )
+        ).one()
+        await finance.categorize_transaction(market.id, budget.fuel)
+        await async_db_session.commit()
+
+        page = client.get("/budget?month=-2").text
+
+        assert stats(page)["Budgets"] == "$200.00"
+        assert stats(page)["Money out"] == "$200.00"
+        none(page, "[data-changed-since]")
+
+    @pytest.mark.queryspy(threshold=3)  # recorded, then read back
     async def test_a_recorded_month_has_no_days_left(
         self,
         finance: FinanceService,
