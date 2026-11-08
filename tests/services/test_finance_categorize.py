@@ -121,6 +121,53 @@ class TestSuggestCategories:
         assert result.skipped == 1
 
     @pytest.mark.asyncio
+    async def test_a_feed_pair_teaches_the_banks_name_the_exports_category(
+        self, svc: FinanceService, async_db_session: AsyncSession
+    ) -> None:
+        """The export says "Gotham", filed; the bank says "Gotham Cigars".
+        The two-feeds rule paired them as one charge, so the bank's name
+        has a precedent - the pair's - and the next bank-only charge, after
+        the exports stop, gets it (#597)."""
+        from app.services.finance.domains.ledger.two_feeds import pair
+
+        checking = await _account(svc, "Checking", "checking", "asset")
+        smokes = await svc.get_or_create_category_from_hint("Entertainment:Cigars")
+        for day in (1, 2):
+            export = await svc.create_transaction(
+                account_id=checking.id,
+                amount=-3648,
+                txn_date=date(2026, 8, day),
+                owner_user_id=1,
+                name="Gotham",
+            )
+            await svc.categorize_transaction(
+                export.id, smokes.id, owner_user_id=1, source="user"
+            )
+            bank = await svc.create_transaction(
+                account_id=checking.id,
+                amount=-3648,
+                txn_date=date(2026, 8, day),
+                owner_user_id=1,
+                name="Gotham Cigars",
+            )
+            pair(export, bank)
+            async_db_session.add(bank)
+        await async_db_session.flush()
+        fresh = await svc.create_transaction(
+            account_id=checking.id,
+            amount=-3648,
+            txn_date=date(2026, 10, 13),
+            owner_user_id=1,
+            name="Gotham Cigars",
+        )
+
+        result = await svc.suggest_categories(owner_user_id=1)
+
+        assert [(s.transaction_id, s.category_id) for s in result.items] == [
+            (fresh.id, smokes.id)
+        ]
+
+    @pytest.mark.asyncio
     async def test_tied_precedent_is_skipped_not_guessed(
         self, svc: FinanceService
     ) -> None:
@@ -161,6 +208,7 @@ class TestSuggestCategories:
         assert result.skipped == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.queryspy(threshold=3)  # two sweeps, each its own fetch
     async def test_transaction_ids_scopes_the_sweep(self, svc: FinanceService) -> None:
         """A checkbox selection: candidates are narrowed to the given ids,
         but the precedent tally still draws on the owner's full history -

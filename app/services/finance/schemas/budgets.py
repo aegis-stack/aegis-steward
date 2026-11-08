@@ -62,6 +62,9 @@ class BudgetMonthActuals(BaseModel):
     money_out: int
     # Credits nobody filed: in neither figure until they are (#316).
     unfiled: int = 0
+    # On a month's record only: what its rows said each category spent
+    # when it was written, so re-filing a row is seen (closing.py).
+    filed: dict[int, int] = {}
 
 
 class LineMonth(BaseModel):

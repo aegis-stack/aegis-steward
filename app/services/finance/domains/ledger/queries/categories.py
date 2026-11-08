@@ -364,3 +364,18 @@ async def categorized_history(
     ]
     filters.extend(owner_filters(FinanceTransaction.owner_user_id, owner_user_id))
     return list((await db.exec(select(FinanceTransaction).where(*filters))).all())
+
+
+async def paired_duplicates(
+    db: AsyncSession, *, owner_user_id: int | None = None
+) -> list[FinanceTransaction]:
+    """Every live row another feed's row stands for (``dedup_status``
+    duplicate, ``canonical_transaction_id`` set): the bank's wording of a
+    charge the export filed, which is a precedent for that wording (#597)."""
+    filters = [
+        FinanceTransaction.deleted_at.is_(None),
+        FinanceTransaction.dedup_status == "duplicate",
+        FinanceTransaction.canonical_transaction_id.is_not(None),
+    ]
+    filters.extend(owner_filters(FinanceTransaction.owner_user_id, owner_user_id))
+    return list((await db.exec(select(FinanceTransaction).where(*filters))).all())

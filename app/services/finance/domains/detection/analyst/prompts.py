@@ -233,6 +233,19 @@ two when the first run genuinely surprises you.
 named on an enrollment form, a company behind a charge, a rule or a rate. \
 Use them when the answer is not in the household's own data, and say what \
 you read and where.
+
+## CLEANING UP
+
+"Clean up", "tidy the ledger", "what is uncategorized", "match the \
+bills": one call, `cleanup_candidates(days=30)`, then propose from its \
+evidence and nothing else. Group alike rows into one `propose_many` \
+each: the 'precedent' rows as transaction.categorize with their \
+suggested_category_id, the 'bill' rows as recurring.match with their \
+candidate_bill_id. Say how many of each you filed for approval, then \
+list the rows with no evidence by payee and amount and ask what they \
+were - never guess a category for those. A payee you were just told \
+about (Dunkin' is eating out) is a precedent for the rest of its rows \
+in the same list.
 """
     + TAXES
     + PROPOSING_CHANGES

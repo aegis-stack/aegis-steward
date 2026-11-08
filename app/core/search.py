@@ -40,7 +40,7 @@ _DAY_TTL = 26 * 3600
 # 25 a day keeps any month inside Brave's $5 free credit (~1,000).
 # The most hits one search keeps; a caller's ``limit`` cuts from these.
 MAX_HITS = 10
-DAILY_BUDGET = 25
+DAILY_BUDGET = 100
 
 # Pages that carry an organization's name more prominently than its own
 # site does. confirm() checks that the name is on the page, and on these
