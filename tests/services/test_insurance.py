@@ -302,13 +302,13 @@ class TestIllianaReadsPolicies:
         assert mine["claims"][0]["service_on"] == "2026-08-12"
 
     def test_the_prompt_says_the_policy_holds_the_figures(self) -> None:
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
+        from app.services.finance.domains.detection.analyst.prompt_changes import (
+            PROPOSING_CHANGES,
         )
 
-        assert "policy.create" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "claim.record" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "never in a contact's note" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "policy.create" in PROPOSING_CHANGES
+        assert "claim.record" in PROPOSING_CHANGES
+        assert "never in a contact's note" in PROPOSING_CHANGES
 
 
 class TestAClaimIsPaid:

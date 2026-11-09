@@ -6,6 +6,11 @@ from dataclasses import dataclass
 import re
 from typing import Any, TypedDict
 
+# Pages are named rather than run together when a model reads them: a
+# figure's meaning often depends on which page it came off, and
+# statements repeat their headings.
+PAGE_HEADING = "--- page {number} ---\n"
+
 # How much a line may say BESIDES the thing it names. "Combined Contract
 # and Disclosure Form" is a heading; "Did you know this statement is
 # available electronically" is prose that happens to contain the word.

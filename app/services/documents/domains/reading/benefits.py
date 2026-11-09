@@ -86,14 +86,11 @@ async def propose_benefit(
     no card - a stream that starts "at 67" for a household that never
     said when 67 is would start today.
     """
-    from app.services.documents.domains.reading.proposals import (
-        PROPOSED_BY,
-        _already_asked,
-        _read_pages,
-    )
+    from app.services.documents.domains.reading.asked import already_asked, read_pages
+    from app.services.documents.domains.reading.proposals import PROPOSED_BY
     from app.services.finance.service import INCOME_KINDS, plan_row, propose
 
-    read = await _read_pages(db, document_id)
+    read = await read_pages(db, document_id)
     found = benefits(read)
     if found is None:
         return None
@@ -104,7 +101,7 @@ async def propose_benefit(
             starts = date(plan.birth_year + found.start_age, 1, 1)
     if starts is None:
         return None
-    if await _already_asked(db, DECLARE, document_id):
+    if await already_asked(db, DECLARE, document_id):
         return None
     return await propose(
         db,

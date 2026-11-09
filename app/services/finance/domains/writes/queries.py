@@ -40,6 +40,7 @@ async def list_changes(
     owner_user_id: int | None = None,
     status: str | None = "pending",
     proposed_by_agent: str | None = None,
+    change_type: str | None = None,
 ) -> list[FinancePendingChange]:
     """Newest first. ``status=None`` returns the full audit trail;
     ``proposed_by_agent`` narrows to one proposer's cards, which is how an
@@ -49,6 +50,8 @@ async def list_changes(
     )
     if status is not None:
         query = query.where(FinancePendingChange.status == status)
+    if change_type is not None:
+        query = query.where(FinancePendingChange.change_type == change_type)
     if proposed_by_agent is not None:
         query = query.where(FinancePendingChange.proposed_by_agent == proposed_by_agent)
     if owner_user_id is not None:

@@ -37,6 +37,9 @@ _NOTE_INSIGHT_TYPES = frozenset({ANALYST_NOTE_INSIGHT_TYPE, DEEP_DIVE_INSIGHT_TY
 
 SNAPSHOT_MODULE_SLUG = "finance_snapshot"
 AMAZON_EXPORTS_MODULE_SLUG = "amazon-exports"
+# What she may propose, read from the change-type registry's own prompt
+# text at each turn rather than copied onto her row once.
+CHANGES_MODULE_SLUG = "finance_changes"
 
 
 ANALYST_SURFACE = "finance-analyst"

@@ -4,7 +4,7 @@ labels and totals over them. Writes stay in ``service.py``.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time
 
 from sqlalchemy import func
 from sqlmodel import col, select
@@ -50,6 +50,23 @@ async def unfiled_documents(
     if owner_user_id is not None:
         query = query.where(Document.owner_user_id == owner_user_id)
     return [int(found) for found in (await db.exec(query.order_by(Document.id))).all()]
+
+
+async def documents_holding(
+    db: AsyncSession, key: str, *, owner_user_id: int | None, since: date
+) -> list[Document]:
+    """Live documents that arrived since ``since`` and hold ``key`` in
+    their metadata: the young paper still waiting for its row
+    (``reading.checks_waiting``), found in SQL rather than by reading
+    every row's JSON back."""
+    query = select(Document).where(
+        col(Document.deleted_at).is_(None),
+        col(Document.created_at) >= datetime.combine(since, time.min),
+        col(Document.meta_data)[key].as_string().is_not(None),
+    )
+    if owner_user_id is not None:
+        query = query.where(Document.owner_user_id == owner_user_id)
+    return list((await db.exec(query)).all())
 
 
 async def document_by_id(

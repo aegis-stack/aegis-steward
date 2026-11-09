@@ -16,6 +16,11 @@ from starlette.responses import Response
 
 from app.components.web_frontend.documents import file_upload
 from app.components.web_frontend.rendering import close_dialog, dialog, with_toast
+from app.components.web_frontend.routes.finance.register import (
+    RegisterFilters,
+    listing_for,
+    register_filters,
+)
 from app.components.web_frontend.routes.finance.transactions import (
     _txns,
     rows_response,
@@ -23,9 +28,37 @@ from app.components.web_frontend.routes.finance.transactions import (
 from app.components.web_frontend.routes.requests import ACCEPTS
 from app.services.finance.constants import transaction_tag
 from app.services.finance.deps import get_finance_service, get_owner_user_id
-from app.services.finance.service import FinanceService
+from app.services.finance.service import FinanceService, receipts_packet
 
 router = APIRouter(prefix="/transactions")
+
+# How many rows leave in one packet: a year of a busy household, not a
+# page. ponytail: one zip in memory; stream it if a packet ever outgrows this.
+PACKET_ROWS = 5000
+
+
+@router.get("/export", include_in_schema=False)
+async def export_packet(
+    filters: Annotated[RegisterFilters, Depends(register_filters)],
+    service: Annotated[FinanceService, Depends(get_finance_service)],
+    owner_user_id: Annotated[int | None, Depends(get_owner_user_id)],
+    account_id: int | None = None,
+) -> Response:
+    """The register's filtered rows, with their receipts and claims, as
+    one zip (#332): the same listing the page shows."""
+    listing = await listing_for(
+        filters, account_id, service, owner_user_id, page_size=PACKET_ROWS
+    )
+    packet = await receipts_packet(
+        service.db, listing.items, owner_user_id=owner_user_id
+    )
+    return Response(
+        packet,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="transactions-with-receipts.zip"'
+        },
+    )
 
 
 def _form(

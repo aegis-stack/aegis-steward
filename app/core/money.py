@@ -49,6 +49,12 @@ def with_dollars(value: Any) -> Any:
     return out
 
 
+def plain_dollars(cents: int) -> str:
+    """Cents as a bare dollar figure, "20.00": what a CSV or a regex
+    reads, where ``format_money`` is what a person reads."""
+    return f"{cents / 100:.2f}"
+
+
 def format_money(
     cents: int | None, currency: str = "USD", whole: bool = False, signed: bool = False
 ) -> str:

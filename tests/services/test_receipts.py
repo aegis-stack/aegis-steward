@@ -81,3 +81,54 @@ class TestFiledFromChat:
 
         with pytest.raises(ValidationError):
             FileDocumentPayload(paste_id="p", transaction_id=1, account_id=2)
+
+
+class TestWaitingOnTheShelf:
+    """A receipt read in chat whose charge is not on file yet (#424) is
+    filed on the shelf as a receipt with no place, and waits there."""
+
+    @pytest.mark.asyncio
+    async def test_a_receipt_with_no_charge_yet_is_filed_to_wait(
+        self, svc: FinanceService, async_db_session: AsyncSession
+    ) -> None:
+        from app.services.ai.domains.chat.pastes import store_document
+        from app.services.documents.service import DocumentService
+        from app.services.finance.domains.writes.filing import (
+            FileDocumentPayload,
+            file_document_describe,
+            file_document_execute,
+        )
+
+        documents = DocumentService(async_db_session)
+        document = await documents.ingest(b"%PDF-1.4 cvs", title="IMG_6611.jpeg")
+        paste = await store_document(
+            "0", int(document.id), "IMG_6611.jpeg", 20, async_db_session
+        )
+        payload = FileDocumentPayload(
+            paste_id=str(paste["id"]), kind="receipt", title="CVS receipt"
+        )
+
+        rows = {
+            r.label: r.value
+            for r in await file_document_describe(async_db_session, payload, None)
+        }
+        result = await file_document_execute(async_db_session, payload, None)
+
+        assert rows["File under"] == "The shelf, waiting for its charge"
+        assert result["filed_under"] is None
+        kept = await documents.get(int(document.id))
+        assert kept is not None and (kept.kind, kept.title) == (
+            "receipt",
+            "CVS receipt",
+        )
+        assert await documents.tags_for(int(document.id)) == []
+
+    def test_only_a_receipt_may_wait_without_a_place(self) -> None:
+        from pydantic import ValidationError
+
+        from app.services.finance.domains.writes.filing import FileDocumentPayload
+
+        with pytest.raises(ValidationError):
+            FileDocumentPayload(paste_id="p")
+        with pytest.raises(ValidationError):
+            FileDocumentPayload(paste_id="p", kind="letter")

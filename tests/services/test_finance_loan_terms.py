@@ -206,23 +206,23 @@ class TestItIsProposable:
         """The only image rule was "orders become splits", so a lender's
         portal would be read through an order-shaped lens: no line items
         to find, and nothing proposed."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
+        from app.services.finance.domains.detection.analyst.prompt_changes import (
+            PROPOSING_CHANGES,
         )
 
-        assert "Not every screenshot is an order" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "source of TERMS, not of line items" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "Not every screenshot is an order" in PROPOSING_CHANGES
+        assert "source of TERMS, not of line items" in PROPOSING_CHANGES
         # A portal's own wording is not a figure you recognise.
-        assert '"Account Interest"' in FINANCE_CHAT_SYSTEM_PROMPT
+        assert '"Account Interest"' in PROPOSING_CHANGES
 
     def test_the_prompt_says_the_rate_is_basis_points(self) -> None:
         """7.99 sent as a percentage would be filed as 0.0799%."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
+        from app.services.finance.domains.detection.analyst.prompt_changes import (
+            PROPOSING_CHANGES,
         )
 
-        assert "account.loan_terms" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "7.99% is 799" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "account.loan_terms" in PROPOSING_CHANGES
+        assert "7.99% is 799" in PROPOSING_CHANGES
 
 
 class TestAddingTheAccountItself:
@@ -353,13 +353,13 @@ class TestAddingTheAccountItself:
     def test_the_prompt_says_to_look_before_creating(self) -> None:
         """The duplicate is the mistake, and only the user can rule it
         out - "GreenSky" and "Anthony & Sylvan Pools" are one loan."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
+        from app.services.finance.domains.detection.analyst.prompt_changes import (
+            PROPOSING_CHANGES,
         )
 
-        assert "account.create" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "Call accounts() FIRST" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "SEPARATE card AFTER" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "account.create" in PROPOSING_CHANGES
+        assert "Call accounts() FIRST" in PROPOSING_CHANGES
+        assert "SEPARATE card AFTER" in PROPOSING_CHANGES
 
 
 class TestFilingADocumentAgainstAnAccount:
@@ -465,12 +465,12 @@ class TestFilingADocumentAgainstAnAccount:
         }
 
     def test_the_prompt_says_to_file_it_when_it_is_matched(self) -> None:
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
+        from app.services.finance.domains.detection.analyst.prompt_changes import (
+            PROPOSING_CHANGES,
         )
 
-        assert "document.file" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "in the same turn you read it" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "document.file" in PROPOSING_CHANGES
+        assert "in the same turn you read it" in PROPOSING_CHANGES
 
 
 class TestFilingADocumentWithAContactOrMatter:
@@ -593,12 +593,12 @@ class TestFilingADocumentWithAContactOrMatter:
             FileDocumentPayload(paste_id="x", account_id=1, party_id=2)
 
     def test_the_prompt_says_a_set_is_proposals(self) -> None:
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
+        from app.services.finance.domains.detection.analyst.prompt_changes import (
+            PROPOSING_CHANGES,
         )
 
-        assert "party_id" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "never instead of them" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "party_id" in PROPOSING_CHANGES
+        assert "never instead of them" in PROPOSING_CHANGES
 
 
 class TestRecordingWhatAnAssetWasWorth:
@@ -747,9 +747,9 @@ class TestRecordingWhatAnAssetWasWorth:
         assert "(estimate)" in rows[2].value
 
     def test_the_prompt_says_to_send_the_whole_history(self) -> None:
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
+        from app.services.finance.domains.detection.analyst.prompt_changes import (
+            PROPOSING_CHANGES,
         )
 
-        assert "account.valuation" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "Send the WHOLE history in one card" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "account.valuation" in PROPOSING_CHANGES
+        assert "Send the WHOLE history in one card" in PROPOSING_CHANGES

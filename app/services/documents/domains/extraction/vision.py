@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from app.core.config import settings
 from app.services.ai.service import (
-    ProviderSetupError,
     active_model,
     extract_usage,
     record_usage,
@@ -50,8 +49,6 @@ async def vision_reader() -> VisionReader | None:
     a worker resolving the wrong provider would refuse to read a page the
     chosen model can see, or hand one to a model that cannot.
     """
-    try:
-        await active_model.model_for_active(settings)
-    except ProviderSetupError:
-        return None
-    return read_page
+    from app.services.documents.domains.reading.model import when_reachable
+
+    return await when_reachable(read_page)

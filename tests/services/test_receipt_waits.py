@@ -25,7 +25,7 @@ from app.services.finance.domains.writes.queue import approve, list_changes, rej
 from app.services.finance.models import FinanceInsight
 from app.services.finance.service import FinanceService
 from app.services.finance.utils import current_date
-from tests.services._finance_factories import seed_account
+from tests.services._finance_factories import pending_cards, seed_charge
 
 BOUGHT = date(2026, 9, 3)
 CVS = """CVS pharmacy
@@ -63,25 +63,11 @@ async def _receipt(db: AsyncSession, text: str = CVS, *, dated: date = BOUGHT) -
 async def _charge(
     db: AsyncSession, cents: int, day: date, name: str = "CVS/PHARMACY"
 ) -> int:
-    svc = FinanceService(db)
-    account = await seed_account(svc, name=f"VISA {name} {day}")
-    row = await svc.create_transaction(
-        owner_user_id=1,
-        account_id=int(account.id or 0),
-        amount=cents,
-        txn_date=day,
-        name=name,
-        source="csv",
-    )
-    return int(row.id or 0)
+    return await seed_charge(db, cents, day, name)
 
 
 async def _cards(db: AsyncSession, status: str | None = "pending") -> list[Any]:
-    return [
-        c
-        for c in await list_changes(db, status=status)
-        if c.change_type == receipts.RECEIPT
-    ]
+    return await pending_cards(db, receipts.RECEIPT, status)
 
 
 class TestReadingTheTotal:
@@ -168,6 +154,42 @@ class TestItWaits:
         await _charge(db, -1080, BOUGHT + timedelta(days=3), name="CVS 0921")
 
         assert await receipts.match_waiting(db, owner_user_id=None) == 0
+
+    @pytest.mark.asyncio
+    async def test_two_charges_are_settled_by_the_payee(
+        self, async_db_session: AsyncSession
+    ) -> None:
+        """Two charges of the total in the window (#425): the one whose
+        payee the receipt's letterhead names is it."""
+        db = async_db_session
+        await _receipt(db)
+        cvs = await _charge(db, -1080, BOUGHT)
+        await _charge(db, -1080, BOUGHT + timedelta(days=1), name="WALGREENS 0921")
+
+        assert await receipts.match_waiting(db, owner_user_id=None) == 1
+        (card,) = await _cards(db)
+        assert card.payload["transaction_id"] == cvs
+
+    @pytest.mark.asyncio
+    async def test_a_mailed_receipt_is_settled_by_its_sender(
+        self, async_db_session: AsyncSession
+    ) -> None:
+        """A receipt that came by mail names its sender on its first line,
+        the way ``letter_text`` writes it."""
+        db = async_db_session
+        await _receipt(
+            db,
+            "From: Amazon.com <auto-confirm@amazon.com>\nSubject: Your order\n\n"
+            "Order Total: $10.80\n",
+        )
+        await _charge(db, -1080, BOUGHT, name="CVS/PHARMACY")
+        amazon = await _charge(
+            db, -1080, BOUGHT + timedelta(days=1), name="AMAZON MKTPL"
+        )
+
+        assert await receipts.match_waiting(db, owner_user_id=None) == 1
+        (card,) = await _cards(db)
+        assert card.payload["transaction_id"] == amazon
 
     @pytest.mark.asyncio
     async def test_a_charge_long_before_the_receipt_is_not_it(
@@ -281,7 +303,6 @@ class TestWhenItLooksAgain:
         from app.services.finance import jobs
         from app.services.finance.adapters.providers import connections
         from app.services.finance.domains import imports_job
-        from app.services.finance.service import FinanceService
         from tests._session import opens
 
         looked: list[int | None] = []
@@ -293,7 +314,9 @@ class TestWhenItLooksAgain:
         async def _nothing(*_a: Any, **_k: Any) -> Any:
             return []
 
-        monkeypatch.setattr(receipts, "match_waiting", _look)
+        from app.services.documents.domains.reading import waiting
+
+        monkeypatch.setattr(waiting, "look_again", _look)
         for module in (core_db, filing, jobs, imports_job):
             monkeypatch.setattr(module, "get_async_session", opens(async_db_session))
         monkeypatch.setattr(connections, "sync_one_connection", _nothing)

@@ -59,6 +59,7 @@ from app.services.finance.domains.detection.analyst.seeds import (
 from app.services.finance.domains.detection.analyst.shared import (
     AMAZON_EXPORTS_MODULE_SLUG,
     ANALYST_AGENT_SLUG,
+    CHANGES_MODULE_SLUG,
     DEEP_DIVE_AGENT_SLUG,
     DEEP_DIVE_INSIGHT_TYPE,
     SNAPSHOT_MODULE_SLUG,
@@ -69,6 +70,7 @@ from app.services.finance.domains.detection.analyst.shared import (
 
 __all__ = [
     "AMAZON_EXPORTS_MODULE_SLUG",
+    "CHANGES_MODULE_SLUG",
     "ANALYST_AGENT_SLUG",
     "ANALYST_NOTE_INSIGHT_TYPE",
     "ANALYST_RULES",

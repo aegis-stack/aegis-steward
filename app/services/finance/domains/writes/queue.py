@@ -353,14 +353,6 @@ async def approve(
     if row.change_type in filing.FACT_CHANGES:
         # What just landed may be what an unfiled document prints (#409).
         await filing.reread_unfiled(db, owner_user_id=row.owner_user_id)
-    if (
-        row.change_type == "document.metadata"
-        and (row.payload.get("kind") or {}).get("value") == "receipt"
-    ):
-        # Paper just called a receipt waits for its charge from here (#330).
-        from app.services.documents.service import receipts
-
-        await receipts.match_waiting(db, owner_user_id=row.owner_user_id)
     return row
 
 

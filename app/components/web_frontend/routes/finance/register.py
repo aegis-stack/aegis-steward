@@ -33,6 +33,7 @@ from app.components.web_frontend.filters import mark_new
 from app.core.formatting import payee_label
 from app.services.finance.constants import INVESTMENT_ACCOUNT_TYPES
 from app.services.finance.schemas import AccountResponse, TransactionResponse
+from app.services.finance.schemas.transactions import TransactionListResponse
 from app.services.finance.service import (
     AXES,
     FinanceService,
@@ -99,10 +100,9 @@ class RegisterFilters:
     without_merchant: bool = False
     page: int = 1
     page_size: int = PAGE_SIZE
-    # Which visible column the rows are ordered by, and which way. Held
-    # as a STRING rather than a bool because ``query`` drops falsy
-    # values: a ``descending=False`` would vanish from the link that set
-    # it and the table would spring back on the next click.
+    # Which visible column the rows are ordered by, and which way: a
+    # STRING, because ``query`` drops falsy values and a
+    # ``descending=False`` would vanish from the link that set it.
     sort: str | None = None
     sort_dir: str = "desc"
 
@@ -345,6 +345,41 @@ def _pager(path: str, filters: RegisterFilters, total: int) -> dict[str, Any] | 
     }
 
 
+async def listing_for(
+    filters: RegisterFilters,
+    account_id: int | None,
+    service: FinanceService,
+    owner_user_id: int | None,
+    *,
+    page_size: int | None = None,
+) -> TransactionListResponse:
+    """The rows for these filters: the page's, and its export's (#332)."""
+    return await list_transactions(
+        sort=filters.sort,
+        descending=filters.sort_dir != "asc",
+        account_id=account_id,
+        account_ids=None,
+        from_date=filters.start_date,
+        to_date=filters.to_date,
+        without_merchant=filters.without_merchant,
+        q=filters.q,
+        categories=list(filters.categories),
+        payees=list(filters.payees),
+        tags=list(filters.tags),
+        accounts=list(filters.accounts),
+        exclude=list(filters.exclude),
+        amount_min=_cents(filters.amount_min),
+        amount_max=_cents(filters.amount_max),
+        reviewed=REVIEWED.get(filters.reviewed or ""),
+        include_transfers=not filters.hide_transfers,
+        uncategorized=filters.uncategorized,
+        page=filters.page,
+        page_size=page_size or filters.page_size,
+        service=service,
+        owner_user_id=owner_user_id,
+    )
+
+
 async def register_context(
     *,
     path: str,
@@ -410,29 +445,8 @@ async def register_context(
             "trade_columns": TRADE_COLUMNS,
         }
 
-    listing = await list_transactions(
-        sort=filters.sort,
-        descending=filters.sort_dir != "asc",
-        account_id=account.id if account else None,
-        account_ids=None,
-        from_date=filters.start_date,
-        to_date=filters.to_date,
-        without_merchant=filters.without_merchant,
-        q=filters.q,
-        categories=list(filters.categories),
-        payees=list(filters.payees),
-        tags=list(filters.tags),
-        accounts=list(filters.accounts),
-        exclude=list(filters.exclude),
-        amount_min=_cents(filters.amount_min),
-        amount_max=_cents(filters.amount_max),
-        reviewed=REVIEWED.get(filters.reviewed or ""),
-        include_transfers=not filters.hide_transfers,
-        uncategorized=filters.uncategorized,
-        page=filters.page,
-        page_size=filters.page_size,
-        service=service,
-        owner_user_id=owner_user_id,
+    listing = await listing_for(
+        filters, account.id if account else None, service, owner_user_id
     )
     # By the rows' own accounts, like the re-rendered rows: a closed
     # account is out of the picker and still names its rows (#315).
@@ -480,5 +494,7 @@ async def register_context(
         },
         "uncategorized_total": await uncategorized_total(service, owner_user_id),
         "show_account": account is None,
+        "export_path": "/transactions/export?"
+        + filters.query(account_id=account.id if account else None),
         "filtered": bool(filters.days != ranges.ALL or filters.q or filters.narrowed),
     }

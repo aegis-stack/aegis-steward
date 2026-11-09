@@ -51,6 +51,10 @@ if TYPE_CHECKING:
         checks,
         filing,
         receipts,
+        waiting,
+    )
+    from app.services.documents.domains.reading.findings import (
+        PAGE_HEADING,  # noqa: F401
     )
     from app.services.documents.domains.shelf.destroy import destroy  # noqa: F401
     from app.services.documents.domains.shelf.stitch import stitch  # noqa: F401
@@ -304,11 +308,18 @@ class DocumentService:
             await self._check_supersedes(
                 document_id, int(fields["supersedes_id"]), owner_user_id=owner_user_id
             )
+        was = document.kind
         for name, value in fields.items():
             setattr(document, name, value.strip() if name == "title" else value)
         document.updated_at = utcnow()
         self.db.add(document)
         await self.db.flush()
+        if document.kind == "receipt" and was != "receipt":
+            # Paper just called a receipt - by a reader's card, from chat,
+            # or by hand - waits for its charge from here (#330).
+            from app.services.documents.domains.reading import waiting
+
+            await waiting.look_again(self.db, owner_user_id=document.owner_user_id)
         return document
 
     async def _check_supersedes(

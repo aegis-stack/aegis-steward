@@ -37,11 +37,13 @@ async def propose_bank(
 
     Never moves a bank: an account held somewhere was said by somebody.
     """
+    from app.services.documents.domains.reading.asked import (
+        already_asked,
+        read_pages,
+    )
     from app.services.documents.domains.reading.proposals import (
         PROPOSED_BY,
-        _already_asked,
         _letterhead,
-        _read_pages,
         _sender,
     )
     from app.services.documents.service import DocumentService
@@ -50,7 +52,7 @@ async def propose_bank(
     document = await DocumentService(db).get(document_id)
     if document is None:
         return None
-    read = await _read_pages(db, document_id)
+    read = await read_pages(db, document_id)
     kind = next((f.value for f in read_document(read) if f.field == "kind"), None)
     if (kind or document.kind) not in BANK_PAPER:
         return None
@@ -62,7 +64,7 @@ async def propose_bank(
     account = await account_by_id(db, account_id)
     if account is None or account.institution_id is not None:
         return None
-    if await _already_asked(db, BANK, account_id, key="account_id"):
+    if await already_asked(db, BANK, account_id, key="account_id"):
         return None
     return await propose(
         db,

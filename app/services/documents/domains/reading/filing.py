@@ -57,10 +57,10 @@ async def reread_unfiled_job() -> None:
     pile read again, and every waiting receipt looked for again - which
     is also when one that waited too long asks for a person (#330).
     Owns its session: a scheduler fires with no request behind it."""
-    from app.services.documents.domains.reading import receipts
+    from app.services.documents.domains.reading import waiting
 
     async with get_async_session() as db:
         made = await reread_unfiled(db, owner_user_id=None)
-        await receipts.match_waiting(db, owner_user_id=None)
+        await waiting.look_again(db, owner_user_id=None)
         await db.commit()
     logger.info("Unfiled documents read again: %d proposed", made)
