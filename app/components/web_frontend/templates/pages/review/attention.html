@@ -19,6 +19,7 @@
       {% if insight.body %}<p class="mt-1 text-xs text-aegis-muted">{{ insight.body }}</p>{% endif %}
       {% if insight.resolution == "under_review" and insight.resolution_note %}<p class="mt-1 text-xs text-aegis-text" data-review-note>Under review: {{ insight.resolution_note }}</p>{% endif %}
     </div>
+    {% set dismiss = action("Dismiss", hx_swap("/review/insights/" ~ insight.id ~ "/dismiss", "#insight-" ~ insight.id, "post")) %}
     {% if insight.insight_type == "new_recurring" and insight.related_stream_id %}
     {#- A bill just found: say whether it is one, where it was announced. -#}
     {% for verb in ("confirm", "mute") %}
@@ -28,15 +29,19 @@
     {#- A statement that disagrees (issue 321): the correction, filled in. -#}
     {% set fix = "/accounts/" ~ insight.related_account_id ~ "/reconcile?statement_date=" ~ insight.period_end ~ "&statement_balance=" ~ (insight.detected_amount|cents_to_input) %}
     {{ action("Correct the balance", hx_dialog(fix) ~ " data-correct") }}
-    {{ action("Dismiss", hx_swap("/review/insights/" ~ insight.id ~ "/dismiss", "#insight-" ~ insight.id, "post")) }}
+    {{ dismiss }}
     {% elif insight.insight_type == "transfer_suggested" and insight.related_transaction_id %}
     {#- A near miss (issue 317): a transfer, or not, answered where it is read. -#}
     {% set pair = "/transactions/" ~ insight.related_transaction_id ~ "/transfer/" %}
     {{ action("It's a transfer", hx_swap(pair ~ "confirm?insight=" ~ insight.id, "#insight-" ~ insight.id, "post") ~ " data-confirm") }}
     {{ action("Not a transfer", hx_swap(pair ~ "decline?insight=" ~ insight.id, "#insight-" ~ insight.id, "post") ~ " data-decline") }}
+    {% elif insight.insight_type == "plan_check" %}
+    {#- The quarter's check against the plan: the plan is where to answer it. -#}
+    {{ action("Open the plan", hx_page("/projected/plan") ~ " data-open-plan") }}
+    {{ dismiss }}
     {% else %}
     {{ action("Resolve", hx_dialog("/review/insights/" ~ insight.id ~ "/resolve") ~ " data-resolve") }}
-    {{ action("Dismiss", hx_swap("/review/insights/" ~ insight.id ~ "/dismiss", "#insight-" ~ insight.id, "post")) }}
+    {{ dismiss }}
     {% endif %}
   </li>
   {% endfor %}

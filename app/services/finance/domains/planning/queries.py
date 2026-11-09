@@ -29,10 +29,11 @@ from app.services.finance.domains.ledger.queries.filters import (
 from app.services.finance.models import (
     FinanceAccount,
     FinanceInsight,
+    FinancePlan,
     FinanceTransaction,
     FinanceTransactionSplit,
 )
-from app.services.shared.queries import owner_filters
+from app.services.shared.queries import owner_filters, stored_owner
 
 
 def spend_filters(
@@ -272,3 +273,19 @@ async def insight_by_id(
     query = select(FinanceInsight).where(FinanceInsight.id == insight_id)
     query = query.where(*owner_filters(FinanceInsight.owner_user_id, owner_user_id))
     return (await db.exec(query)).first()
+
+
+async def plan_row(db: AsyncSession, owner_user_id: int | None) -> FinancePlan | None:
+    """The household's retirement plan, if one was saved."""
+    return (
+        await db.exec(
+            select(FinancePlan).where(
+                FinancePlan.owner_user_id == stored_owner(owner_user_id)
+            )
+        )
+    ).first()
+
+
+async def plan_rows(db: AsyncSession) -> list[FinancePlan]:
+    """Every saved plan: what the quarterly check walks."""
+    return list((await db.exec(select(FinancePlan))).all())

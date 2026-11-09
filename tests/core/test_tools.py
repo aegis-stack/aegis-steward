@@ -158,6 +158,7 @@ EXPECTED_EFFECTS = {
     "revise": "proposes",
     "transactions": "read",
     "projection": "read",
+    "retirement": "read",
     "budget": "read",
     # steward's matters, insurance and mail
     "parties": "read",

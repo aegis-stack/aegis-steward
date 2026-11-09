@@ -258,7 +258,8 @@ class Plan:
         return self.alone_interest - self.interest
 
 
-def _months_apart(start: date, later: date) -> int:
+def months_apart(start: date, later: date) -> int:
+    """Whole calendar months from ``start`` to ``later``."""
     return (later.year - start.year) * 12 + later.month - start.month
 
 
@@ -273,7 +274,7 @@ def plan(debts: list[Debt], method: str, *, start: date, extra: int = 0) -> Plan
     lined = [d for d in ranked if d.planned]
     unplanned = tuple(d for d in ranked if not d.planned)
     owed = {d.account_id: d.owed for d in lined}
-    first = {d.account_id: _months_apart(start, d.first_month(start)) for d in lined}
+    first = {d.account_id: months_apart(start, d.first_month(start)) for d in lined}
     paid_off: dict[int, date] = {}
     interest: dict[int, int] = {d.account_id: 0 for d in lined}
     freed = 0  # payments of debts paid off, rolled on

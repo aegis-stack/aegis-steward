@@ -37,7 +37,7 @@ from tests.services._finance_factories import (
     seed_txn,
 )
 
-EXPECTED_TOOLS = {"ledger", "accounts", "quote"}
+EXPECTED_TOOLS = {"ledger", "accounts", "quote", "retirement"}
 
 
 @pytest.fixture
@@ -59,8 +59,15 @@ def _tools_use_test_session(
     # each with their own import of the session opener.
     from app.services.finance import ai_account_tools, ai_bill_tools, ai_write_tools
     from app.services.finance.domains.ledger import cleanup
+    from app.services.finance.domains.planning import retirement_tool
 
-    for module in (ai_account_tools, ai_bill_tools, cleanup, ai_write_tools):
+    for module in (
+        ai_account_tools,
+        ai_bill_tools,
+        retirement_tool,
+        cleanup,
+        ai_write_tools,
+    ):
         monkeypatch.setattr(module, "get_async_session", opens(session))
 
 
@@ -1924,3 +1931,49 @@ async def test_the_balance_sheet_says_which_accounts_make_net_worth(
 
     counted = {a["name"]: a["counts_in_net_worth"] for a in result["accounts"]}
     assert counted == {"Checking": True, "Groceries": False}
+
+
+@pytest.mark.queryspy(threshold=3)  # the plan saved, then read by the tool
+@pytest.mark.asyncio
+async def test_retirement_hands_her_the_band_and_the_chance_not_an_estimate(
+    svc: FinanceService, session: AsyncSession
+) -> None:
+    """Monte Carlo is the feature that pulls people to a paid tier, and a
+    model asked for one in prose makes numbers up. The tool computes the
+    band and the chance in code from the same plan the page shows."""
+    from app.services.finance.domains.planning import plan as plans
+
+    await seed_account(svc, "Checking", current_balance=1_000_000)
+    await seed_account(
+        svc, "Brokerage", account_type="brokerage", current_balance=10_000_000
+    )
+    await plans.save_plan(
+        session,
+        owner_user_id=None,
+        today=current_date(),
+        birth_year=current_date().year - 60,
+        retire_age=65,
+        end_age=70,
+        spending=300_000,
+    )
+    await plans.declare_income(
+        session,
+        owner_user_id=None,
+        name="Pension",
+        kind="pension",
+        monthly=200_000,
+        starts=date(current_date().year + 5, 1, 1),
+    )
+    await session.commit()
+
+    result = await ai_tools.retirement(runs=30)
+
+    assert result["plan_saved"] is True
+    assert result["assumptions"]["retire_age"] == 65
+    assert result["today"]["net_worth_cents"] == 11_000_000
+    assert result["at_retirement"] is not None and result["at_retirement"]["age"] == 65
+    assert result["at_end"]["age"] == 70
+    assert len(result["band"]["years"]) == 10
+    assert result["band"]["low_cents"][-1] <= result["band"]["likely_cents"][-1]
+    assert 0.0 <= result["chance_of_holding"] <= 1.0 and result["runs"] == 30
+    assert result["incomes"][0]["kind"] == "pension"

@@ -98,6 +98,7 @@ class TestBulkSoftDeleteIsBatched:
 
 
 class TestAnalystSnapshotIsBatched:
+    @pytest.mark.queryspy(threshold=4)  # the snapshot is built three times on purpose
     @pytest.mark.asyncio
     async def test_query_count_does_not_grow_with_goals(
         self, svc: FinanceService, async_db_session: AsyncSession, async_engine

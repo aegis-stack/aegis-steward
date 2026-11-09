@@ -44,7 +44,7 @@ RECURRING_OWNERS = {
     "attach_transaction_to_stream": "streams",
     "transfer_stream_ids": "streams",
     "payment_stream_ids": "streams",
-    "stream_category_names": "streams",
+    "stream_category_names": "categories",
     "recurring_match_candidates": "matching",
     "recompute_stream_amounts": "amounts",
     "project_balances": "forecast",

@@ -1,0 +1,14 @@
+{% extends layout %}
+{% from "components/macros/layout.html" import page_header %}
+
+{% block title %}To retirement - {{ project_name }}{% endblock %}
+
+{# The Projected section's second face: the household's worth walked to
+   the end age by type, the band of simulated returns around the line,
+   and the assumptions that drew it, editable under the chart. Both forms
+   post back and swap the one block, so what is shown is what was saved. #}
+{% block app_content %}
+{% include "components/sub_nav.html" %}
+{{ page_header("To retirement", "Net worth by type to the end age, from the balances on file and what you state below") }}
+{% include "partials/plan/body.html" %}
+{% endblock %}

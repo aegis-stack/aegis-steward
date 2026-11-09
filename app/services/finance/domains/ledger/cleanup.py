@@ -34,11 +34,11 @@ async def cleanup_candidates(days: int = DEFAULT_DAYS) -> Cleanup:
     propose_many. Rows with no evidence are a list to put to the user,
     not a guess.
     """
-    from app.services.finance.domains.planning.recurring.matching import named_for
-    from app.services.finance.domains.planning.recurring.review import review_queue
-    from app.services.finance.domains.planning.recurring.streams import (
+    from app.services.finance.domains.planning.recurring.categories import (
         stream_category_names,
     )
+    from app.services.finance.domains.planning.recurring.matching import named_for
+    from app.services.finance.domains.planning.recurring.review import review_queue
     from app.services.finance.service import FinanceService
     from app.services.finance.tools import transaction_rows
     from app.services.finance.utils import current_date

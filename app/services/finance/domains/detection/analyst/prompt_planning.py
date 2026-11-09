@@ -46,4 +46,12 @@ To only turn rollover on or off, send the limit's current amount.
 - `budget.remove` - payload {a budget LINE}: take the limit off. When \
 someone says remove, drop or stop budgeting a line, this is the card - \
 never a $0 `budget.limit`, which leaves the line on the page.
+- `plan.save` - payload {any of "birth_year", "retire_age", "end_age", \
+"returns_bps" / "volatility_bps" ({"cash"/"investments"/"property": int, \
+a year), "contributions_cents" (by type, a month), "spending_cents" (a \
+month, retired)}: what the plan to retirement assumes (retirement()). \
+Only what you send changes; the card shows each figure before and \
+after. "Retire at 65" or "assume 5% on investments" is this card, never \
+a fact. A pension or Social Security is a stream: recurring.declare \
+with "income_kind": pension/social_security from its start date.
 """

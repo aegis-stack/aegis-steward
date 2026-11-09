@@ -153,9 +153,28 @@ function toneColor(tone) {
 }
 
 // The series that are lines of their own: not marker dots, not the
-// dashed line another is read against.
+// dashed line another is read against, not the edges of a band.
 function plainLines(data) {
-  return data.series.filter((s) => !s.points && !s.compare);
+  return data.series.filter((s) => !s.points && !s.compare && !s.band);
+}
+
+// A band's edge (``band: "low"`` then ``"high"``, in that order): no line
+// of its own, the high edge filled down to the low one in the primary,
+// so the line between them reads as the likely path through a range.
+// Out of the legend, like a guide.
+function bandEdge(series) {
+  return {
+    band: true,
+    label: series.label,
+    data: series.values,
+    borderColor: 'transparent',
+    borderWidth: 0,
+    pointRadius: 0,
+    pointHoverRadius: 0,
+    fill: series.band === 'high' ? '-1' : false,
+    backgroundColor: token('--p', 0.15),
+    tension: 0.3,
+  };
 }
 
 // One line is the chart's subject, filled in the primary; several (assets
@@ -165,6 +184,8 @@ function plainLines(data) {
 function datasets(kind, data) {
   const tail = token('--n'); // "Other" reads as tail, never as a category
   const single = kind === 'line' && plainLines(data).length === 1;
+  // A line inside a band is not filled to the floor: the band is the fill.
+  const banded = data.series.some((s) => s.band);
   // A line's place in the ramp: its own (``color``), else its order.
   const place = (i) => data.series[i].color ?? i;
   const line = (i) => (!single || data.series[i].color != null ? rampColor(place(i)) : token('--p'));
@@ -173,6 +194,7 @@ function datasets(kind, data) {
   return data.series.map((series, i) => {
     if (series.points || events) return markers(data, series, events ? line(i) : token('--er'));
     if (series.compare) return comparison(series);
+    if (series.band) return bandEdge(series);
     if (series.tones) {
       return {
         label: series.label,
@@ -194,7 +216,7 @@ function datasets(kind, data) {
               : rampColor(i),
       borderColor: kind === 'line' ? line(i) : undefined,
       borderWidth: kind === 'doughnut' ? 0 : 2,
-      fill: single,
+      fill: single && !banded,
       tension: 0.3,
       pointRadius: 0,
       // A time chart answers from anywhere over it (see the interaction
@@ -337,7 +359,8 @@ const eventMarks = {
 // A legend entry, unless it names a guide line. A doughnut's entries are
 // its slices, which carry ``index`` and no ``datasetIndex`` (issue 544).
 function legendShows(item, data) {
-  return !data.datasets[item.datasetIndex]?.guide;
+  const set = data.datasets[item.datasetIndex];
+  return !set?.guide && !set?.band;
 }
 
 // A doughnut's legend beside it, where there is room: on a phone it

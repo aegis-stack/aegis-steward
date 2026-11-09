@@ -120,6 +120,31 @@ def cents_to_input(cents: int | None) -> str:
     return "" if cents is None else f"{cents / 100:,.2f}"
 
 
+def bps_to_input(bps: int | None) -> str:
+    """Basis points as the percentage a form shows: ``550`` -> ``5.5``."""
+    return "" if bps is None else f"{bps / 100:g}"
+
+
+def form_money(raw: str | None, label: str) -> int | None:
+    """The inverse of ``cents_to_input``: blank is None, anything else
+    must read as money or it is a ``ValueError`` naming the field (the
+    money twin of ``rendering.form_number``)."""
+    if not (raw or "").strip():
+        return None
+    cents = money_to_cents(raw)
+    if cents is None:
+        raise ValueError(f"{label} must be an amount.")
+    return cents
+
+
+def form_bps(raw: str | None, label: str) -> int | None:
+    """The inverse of ``bps_to_input``: ``5.5`` typed is ``550``."""
+    from app.components.web_frontend.rendering import form_number
+
+    value = form_number(raw, label, float)
+    return None if value is None else round(value * 100)
+
+
 def arrived(row: Any, batches: Mapping[int, datetime] | None = None) -> Any:
     """When a ledger row came in.
 

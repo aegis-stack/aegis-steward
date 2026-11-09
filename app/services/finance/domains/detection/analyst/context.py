@@ -18,6 +18,7 @@ from app.services.finance.domains.detection.analyst.sections import (
 )
 from app.services.finance.domains.ledger import networth
 from app.services.finance.domains.ledger import queries as ledger_queries
+from app.services.finance.domains.planning import plan as plans
 from app.services.finance.domains.planning.allocation import goal_allocations
 from app.services.finance.domains.planning.envelopes import ENVELOPE_ACCOUNT_TYPE
 from app.services.finance.domains.planning.goals import (
@@ -27,6 +28,10 @@ from app.services.finance.domains.planning.goals import (
 )
 from app.services.finance.service import FinanceService
 from app.services.finance.utils import current_date
+
+# Simulated runs behind the note's band: enough for a stable tenth and
+# ninetieth percentile, few enough to cost nothing noticeable.
+_PLAN_RUNS = 200
 
 
 async def load_report_context(
@@ -47,6 +52,9 @@ async def load_report_context(
         owner_user_id=owner_user_id, page_size=_RECENT_TRANSACTIONS
     )
     debts = await goal_debts(db, goal_accounts) if goal_accounts else {}
+    cashflow = await service.monthly_cashflow(
+        owner_user_id=owner_user_id, months=_CASHFLOW_MONTHS, today=today
+    )
     return ReportContext(
         today=today,
         accounts=accounts,
@@ -68,9 +76,7 @@ async def load_report_context(
             owner_user_id=owner_user_id, status="new"
         ),
         streams=await service.list_recurring(owner_user_id=owner_user_id),
-        cashflow=await service.monthly_cashflow(
-            owner_user_id=owner_user_id, months=_CASHFLOW_MONTHS, today=today
-        ),
+        cashflow=cashflow,
         ranked_spending=await _ranked_spending(
             db, owner_user_id=owner_user_id, today=today, limit=_SPENDING_RANK_POOL
         ),
@@ -87,4 +93,13 @@ async def load_report_context(
             accounts=goal_accounts,
             debts=debts,
         ),
+        plan=await plans.run_plan(
+            db,
+            owner_user_id=owner_user_id,
+            today=today,
+            runs=_PLAN_RUNS,
+            months=cashflow,
+        )
+        if accounts
+        else None,
     )

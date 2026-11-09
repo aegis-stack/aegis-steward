@@ -2015,3 +2015,43 @@ class TestMatchingAnOrderToItsCharge:
 
         assert "MORE THAN ONE row at that amount" in FINANCE_CHAT_SYSTEM_PROMPT
         assert "ask which one" in FINANCE_CHAT_SYSTEM_PROMPT
+
+
+class TestRetirementSection:
+    @pytest.mark.queryspy(threshold=3)  # the plan saved, then the snapshot reads it
+    @pytest.mark.asyncio
+    async def test_the_plan_rides_the_snapshot_with_its_chance(
+        self, svc: FinanceService, async_db_session: AsyncSession
+    ) -> None:
+        """She reads the computed band and the chance it holds (#353),
+        never estimating them."""
+        from app.services.finance.domains.planning import plan as plans
+
+        await svc.create_manual_account(
+            owner_user_id=OWNER,
+            name="Brokerage",
+            account_type="brokerage",
+            classification="asset",
+            current_balance=10_000_000,
+        )
+        await plans.save_plan(
+            async_db_session,
+            owner_user_id=OWNER,
+            today=date(2026, 11, 8),
+            birth_year=1966,
+            retire_age=65,
+            end_age=70,
+            spending=300_000,
+        )
+        await async_db_session.commit()
+
+        snapshot = await analyst.build_finance_snapshot(
+            async_db_session, owner_user_id=OWNER, today=date(2026, 11, 8)
+        )
+
+        assert snapshot is not None
+        assert "RETIREMENT PLAN" in snapshot
+        assert "stated by the household; born 1966, retiring at 65" in snapshot
+        assert "at retirement (2031, age 65)" in snapshot
+        assert "chance the plan holds" in snapshot
+        assert "simulated runs" in snapshot

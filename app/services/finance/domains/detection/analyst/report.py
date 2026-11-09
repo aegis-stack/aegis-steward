@@ -35,6 +35,7 @@ from app.services.finance.domains.detection.analyst.sections import (
     _net_worth_section,
     _portfolio_section,
     _projection_section,
+    _retirement_section,
     _signed,
 )
 from app.services.finance.domains.detection.analyst.shared import (
@@ -208,6 +209,7 @@ async def build_finance_snapshot(
         _upcoming_section(ctx),
         _goals_section(ctx),
         _envelopes_section(ctx),
+        _retirement_section(ctx),
     ]
     return "\n\n".join(section for section in sections if section)
 

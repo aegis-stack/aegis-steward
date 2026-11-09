@@ -60,6 +60,9 @@ class ReportContext(BaseModel):
     # this month, by account id: the same figures the Goals tab shows.
     goal_debts: dict[int, Any]
     goal_asks: dict[int, int]
+    # The plan to retirement, run once (#353): the line, the band and
+    # the chance it holds, read rather than estimated.
+    plan: Any
 
 
 _NET_WORTH_WINDOW_DAYS = 90
@@ -301,6 +304,52 @@ def _portfolio_section(ctx: ReportContext) -> str | None:
     remainder = len(holdings) - _TOP_HOLDINGS
     if remainder > 0:
         lines.append(f"- plus {remainder} smaller positions")
+    return "\n".join(lines)
+
+
+def _retirement_section(ctx: ReportContext) -> str | None:
+    """The plan to retirement, pre-computed: where net worth lands at
+    retirement and at the end age, the band around it, and the chance
+    the plan holds - so the model reads the verdict instead of
+    estimating a Monte Carlo in prose. Absent without accounts in net
+    worth: a plan from nothing is nothing."""
+    outcome = ctx.plan
+    if outcome is None:
+        return None
+    stated, path, band = outcome.assumptions, outcome.path, outcome.band
+    lines = ["RETIREMENT PLAN"]
+    lines.append(
+        f"- assumptions: {'stated by the household' if outcome.row else 'defaults, nothing stated yet'}"
+        + (
+            f"; born {stated.birth_year}, retiring at {stated.retire_age}, planned to {stated.end_age}"
+            if stated.birth_year
+            else "; no birth year, so no retirement date - contributions run the whole way"
+        )
+    )
+    lines.append(
+        f"- net worth today: {_amount(path.start.net)} "
+        f"(cash {_amount(path.start.by_type['cash'])}, investments "
+        f"{_amount(path.start.by_type['investments'])}, property and other "
+        f"{_amount(path.start.by_type['property'])}, debts {_amount(path.start.debts)})"
+    )
+    if path.at_retirement is not None:
+        at = path.at_retirement
+        lines.append(f"- at retirement ({at.year}, age {at.age}): {_amount(at.net)}")
+    end = path.end
+    lines.append(
+        f"- at {end.year}"
+        + (f" (age {end.age})" if end.age else "")
+        + f": {_amount(end.net)} likely, "
+        f"between {_amount(band.low[-1])} and {_amount(band.high[-1])} in ordinary markets"
+    )
+    lines.append(
+        f"- chance the plan holds (never below zero, {band.runs} simulated runs): "
+        f"{round(band.success * 100)}%"
+    )
+    for income in outcome.inputs.incomes:
+        lines.append(
+            f"- income from {income.starts:%b %Y}: {income.name} {_amount(income.monthly)}/mo"
+        )
     return "\n".join(lines)
 
 

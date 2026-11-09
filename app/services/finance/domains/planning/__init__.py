@@ -12,8 +12,10 @@ from app.services.finance.domains.planning import (
     envelopes,
     goals,
     insights,
+    plan,
     queries,
     recurring,
+    retirement,
 )
 
 __all__ = [
@@ -22,6 +24,8 @@ __all__ = [
     "envelopes",
     "goals",
     "insights",
+    "plan",
     "queries",
     "recurring",
+    "retirement",
 ]

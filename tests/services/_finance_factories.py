@@ -20,6 +20,7 @@ from datetime import date
 from typing import Any
 
 from sqlalchemy import event
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.finance.models import FinanceCategory
 from app.services.finance.service import FinanceService
@@ -41,6 +42,19 @@ async def seed_account(
         owner_user_id=owner_user_id,
         **kwargs,
     )
+
+
+async def seed_household(svc: Any, db: AsyncSession) -> None:
+    """Cash, a brokerage account and a house: the plan to retirement's
+    three types, committed."""
+    await seed_account(svc, "Checking", current_balance=1_000_000)
+    await seed_account(
+        svc, "Brokerage", account_type="brokerage", current_balance=10_000_000
+    )
+    await seed_account(
+        svc, "House", account_type="property", current_balance=40_000_000
+    )
+    await db.commit()
 
 
 async def seed_loan(

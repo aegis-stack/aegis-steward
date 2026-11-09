@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         SNAPTRADE_KEYS,
         SnapTradeError,
     )
+    from app.services.finance.constants import INCOME_KINDS
     from app.services.finance.domains import imports_job
     from app.services.finance.domains.detection import queries as detection_queries
     from app.services.finance.domains.detection.analyst import (
@@ -135,6 +136,7 @@ if TYPE_CHECKING:
     from app.services.finance.domains.planning import (
         budgets as planning_budgets,
     )
+    from app.services.finance.domains.planning import plan as plans
     from app.services.finance.domains.planning import (
         queries as planning_queries,
     )
@@ -153,6 +155,7 @@ if TYPE_CHECKING:
     from app.services.finance.domains.planning.envelopes import envelope_metadata
     from app.services.finance.domains.planning.goals import goal_metadata
     from app.services.finance.domains.planning.insights import resolve_insight
+    from app.services.finance.domains.planning.plan import plan_row
     from app.services.finance.domains.planning.recurring import streams
     from app.services.finance.domains.planning.recurring.forecast import (
         bill_reminder,
@@ -171,6 +174,16 @@ if TYPE_CHECKING:
         Total,
         scheduled_by_account,
         totalled,
+    )
+    from app.services.finance.domains.planning.retirement import (
+        LABELS as PLAN_TYPE_LABELS,
+    )
+    from app.services.finance.domains.planning.retirement import (
+        TYPES as PLAN_TYPES,
+    )
+    from app.services.finance.domains.planning.retirement import Assumptions
+    from app.services.finance.domains.planning.retirement import (
+        label as plan_label,
     )
     from app.services.finance.domains.writes.curation import (
         AssignPayeePayload,
@@ -206,6 +219,7 @@ if TYPE_CHECKING:
         FinanceConnection,
         FinanceInsight,
         FinancePendingChange,
+        FinancePlan,
         FinanceRecurringStream,
         FinanceSubject,
         FinanceTag,

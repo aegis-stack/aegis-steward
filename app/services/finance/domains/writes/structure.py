@@ -181,6 +181,11 @@ class DeclarePayload(BaseModel):
     # on a foreign key.
     whose_party_id: int | None = None
     is_subscription: bool = False
+    # Retirement income (#352): a pension or Social Security, counted by
+    # the plan from its start date. The paper it was read off, when a
+    # reading proposed it, so the card can be checked against it.
+    income_kind: str | None = None
+    document_id: int | None = None
 
     @field_validator("direction")
     @classmethod
@@ -220,6 +225,7 @@ async def declare_execute(
         account_id=payload.account_id,
         is_subscription=payload.is_subscription,
         subject_id=subject_id,
+        income_kind=payload.income_kind,
     )
     if payload.category_id is not None:
         stream.category_id = payload.category_id
@@ -258,6 +264,12 @@ async def declare_describe(
             label="Starting", value=payload.next_expected_date.isoformat()
         ),
     ]
+    if payload.income_kind is not None:
+        from app.services.finance.constants import INCOME_KINDS
+
+        rows.append(
+            ChangeDisplayRow(label="Kind", value=INCOME_KINDS[payload.income_kind])
+        )
     rows.extend(
         await _named_places(db, payload.account_id, payload.category_id, owner_user_id)
     )

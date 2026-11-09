@@ -9,6 +9,7 @@
 
 {% block app_content %}
 {{ whose_bar(whose_options, whose, section.path, also_held) }}
+{% include "components/sub_nav.html" %}
 {% call page_header("Projected balance", "Every scheduled bill and paycheck applied to today's balance, day by day, so you can see exactly when money is tight") %}
   {{ account_filter(section.path, accounts, selected_ids, days, ranges) }}
   {# Only the signed figure is coloured: it is the one where a sign means

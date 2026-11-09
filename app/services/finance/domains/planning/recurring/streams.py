@@ -12,7 +12,12 @@ from datetime import date
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.finance.constants import CADENCE_KEYS, ONE_TIME_FREQUENCY
+from app.services.finance.constants import (
+    CADENCE_KEYS,
+    INCOME_KIND,
+    INCOME_KINDS,
+    ONE_TIME_FREQUENCY,
+)
 from app.services.finance.domains.detection.recurring.cadence import amount_profile
 from app.services.finance.domains.ledger import accounts
 from app.services.finance.domains.ledger import queries as ledger_queries
@@ -80,8 +85,11 @@ async def create_recurring_stream(
     account_id: int | None = None,
     is_subscription: bool = False,
     subject_id: int | None = None,
+    income_kind: str | None = None,
 ) -> FinanceRecurringStream:
     """Create a user-declared bill (outflow) or income (inflow) stream.
+    ``income_kind`` marks a pension or Social Security (#352), counted by
+    the plan to retirement from its start date.
 
     Hand-entered rows are commitments by definition: ``source="user"``,
     confirmed, mature, fixed-amount - the missed-payment rule chases
@@ -92,6 +100,8 @@ async def create_recurring_stream(
         raise ValueError(f"direction must be one of {sorted(_STREAM_DIRECTIONS)}")
     if frequency not in _STREAM_FREQUENCIES:
         raise ValueError(f"frequency must be one of {sorted(_STREAM_FREQUENCIES)}")
+    if income_kind is not None and income_kind not in INCOME_KINDS:
+        raise ValueError(f"income_kind must be one of {', '.join(INCOME_KINDS)}")
     await accounts.get_or_create_currency(db, DEFAULT_CURRENCY)
     stream = FinanceRecurringStream(
         owner_user_id=stored_owner(owner_user_id),
@@ -111,6 +121,7 @@ async def create_recurring_stream(
         confidence=100,
         is_subscription=is_subscription,
         is_user_confirmed=True,
+        metadata_={INCOME_KIND: income_kind} if income_kind else None,
     )
     db.add(stream)
     await db.flush()
@@ -426,38 +437,6 @@ async def update_recurring(
     db.add(stream)
     await db.flush()
     return stream
-
-
-async def stream_category_names(
-    db: AsyncSession, stream_ids: Sequence[int] | set[int]
-) -> dict[int, str]:
-    """Each stream's category, derived from its member transactions.
-
-    ``finance_recurring_stream.category_id`` is a provider field the
-    local detector never fills, so the stream table itself has no
-    category to show. The transactions DO carry one (import maps the
-    Quicken category path), and a stream is one merchant's rhythm -
-    so the most common category across its members is the stream's
-    category. Ties break on the higher count, then category id.
-    """
-    ids = list(stream_ids)
-    if not ids:
-        return {}
-    rows = await queries.stream_member_category_votes(db, ids)
-    best: dict[int, tuple[int, str]] = {}
-    for stream_id, name, hits in rows:
-        current = best.get(stream_id)
-        if current is None or hits > current[0]:
-            best[stream_id] = (hits, name)
-    resolved = {stream_id: name for stream_id, (_, name) in best.items()}
-
-    # A category set ON THE BILL outranks the inference. Without this
-    # the edit saves to a column nothing reads, and Bills & Income
-    # keeps showing whatever its transactions vote for - the change
-    # looks accepted and does nothing.
-    stored = await queries.stream_stored_category_names(db, ids)
-    resolved.update({stream_id: name for stream_id, name in stored if name})
-    return resolved
 
 
 async def delete_recurring(

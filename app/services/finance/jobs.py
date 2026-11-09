@@ -14,8 +14,10 @@ from app.services.finance.domains.detection import (
     generate_insights,
     promote_curated_streams,
 )
+from app.services.finance.domains.detection.insights.rules.plan import plan_check
 from app.services.finance.domains.ledger.accounts import redraw_line
 from app.services.finance.domains.ledger.queries import account_owner_ids
+from app.services.finance.domains.planning.queries import plan_rows
 from app.services.finance.service import FinanceService
 from app.services.finance.utils import current_date
 
@@ -47,6 +49,25 @@ async def finance_recompute_snapshots_job() -> None:
         )
     except Exception:
         logger.exception("Finance snapshot recompute failed")
+
+
+async def finance_plan_check_job() -> None:
+    """Quarterly: each household's net worth against the path its plan
+    saved (#354), as an Attention item. Idempotent per quarter, so a
+    late or repeated run files nothing twice."""
+    try:
+        async with get_async_session() as session:
+            rows = await plan_rows(session)
+            today = current_date()
+            created = 0
+            for row in rows:
+                # A NOT NULL owner column stores 0 for the standalone install.
+                owner = row.owner_user_id or None
+                created += await plan_check(session, owner, today, row)
+            await session.commit()
+        logger.info("Finance: checked %d plan(s), %d item(s) filed", len(rows), created)
+    except Exception:
+        logger.exception("Finance plan check failed")
 
 
 async def finance_goal_auto_contribute_job() -> None:

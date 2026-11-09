@@ -487,3 +487,6 @@ from app.services.finance.ai_write_tools import (  # noqa: E402,F401
 from app.services.finance.domains.ledger.cleanup import (  # noqa: E402,F401
     cleanup_candidates,
 )
+from app.services.finance.domains.planning.retirement_tool import (  # noqa: E402,F401
+    retirement,
+)

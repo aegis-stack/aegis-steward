@@ -22,6 +22,7 @@ from app.components.backend.api.finance.goals import (
 )
 from app.components.web_frontend.filters import (
     as_options,
+    bps_to_input,
     cents_to_input,
     money,
     money_to_cents,
@@ -127,9 +128,7 @@ def _goal_form(goal: GoalResponse) -> GoalForm:
         target_date=goal.target_date.isoformat() if goal.target_date else "",
         contribution_kind=goal.contribution_kind,
         monthly_contribution=cents_to_input(goal.monthly_contribution),
-        contribution_pct=(
-            f"{goal.contribution_pct_bps / 100:g}" if goal.contribution_pct_bps else ""
-        ),
+        contribution_pct=bps_to_input(goal.contribution_pct_bps or None),
         auto_contribute="on" if goal.auto_contribute else "",
         scope=list(goal.target_scope),
     )
