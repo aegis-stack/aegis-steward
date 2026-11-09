@@ -193,6 +193,10 @@ class Settings(
     IMPORT_MAX_BYTES: int = 10 * 1024 * 1024  # a finance file import, any door
     MAIL_IMPORT_MAX_BYTES: int = 100 * 1024 * 1024  # a mailbox export is many files
     MAIL_IMPORT_MAX_MESSAGES: int = 2000
+    MAIL_IMAP_HOST: str | None = None
+    MAIL_IMAP_USER: str | None = None
+    MAIL_IMAP_FOLDER: str | None = None
+    MAIL_IMAP_PASSWORD: str | None = None
     DOCUMENTS_MAX_PDF_PAGES: int = 200
 
     # Where the scheduled backup job writes dumps. A relative path resolves

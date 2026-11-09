@@ -11,6 +11,10 @@ from app.core.schema import one_of
 from app.core.time import utcnow
 
 BATCH_STATUSES = ("processing", "done", "failed")
+# How a batch's messages got here: a file somebody dropped, or a pull
+# from a mailbox the app reads itself (``pull``).
+SOURCE_FILE, SOURCE_IMAP = "file", "imap"
+BATCH_SOURCES = (SOURCE_FILE, SOURCE_IMAP)
 
 
 class MailBatch(SQLModel, table=True):
@@ -25,6 +29,7 @@ class MailBatch(SQLModel, table=True):
     __tablename__ = "mail_batch"
     __table_args__ = (
         CheckConstraint(one_of("status", BATCH_STATUSES), name="ck_mail_batch_status"),
+        CheckConstraint(one_of("source", BATCH_SOURCES), name="ck_mail_batch_source"),
         # Same bytes, same batch. NOT per owner: owner_user_id is NULL on a
         # standalone install, and SQLite treats every NULL as distinct in a
         # unique index, so ``(owner, sha)`` would never collide and the
@@ -37,8 +42,10 @@ class MailBatch(SQLModel, table=True):
     # Nullable with no model-level FK, as every owner column here is:
     # AUTH_ENABLED is false on this install and stores None.
     owner_user_id: int | None = Field(default=None)
+    # The file's name, or the mailbox's label when pulled.
     file_name: str = Field(max_length=255)
     file_sha256: str = Field(max_length=64)
+    source: str = Field(default=SOURCE_FILE, max_length=16)
     messages_total: int = Field(default=0)
     messages_new: int = Field(default=0)
     messages_duplicate: int = Field(default=0)
@@ -109,3 +116,25 @@ class MailAttachment(SQLModel, table=True):
     # What it was called on the message - the shelf keeps its own copy of
     # the arrival name, but a reader looking at the message wants this one.
     filename: str = Field(max_length=255)
+
+
+class MailMailbox(SQLModel, table=True):
+    """A mailbox the app pulls, and where the pull got to.
+
+    The watermark IMAP gives: UIDs climb within one UIDVALIDITY, so the
+    next pull asks for everything above the last one seen, and starts
+    over when the server renumbers. What went wrong last time sits
+    here, once, for the Mail page: a wrong password is a line a person
+    reads, not a log line nobody does.
+    """
+
+    __tablename__ = "mail_mailbox"
+    __table_args__ = (Index("uq_mail_mailbox_key", "key", unique=True),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    # host/user/folder: one row per mailbox the secrets name.
+    key: str = Field(max_length=640)
+    uidvalidity: int | None = Field(default=None)
+    uid_last: int = Field(default=0)
+    last_pulled_at: datetime | None = Field(default=None)
+    last_error: str | None = Field(default=None, max_length=255)

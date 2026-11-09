@@ -15,13 +15,13 @@ from sqlmodel import delete
 
 from app.core.db import get_async_session
 from app.core.time import utcnow
-from app.services.mail import ingest
+from app.services.mail import ingest, pull
 from app.services.mail.arrivals import arrivals
 from app.services.mail.models import MailAttachment, MailBatch, MailMessage
 from app.services.matters.service import PartyService
 from tests._mbox import PDF, mbox_bytes, message
+from tests._secret_settings import secret_settings
 from tests.web.dom import none, one, table_rows, text
-from tests.web.test_mail_import import no_reader  # noqa: F401
 
 # An address only this module uses. The app-owned database lives for the
 # whole run and other modules file "Delta Dental" under ``_mbox``'s
@@ -41,7 +41,7 @@ async def bare() -> None:
 
 
 @pytest.fixture
-async def shelf(bare: None, no_reader: list[int]) -> int:  # noqa: F811
+async def shelf(bare: None, dispatched: list[int]) -> int:
     """A known sender with an attachment, a stranger's letter, and an
     empty newsletter - the milestone's three. Seeded through the app-owned
     engine, which is what the page reads."""
@@ -129,6 +129,22 @@ class TestWhatCameIn:
         page = client.get("/mail").text
         for row in table_rows(page):
             assert text(row["Became"]) == arrived[text(row["Subject"])].became
+
+
+class TestTheMailboxLine:
+    def test_no_mailbox_no_line(self, client: TestClient, bare: None) -> None:
+        with secret_settings(pull.HOST, pull.USER, pull.FOLDER, pull.PASSWORD):
+            none(client.get("/mail").text, "[data-mailbox]")
+
+    def test_a_named_mailbox_says_it_is_pulled(
+        self, client: TestClient, bare: None
+    ) -> None:
+        with secret_settings(pull.HOST, pull.USER, pull.FOLDER, pull.PASSWORD) as s:
+            s.MAIL_IMAP_HOST, s.MAIL_IMAP_USER = "imap.example.com", "sam@example.com"
+            s.MAIL_IMAP_FOLDER, s.MAIL_IMAP_PASSWORD = "Steward", "abcd efgh ijkl mnop"
+            line = one(client.get("/mail").text, "[data-mailbox]")
+        assert "sam@example.com / Steward" in text(line)
+        assert "nothing pulled yet" in text(line)
 
 
 class TestTheShell:

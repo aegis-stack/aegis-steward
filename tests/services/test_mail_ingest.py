@@ -7,7 +7,6 @@ dispatch both happen holding nothing, for the reason #210 established.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,39 +19,7 @@ from app.services.mail import ingest
 from app.services.mail.models import MailAttachment, MailBatch, MailMessage
 from app.services.matters.service import PartyService
 from tests._mbox import PDF, eml_bytes, mbox_bytes, message
-
-
-@pytest.fixture
-def open_session(async_db_session: AsyncSession):
-    """``ingest_mail`` takes a way to OPEN a database. Tests hand back the
-    per-test session and never commit it."""
-
-    @asynccontextmanager
-    async def _open():
-        yield async_db_session
-
-    return _open
-
-
-@pytest.fixture
-def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Every document the ingest asked to have read, in order."""
-    asked: list[int] = []
-
-    async def _fake(document_id: int, *, owner_user_id: Any, force: bool) -> str:
-        asked.append(document_id)
-        return f"job-{document_id}"
-
-    # ``read_quietly`` looks this up in dispatch at call time, so the real
-    # guard runs and only the enqueue is faked.
-    from app.services.documents.domains.extraction import dispatch
-
-    monkeypatch.setattr(dispatch, "start_extraction", _fake)
-    return asked
-
-
-async def _rows(db: AsyncSession, model: Any) -> list[Any]:
-    return list((await db.exec(select(model))).all())
+from tests._session import rows_of
 
 
 class TestEveryMessageLandsOnce:
@@ -66,7 +33,7 @@ class TestEveryMessageLandsOnce:
         )
 
         assert result.messages_total == 2 and result.messages_new == 2
-        assert [m.subject for m in await _rows(async_db_session, MailMessage)] == [
+        assert [m.subject for m in await rows_of(async_db_session, MailMessage)] == [
             "one",
             "two",
         ]
@@ -88,7 +55,7 @@ class TestEveryMessageLandsOnce:
         )
 
         assert (result.messages_new, result.messages_duplicate) == (1, 1)
-        assert len(await _rows(async_db_session, MailMessage)) == 2
+        assert len(await rows_of(async_db_session, MailMessage)) == 2
 
     @pytest.mark.asyncio
     async def test_the_same_bytes_are_answered_with_the_batch_that_read_them(
@@ -100,7 +67,7 @@ class TestEveryMessageLandsOnce:
 
         assert again.batch_id == first.batch_id
         assert again.messages_new == 0
-        assert len(await _rows(async_db_session, MailBatch)) == 1
+        assert len(await rows_of(async_db_session, MailBatch)) == 1
 
     @pytest.mark.asyncio
     async def test_a_file_that_is_not_mail_writes_nothing(
@@ -110,7 +77,7 @@ class TestEveryMessageLandsOnce:
 
         with pytest.raises(NotMailError):
             await ingest.ingest_mail(open_session, data=b"%PDF-1.4", file_name="x.pdf")
-        assert await _rows(async_db_session, MailBatch) == []
+        assert await rows_of(async_db_session, MailBatch) == []
 
 
 class TestAnAttachmentBecomesPaper:
@@ -127,7 +94,7 @@ class TestAnAttachmentBecomesPaper:
         )
 
         [paper] = [
-            d for d in await _rows(async_db_session, Document) if d.kind != "letter"
+            d for d in await rows_of(async_db_session, Document) if d.kind != "letter"
         ]
         assert paper.title == "statement.pdf"
         assert paper.source == "mail" and paper.channel == "email"
@@ -135,7 +102,7 @@ class TestAnAttachmentBecomesPaper:
         assert paper.document_date == sent.date()
         assert result.attachments_filed == 1
 
-        [link] = await _rows(async_db_session, MailAttachment)
+        [link] = await rows_of(async_db_session, MailAttachment)
         assert link.document_id == paper.id and link.filename == "statement.pdf"
         # And the shelf reads it, as it reads any upload - after the
         # letter the message itself became.
@@ -158,10 +125,10 @@ class TestAnAttachmentBecomesPaper:
         )
 
         papers = [
-            d for d in await _rows(async_db_session, Document) if d.kind != "letter"
+            d for d in await rows_of(async_db_session, Document) if d.kind != "letter"
         ]
         assert [d.title for d in papers] == ["s.pdf"]
-        assert len(await _rows(async_db_session, MailAttachment)) == 2
+        assert len(await rows_of(async_db_session, MailAttachment)) == 2
         assert (result.attachments_filed, result.attachments_duplicate) == (1, 1)
         # Read once: the two letters, and the one statement.
         assert dispatched.count(papers[0].id) == 1 and len(dispatched) == 3
@@ -177,7 +144,7 @@ class TestAnAttachmentBecomesPaper:
         result = await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
 
         assert result.attachments_duplicate == 1
-        [link] = await _rows(async_db_session, MailAttachment)
+        [link] = await rows_of(async_db_session, MailAttachment)
         assert link.document_id == already.id
         # The statement is not read again; only the new letter is.
         assert already.id not in dispatched and len(dispatched) == 1
@@ -196,7 +163,7 @@ class TestTheSenderIsKnown:
         data = eml_bytes(message(sender="Delta Dental <claims@deltadentalins.com>"))
         await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
 
-        [row] = await _rows(async_db_session, MailMessage)
+        [row] = await rows_of(async_db_session, MailMessage)
         # Case is the sender's to choose and nobody's to match on.
         assert row.party_id == delta.id
 
@@ -214,7 +181,7 @@ class TestTheSenderIsKnown:
         data = eml_bytes(message(sender="J Doe <JDOE@example.gov>"))
         await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
 
-        [row] = await _rows(async_db_session, MailMessage)
+        [row] = await rows_of(async_db_session, MailMessage)
         assert row.party_id == county.id
 
     @pytest.mark.asyncio
@@ -223,7 +190,7 @@ class TestTheSenderIsKnown:
     ) -> None:
         data = eml_bytes(message(sender="Someone <who@nowhere.example>"))
         await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
-        [row] = await _rows(async_db_session, MailMessage)
+        [row] = await rows_of(async_db_session, MailMessage)
         assert row.party_id is None and row.from_address == "who@nowhere.example"
 
 
@@ -243,7 +210,7 @@ class TestItSaysWhatItIsDoing:
         )
         # Before the work, with a count, and the batch's own record agrees.
         assert any("2" in line for line in said), said
-        [batch] = await _rows(async_db_session, MailBatch)
+        [batch] = await rows_of(async_db_session, MailBatch)
         assert batch.status == "done" and batch.finished_at is not None
         assert batch.messages_total == 2
 
@@ -268,13 +235,13 @@ class TestTheMessageIsALetter:
             open_session, data=data, file_name="claim.eml"
         )
 
-        [letter] = await _rows(async_db_session, Document)
+        [letter] = await rows_of(async_db_session, Document)
         assert (
             letter.kind == "letter" and letter.title == "Your claim has been processed"
         )
         assert letter.source == "mail" and letter.channel == "email"
         assert letter.document_date == sent.date()
-        [page] = await _rows(async_db_session, DocumentPage)
+        [page] = await rows_of(async_db_session, DocumentPage)
         # Already read: the mail IS text. Extraction skips a read page and
         # goes straight to proposing, so the letter says who it is from
         # the same way a scanned one does.
@@ -285,7 +252,7 @@ class TestTheMessageIsALetter:
         # identity rules, the subject and date beside it.
         assert lines[0] == "From: Delta Dental <claims@deltadentalins.com>"
         assert "Your claim was paid." in page.text
-        [row] = await _rows(async_db_session, MailMessage)
+        [row] = await rows_of(async_db_session, MailMessage)
         assert row.document_id == letter.id
         assert result.letters_filed == 1
         assert dispatched == [letter.id]
@@ -299,7 +266,7 @@ class TestTheMessageIsALetter:
         )
         result = await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
         assert result.letters_filed == 0
-        assert [d.title for d in await _rows(async_db_session, Document)] == ["s.pdf"]
+        assert [d.title for d in await rows_of(async_db_session, Document)] == ["s.pdf"]
 
     @pytest.mark.asyncio
     async def test_the_batch_counts_letters(
@@ -307,7 +274,7 @@ class TestTheMessageIsALetter:
     ) -> None:
         data = mbox_bytes([message(body="one"), message(body="two")])
         await ingest.ingest_mail(open_session, data=data, file_name="x.mbox")
-        [batch] = await _rows(async_db_session, MailBatch)
+        [batch] = await rows_of(async_db_session, MailBatch)
         assert batch.letters_filed == 2
 
 
@@ -473,8 +440,8 @@ class TestPaperIsFiledUnderTheSender:
         await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
 
         docs = DocumentService(async_db_session)
-        [row] = await _rows(async_db_session, MailMessage)
-        [link] = await _rows(async_db_session, MailAttachment)
+        [row] = await rows_of(async_db_session, MailMessage)
+        [link] = await rows_of(async_db_session, MailAttachment)
         assert await docs.tags_for(int(row.document_id)) == [party_tag(int(delta.id))]
         assert await docs.tags_for(link.document_id) == [party_tag(int(delta.id))]
 
@@ -493,7 +460,7 @@ class TestPaperIsFiledUnderTheSender:
             )
         )
         await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
-        [row] = await _rows(async_db_session, MailMessage)
+        [row] = await rows_of(async_db_session, MailMessage)
         assert row.party_id is None
         [card] = await _cards(async_db_session)
 
@@ -503,6 +470,6 @@ class TestPaperIsFiledUnderTheSender:
         await async_db_session.refresh(row)
         assert row.party_id == party_id
         docs = DocumentService(async_db_session)
-        [link] = await _rows(async_db_session, MailAttachment)
+        [link] = await rows_of(async_db_session, MailAttachment)
         assert await docs.tags_for(int(row.document_id)) == [party_tag(party_id)]
         assert await docs.tags_for(link.document_id) == [party_tag(party_id)]

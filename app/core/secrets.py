@@ -53,6 +53,7 @@ OWNERS = (
     "app.services.finance.adapters.providers.plaid_keys",
     "app.services.finance.adapters.providers.snaptrade",
     "app.services.insights.adapters.collectors.base",
+    "app.services.mail.pull",
 )
 # Shorter than this, the last four characters are most of the value.
 HINT_MIN_LENGTH = 12
@@ -79,8 +80,7 @@ class Secret:
     secret: bool = True
     # Whether what is enabled reads it; a callable when config decides.
     needed: bool | Callable[[], bool] = False
-    # Raises SecretRejectedError if the provider refuses ``value``, or
-    # SecretUncheckedError if it cannot say; returns if it works.
+    # Raises SecretRejectedError (refused) or SecretUncheckedError (cannot say).
     verify: Callable[[str], Awaitable[None]] | None = None
     # Values the provider itself offers (an account's phone numbers, a
     # mail provider's verified domains), as (value, label), picked instead

@@ -18,7 +18,12 @@ from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.mail.ingest import cards_by_address
-from app.services.mail.models import MailAttachment, MailMessage
+from app.services.mail.models import (
+    SOURCE_IMAP,
+    MailAttachment,
+    MailBatch,
+    MailMessage,
+)
 from app.services.matters.models.core import Party
 
 
@@ -43,6 +48,7 @@ class Arrival:
     attachments: list[Paper]
     card: str | None  # the contact.create card's status for this address
     became: str  # one sentence a person can read
+    via: str  # the file it was dropped in, or the mailbox it was pulled from
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +63,7 @@ class Arrival:
             "attachment_ids": [a.document_id for a in self.attachments],
             "card": self.card,
             "became": self.became,
+            "via": self.via,
         }
 
 
@@ -72,15 +79,16 @@ async def arrivals(
     """Everything that came in, grouped by the day it arrived, newest
     first. Four queries for the whole listing, never one per row."""
     query = (
-        select(MailMessage)
+        select(MailMessage, MailBatch)
+        .join(MailBatch, col(MailBatch.id) == col(MailMessage.batch_id))
         .where(MailMessage.owner_user_id == owner_user_id)
         .order_by(col(MailMessage.created_at).desc(), col(MailMessage.id).desc())
         .limit(limit)
     )
-    rows = list((await db.exec(query)).all())
-    if not rows:
+    pairs = list((await db.exec(query)).all())
+    if not pairs:
         return []
-    ids = [int(r.id) for r in rows]
+    ids = [int(row.id) for row, _ in pairs]
     papers: dict[int, list[Paper]] = {}
     for link in (
         await db.exec(
@@ -90,7 +98,7 @@ async def arrivals(
         papers.setdefault(link.message_id, []).append(
             Paper(link.document_id, link.filename)
         )
-    party_ids = {r.party_id for r in rows if r.party_id is not None}
+    party_ids = {row.party_id for row, _ in pairs if row.party_id is not None}
     names = (
         {
             int(p.id): p.name
@@ -104,8 +112,8 @@ async def arrivals(
     cards = await cards_by_address(db)
 
     days: dict[date, Day] = {}
-    for row in rows:
-        arrival = _arrival(row, papers.get(int(row.id), []), names, cards)
+    for row, batch in pairs:
+        arrival = _arrival(row, papers.get(int(row.id), []), names, cards, batch)
         days.setdefault(
             arrival.received_at.date(), Day(arrival.received_at.date())
         ).messages.append(arrival)
@@ -113,7 +121,11 @@ async def arrivals(
 
 
 def _arrival(
-    row: MailMessage, papers: list[Paper], names: dict[int, str], cards: dict[str, str]
+    row: MailMessage,
+    papers: list[Paper],
+    names: dict[int, str],
+    cards: dict[str, str],
+    batch: MailBatch,
 ) -> Arrival:
     party = (
         {"id": row.party_id, "name": names.get(row.party_id, "")}
@@ -133,6 +145,9 @@ def _arrival(
         attachments=papers,
         card=cards.get(row.from_address),
         became=_became(row, papers, party, cards.get(row.from_address), sender),
+        via=f"pulled from {batch.file_name}"
+        if batch.source == SOURCE_IMAP
+        else batch.file_name,
     )
 
 

@@ -2184,7 +2184,7 @@
       "kind": "repeated_statement",
       "label": "SELECT ... FROM mail_batch WHERE mail_batch.file_sha256 = :file_sha256_1",
       "file": "app/services/mail/ingest.py",
-      "function": "ingest_mail"
+      "function": "ingest_messages"
     },
     {
       "kind": "repeated_statement",
@@ -2200,7 +2200,7 @@
     },
     {
       "kind": "repeated_statement",
-      "label": "SELECT ... FROM mail_message WHERE mail_message.owner_user_id IS NULL ORDER BY mail_message.created_at DESC, mail_message.id DESC LIMIT :param_1",
+      "label": "SELECT ... FROM mail_message JOIN mail_batch ON mail_batch.id = mail_message.batch_id WHERE mail_message.owner_user_id IS NULL ORDER BY mail_message.created_at DESC, mail_message.id DESC LIMIT :param_1",
       "file": "app/services/mail/arrivals.py",
       "function": "arrivals"
     },
