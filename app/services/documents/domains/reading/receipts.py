@@ -26,17 +26,17 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.documents.domains.reading.figures import MONEY
 from app.services.documents.domains.reading.findings import Page
+from app.services.documents.domains.reading.waiting import (
+    ASKING_DAYS,
+    WAIT_DAYS,
+    flag_once,
+)
 from app.services.finance.schemas import ChangeDisplayRow
+from app.services.finance.utils import same_payee
 
 RECEIPT = "receipt.attach"
 UNMATCHED = "receipt_unmatched"
 PROPOSED_BY = "reading"
-# How long a receipt waits for its charge before it asks for a person,
-# and how long after that the nightly sweep has to ask: a receipt older
-# than both - one kept on the shelf before receipts waited - is not
-# waiting for anything, and is never read again.
-WAIT_DAYS = 30
-_ASKING_DAYS = 7
 # Where its charge posts, against the date on the receipt: a hold can
 # post the day before, an order is charged when it ships.
 _POSTS = (timedelta(days=-3), timedelta(days=14))
@@ -84,6 +84,23 @@ def read_total(pages: list[Page]) -> Total | None:
     return max(found, key=lambda t: t.cents, default=None)
 
 
+# A mailed receipt opens "From: Amazon.com <auto-confirm@amazon.com>",
+# the way ``mail.ingest.letter_text`` writes it.
+_FROM = re.compile(r"^from:\s*([^<]*)", re.I)
+
+
+def sender_line(pages: list[Page]) -> str | None:
+    """Who the receipt is from: the first line on its front - the
+    letterhead a printed receipt opens with, or the sender a mailed one
+    names."""
+    from app.services.documents.domains.reading.metadata import opening_lines
+
+    for _page, said in opening_lines(pages):
+        named = _FROM.match(said)
+        return (named.group(1).strip() if named else said) or None
+    return None
+
+
 def _printed_date(pages: list[Page]) -> date | None:
     """The first date a receipt prints - when it was bought, on every
     receipt seen - where the reader found no dateline ("Order placed
@@ -117,20 +134,39 @@ async def receipt_execute(
     db: AsyncSession, payload: ReceiptPayload, owner_user_id: int | None
 ) -> dict[str, Any]:
     """File the receipt on its charge, as the paperclip does."""
-    from app.services.documents.service import DocumentService
-    from app.services.finance.constants import transaction_tag
-
-    if (
-        await DocumentService(db).tag(
-            payload.document_id, transaction_tag(payload.transaction_id)
-        )
-        is None
+    if not await file_on_charge(
+        db, payload.document_id, payload.transaction_id, owner_user_id=owner_user_id
     ):
         raise ValueError(f"Document {payload.document_id} is gone.")
     return {
         "transaction_id": payload.transaction_id,
         "document_id": payload.document_id,
     }
+
+
+async def file_on_charge(
+    db: AsyncSession,
+    document_id: int,
+    transaction_id: int,
+    *,
+    owner_user_id: int | None,
+) -> bool:
+    """The one way paper lands on a charge: the tag the register's
+    paperclip files by, then an order read while it waited becomes its
+    split (#329). False when the document is gone."""
+    from app.services.documents.domains.reading import orders
+    from app.services.documents.service import DocumentService
+    from app.services.finance.constants import transaction_tag
+
+    if (
+        await DocumentService(db).tag(document_id, transaction_tag(transaction_id))
+        is None
+    ):
+        return False
+    await orders.propose_split(
+        db, document_id, transaction_id, owner_user_id=owner_user_id
+    )
+    return True
 
 
 async def receipt_describe(
@@ -162,7 +198,7 @@ async def match_waiting(
     from app.services.finance.utils import current_date
 
     today = today or current_date()
-    since = today - timedelta(days=WAIT_DAYS + _ASKING_DAYS)
+    since = today - timedelta(days=WAIT_DAYS + ASKING_DAYS)
     waiting = await _waiting(db, owner_user_id, since)
     if not waiting:
         return 0
@@ -183,9 +219,15 @@ async def match_waiting(
             and c.id not in claimed
             and (receipt.document_id, c.id) not in refused
         ]
-        # ponytail: two charges of the same total in the window is no
-        # answer, and the receipt keeps waiting; a payee tie-break would
-        # settle the rest if it comes up.
+        # Two charges of the total in the window: the one whose payee the
+        # receipt's letterhead or sender names is it (#425); still two,
+        # no answer, and the receipt keeps waiting.
+        if len(found) > 1 and receipt.payee:
+            found = [
+                c
+                for c in found
+                if same_payee(receipt.payee, c.merchant_name or c.name or "")
+            ]
         if len(found) != 1:
             continue
         claimed.add(int(found[0].id or 0))
@@ -217,6 +259,7 @@ class _Waiting:
     total: Total
     dated: date | None
     arrived: date
+    payee: str | None
 
     def window(self) -> tuple[date, date]:
         around, (before, after) = (
@@ -266,6 +309,7 @@ async def _waiting(
             total,
             d.document_date or _printed_date(pages.get(int(d.id or 0), [])),
             (d.received_at or d.created_at).date(),
+            sender_line(pages.get(int(d.id or 0), [])),
         )
         for d in documents
         if (total := read_total(pages.get(int(d.id or 0), [])))
@@ -329,33 +373,20 @@ async def _done_waiting(
     """A receipt nothing matched in ``WAIT_DAYS``: an Attention item,
     once, saying what it is and what to do with it."""
     from app.core.money import format_money
-    from app.services.finance.service import FinanceInsight, create_insight_if_new
-    from app.services.shared.queries import stored_owner
 
-    if not done:
-        return
-    keys = {f"{UNMATCHED}:{r.document_id}" for r in done}
-    flagged = set(
-        (
-            await db.exec(
-                select(FinanceInsight.dedup_key).where(
-                    col(FinanceInsight.dedup_key).in_(keys)
-                )
+    await flag_once(
+        db,
+        owner_user_id,
+        UNMATCHED,
+        [
+            (
+                str(receipt.document_id),
+                f"No charge found for {receipt.title}",
+                f"{format_money(receipt.total.cents)}"
+                f"{f' from {receipt.dated:%b %-d}' if receipt.dated else ''}, "
+                f"waited {WAIT_DAYS} days.",
+                receipt.total.cents,
             )
-        ).all()
+            for receipt in done
+        ],
     )
-    for receipt in done:
-        if f"{UNMATCHED}:{receipt.document_id}" in flagged:
-            continue
-        on = f" from {receipt.dated:%b %-d}" if receipt.dated else ""
-        await create_insight_if_new(
-            db,
-            owner_user_id=stored_owner(owner_user_id),
-            insight_type=UNMATCHED,
-            dedup_key=f"{UNMATCHED}:{receipt.document_id}",
-            severity="info",
-            title=f"No charge found for {receipt.title}",
-            body=f"{format_money(receipt.total.cents)}{on}, waited {WAIT_DAYS} days. "
-            "Attach it from its transaction's menu, or dismiss this.",
-            detected_amount=receipt.total.cents,
-        )

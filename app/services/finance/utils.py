@@ -6,6 +6,7 @@ import calendar
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from functools import partial
 import re
 from typing import Any
@@ -289,3 +290,30 @@ def to_cents(amount: Decimal | float | int | str) -> int:
     its binary expansion. Rounds as ``money_to_cents`` does.
     """
     return int(_TO_CENTS(Decimal(str(amount)) * 100))
+
+
+# How alike two payee strings must read to be one payee: "Nuence
+# Health" off handwriting is NuVence Health (#415, #22).
+SAME_PAYEE = 0.85
+
+
+def payee_likeness(said: str, name: str) -> float:
+    """0..1, how much ``said`` reads as ``name``, both normalized."""
+    return SequenceMatcher(None, normalize_payee(said), normalize_payee(name)).ratio()
+
+
+def same_payee(said: str, name: str) -> bool:
+    """Whether a payee read off paper names this payee of yours: the
+    same once normalized, one inside the other ("CVS PHARMACY" in "CVS
+    PHARMACY 4471"), the same first word ("AMAZON COM", "AMAZON
+    MKTPL"), or alike enough to be a misreading."""
+    a, b = normalize_payee(said), normalize_payee(name)
+    if not a or not b:
+        return False
+    first_a, first_b = a.split()[0], b.split()[0]
+    return (
+        a in b
+        or b in a
+        or (len(first_a) >= 3 and first_a == first_b)
+        or payee_likeness(a, b) >= SAME_PAYEE
+    )

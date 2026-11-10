@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         register_balance_as_of,
         statement_balance,
     )
+    from app.services.finance.domains.ledger.categories import list_categories
     from app.services.finance.domains.ledger.hydrate import hydrate_transactions
     from app.services.finance.domains.ledger.institutions import websites
     from app.services.finance.domains.ledger.merchant_icon import (
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
         set_last_four,
         set_number,
     )
+    from app.services.finance.domains.ledger.packet import receipts_packet
     from app.services.finance.domains.ledger.properties import (
         PROPERTY_KINDS,
         VALUATION_SOURCES,

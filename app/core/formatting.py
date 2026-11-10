@@ -405,7 +405,7 @@ def format_ago(seconds: float | None) -> str | None:
 
 
 # Anything that could end a header line or a quoted filename.
-_UNSAFE_FILENAME = re.compile(r'[\r\n"\\]+')
+_UNSAFE_FILENAME = re.compile(r'[\r\n"\\/]+')
 
 
 def safe_filename(name: str, fallback: str = "document") -> str:

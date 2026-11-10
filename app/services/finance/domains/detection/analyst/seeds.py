@@ -8,7 +8,13 @@ from sqlmodel import Session, col, select
 from app.core.log import logger
 from app.core.seed import missing_rows, seed_rows
 from app.core.tools import load_tools
-from app.services.ai.service import Agent, AgentTool, Tool, seed_agent
+from app.services.ai.service import (
+    Agent,
+    AgentPromptChange,
+    AgentTool,
+    Tool,
+    seed_agent,
+)
 from app.services.finance.domains.detection.analyst.prompts import (
     ANALYST_MAX_TOKENS,
     ANALYST_SYSTEM_PROMPT,
@@ -26,6 +32,7 @@ from app.services.finance.domains.detection.analyst.prompts import (
 from app.services.finance.domains.detection.analyst.shared import (
     AMAZON_EXPORTS_MODULE_SLUG,
     ANALYST_AGENT_SLUG,
+    CHANGES_MODULE_SLUG,
     DEEP_DIVE_AGENT_SLUG,
     FINANCE_CHAT_AGENT_SLUG,
     FINANCE_VOICE_AGENT_SLUG,
@@ -86,10 +93,34 @@ def amazon_exports_module_definition() -> dict[str, Any]:
     }
 
 
+def changes_module_definition() -> dict[str, Any]:
+    """The seed row for what she may propose: no content of its own, the
+    fetcher (``report.proposing_changes``) reads ``PROPOSING_CHANGES``
+    from code on every turn, so a change type registered tomorrow is
+    advertised tomorrow. Before the snapshot: how to act, then the
+    figures to act on."""
+    return {
+        "slug": CHANGES_MODULE_SLUG,
+        "name": "Proposing changes",
+        "description": "The change types the assistant may propose, from the registry",
+        "category": "finance",
+        "prompt_content": None,
+        "fetch_function": CHANGES_MODULE_SLUG,
+        "context_key": CHANGES_MODULE_SLUG,
+        "priority": 5,
+        "token_estimate": 0,
+        "is_active": True,
+    }
+
+
 def memory_module_definitions() -> tuple[dict[str, Any], ...]:
     """Every memory module the app seeds. Which agent reads one is the
     agent definition's ``memory_modules``, not the module's concern."""
-    return (snapshot_module_definition(), amazon_exports_module_definition())
+    return (
+        snapshot_module_definition(),
+        changes_module_definition(),
+        amazon_exports_module_definition(),
+    )
 
 
 def analyst_agent_definition() -> dict[str, Any]:
@@ -265,7 +296,11 @@ def finance_chat_agent_definition() -> dict[str, Any]:
         "system_prompt": FINANCE_CHAT_SYSTEM_PROMPT,
         "temperature": FINANCE_CHAT_TEMPERATURE,
         "max_tokens": FINANCE_CHAT_MAX_TOKENS,
-        "memory_modules": [SNAPSHOT_MODULE_SLUG, AMAZON_EXPORTS_MODULE_SLUG],
+        "memory_modules": [
+            SNAPSHOT_MODULE_SLUG,
+            CHANGES_MODULE_SLUG,
+            AMAZON_EXPORTS_MODULE_SLUG,
+        ],
         "knowledge_base_ids": [],
         "is_active": True,
         "code_mode": True,
@@ -341,6 +376,36 @@ def _attach_memory_modules(
     return added
 
 
+# The heading the seeded catalog sat under, and the heading after it.
+SEEDED_CATALOG = "## PROPOSING CHANGES"
+AFTER_CATALOG = "## MEMORY"
+
+
+def _let_go_of_seeded_catalog(session: Session) -> int:
+    """Strip the catalog a row was seeded with before it became a memory
+    module, once, recording it like any prompt change: otherwise every
+    turn would carry the stale copy and the live one. The caller commits.
+    Returns how many rows were trimmed."""
+    trimmed = 0
+    for agent in session.exec(select(Agent).where(Agent.category == "finance")).all():
+        prompt = agent.system_prompt or ""
+        start, end = prompt.find(SEEDED_CATALOG), prompt.find(AFTER_CATALOG)
+        if start < 0 or end < start or agent.id is None:
+            continue
+        agent.system_prompt = prompt[:start] + prompt[end:]
+        session.add(agent)
+        session.add(
+            AgentPromptChange(
+                agent_id=agent.id,
+                system_prompt=agent.system_prompt,
+                source="seed",
+                note="What she may propose is the finance_changes module now",
+            )
+        )
+        trimmed += 1
+    return trimmed
+
+
 def _attach_chat_tools(session: Session) -> int:
     """Link the chat agent to the finance tool rows (see ``app.core.seed``)."""
     agent = session.exec(
@@ -367,7 +432,12 @@ def load_finance_agent_fixtures(session: Session) -> dict[str, int]:
     memory-module grants are additive by name, so one a definition gained
     since an agent was seeded still reaches it."""
     definitions = finance_agent_definitions()
-    counts = {"finance_agents": 0, "finance_module_links": 0, "finance_tool_links": 0}
+    counts = {
+        "finance_agents": 0,
+        "finance_module_links": 0,
+        "finance_prompt_trims": 0,
+        "finance_tool_links": 0,
+    }
     missing = missing_rows(session, Agent, "slug", definitions)
     for definition in missing:
         seed_agent(session, definition)
@@ -378,6 +448,7 @@ def load_finance_agent_fixtures(session: Session) -> dict[str, int]:
     seeded = {d["slug"] for d in missing}
     present = [d for d in definitions if d["slug"] not in seeded]
     counts["finance_module_links"] = _attach_memory_modules(session, present)
+    counts["finance_prompt_trims"] = _let_go_of_seeded_catalog(session)
 
     if any(counts.values()):
         session.commit()

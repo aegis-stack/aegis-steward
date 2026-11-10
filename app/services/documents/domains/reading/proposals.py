@@ -14,6 +14,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.db import OpenSession
 from app.core.log import logger
+from app.services.documents.domains.reading.asked import already_asked, read_pages
 from app.services.documents.domains.reading.figures import (
     propose_figure,
     stated_balance,
@@ -43,22 +44,6 @@ REQUEST = "document.request"
 PROPOSED_BY = "reading"
 
 
-async def _already_asked(
-    db: AsyncSession, change_type: str, document_id: int, *, key: str = "document_id"
-) -> bool:
-    """A pending card for this document is the answer already waiting.
-    Reading again must not stack a second one on top of it. ``key`` is
-    the payload field that names the thing asked about, for a card that
-    is about an account rather than the paper."""
-    from app.services.finance.service import list_changes
-
-    return any(
-        change.payload.get(key) == document_id
-        for change in await list_changes(db, status="pending")
-        if change.change_type == change_type
-    )
-
-
 async def read_and_propose(
     open_session: OpenSession, document_id: int, *, owner_user_id: int | None = None
 ) -> None:
@@ -81,6 +66,7 @@ async def read_and_propose(
     from app.services.documents.domains.extraction.vision import vision_reader
     from app.services.documents.domains.reading.checks import propose_checks
     from app.services.documents.domains.reading.letters import letter_reader
+    from app.services.documents.domains.reading.orders import propose_order
 
     try:
         await propose_reading(
@@ -96,6 +82,8 @@ async def read_and_propose(
             owner_user_id=owner_user_id,
             read=await vision_reader(),
         )
+        # An order email: its items as a split on its charge (#329).
+        await propose_order(open_session, document_id, owner_user_id=owner_user_id)
     except Exception:
         logger.exception("Reading %s proposed nothing", document_id)
 
@@ -119,7 +107,7 @@ async def propose_reading(
     second reading waits on a model and must not be inside a transaction
     while it does - see ``OpenSession``.
     """
-    from app.services.documents.domains.reading import receipts  # reads with ours
+    from app.services.documents.domains.reading import waiting  # reads with ours
     from app.services.documents.domains.reading.banks import propose_bank
     from app.services.documents.domains.reading.benefits import propose_benefit
     from app.services.documents.domains.reading.statements import (
@@ -131,7 +119,7 @@ async def propose_reading(
         stranger = await _propose_contact(db, document_id, owner_user_id)
         stated = await stated_balance(db, document_id)  # once, used thrice
         figure = stated and await propose_figure(
-            db, document_id, owner_user_id, asked=_already_asked, stated=stated
+            db, document_id, owner_user_id, asked=already_asked, stated=stated
         )
         metadata = await _propose_metadata(db, document_id, owner_user_id)
         bank = await propose_bank(db, document_id, owner_user_id)
@@ -141,7 +129,7 @@ async def propose_reading(
             await check_filed_statement(db, document_id, stated)  # agrees? (#321)
         # Filed as a receipt already (the paperclip, mail): its charge
         # may be on file, or it starts waiting for it (#330).
-        await receipts.match_waiting(db, owner_user_id=owner_user_id)
+        await waiting.look_again(db, owner_user_id=owner_user_id)
     request = await _propose_demands(
         open_session, document_id, owner_user_id=owner_user_id, read_letter=read_letter
     )
@@ -171,12 +159,12 @@ async def _propose_demands(
 
     # ---- read what the model needs, then let the database go ----------
     async with open_session() as db:
-        if await _already_asked(db, REQUEST, document_id):
+        if await already_asked(db, REQUEST, document_id):
             return None
         matter_id = await MatterService(db).for_document(document_id)
         if matter_id is None or await RequestService(db).citing(document_id):
             return None
-        pages = await _read_pages(db, document_id)
+        pages = await read_pages(db, document_id)
     # A tax form's printed instructions ("Complete Form 8919...") are
     # written for every recipient: nothing on it is asked of anyone
     # (#431). Read off the page, because the card that files it as tax
@@ -224,9 +212,9 @@ async def _propose_metadata(
     from app.services.finance.service import propose
 
     document = await DocumentService(db).get(document_id)
-    if document is None or await _already_asked(db, METADATA, document_id):
+    if document is None or await already_asked(db, METADATA, document_id):
         return None
-    read = await _read_pages(db, document_id)
+    read = await read_pages(db, document_id)
     payload: dict[str, Any] = {"document_id": document_id}
     findings = read_document(read)
     for found in findings:
@@ -387,9 +375,9 @@ async def _propose_contact(
     """
     from app.services.finance.service import propose
 
-    if await _already_asked(db, CONTACT, document_id):
+    if await already_asked(db, CONTACT, document_id):
         return None
-    read = await _read_pages(db, document_id)
+    read = await read_pages(db, document_id)
     # One sender per piece of paper. A Chase statement offered to create
     # a contact called "Chase" while "JPMorgan Chase Bank, N.A." was
     # already in the address book: the letterhead matches a payee and a
@@ -437,16 +425,6 @@ async def _brands(db: AsyncSession) -> list[str]:
             *[one.name for one in payees],
         )
         if name and name.casefold() not in known
-    ]
-
-
-async def _read_pages(db: AsyncSession, document_id: int) -> list[Page]:
-    """A document's pages as a reader takes them."""
-    from app.services.documents.queries import pages_for
-
-    return [
-        {"page": page.page_number, "text": page.text}
-        for page in await pages_for(db, document_id)
     ]
 
 

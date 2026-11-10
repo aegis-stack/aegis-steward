@@ -21,6 +21,9 @@ from app.services.ai.fixtures.memory_module_fixtures import (
 from app.services.ai.models.agents import Agent, MemoryModule
 from app.services.finance.constants import ANALYST_NOTE_INSIGHT_TYPE
 from app.services.finance.domains.detection import analyst, generate_insights
+from app.services.finance.domains.detection.analyst.prompt_changes import (
+    PROPOSING_CHANGES,
+)
 from app.services.finance.models import (
     FinanceAnalystSnapshot,
     FinanceCategory,
@@ -846,9 +849,45 @@ class TestFixtures:
         assert chat_agent.memory_modules == [
             "kept_by_hand",
             analyst.SNAPSHOT_MODULE_SLUG,
+            analyst.CHANGES_MODULE_SLUG,
             analyst.AMAZON_EXPORTS_MODULE_SLUG,
         ]
-        assert counts["finance_module_links"] == 2
+        assert counts["finance_module_links"] == 3
+
+    @pytest.mark.queryspy(threshold=5)  # seeds twice, reads the agent back
+    def test_a_row_seeded_with_the_catalog_lets_go_of_it_once(
+        self, db_session: Session
+    ) -> None:
+        """Before the catalog was a module it was seeded onto the row;
+        left there, every turn would carry it twice. The seed strips it
+        once, recorded, and leaves a row without it alone."""
+        from app.services.ai.service import AgentPromptChange
+        from app.services.finance.domains.detection.analyst.shared import (
+            FINANCE_CHAT_AGENT_SLUG,
+        )
+
+        analyst.load_finance_agent_fixtures(db_session)
+        chat_agent = db_session.exec(
+            select(Agent).where(Agent.slug == FINANCE_CHAT_AGENT_SLUG)
+        ).one()
+        chat_agent.system_prompt = "## ROLE\n\nWho she is.\n\n## PROPOSING CHANGES\n\nold\n\n## MEMORY\n\nRules."
+        db_session.add(chat_agent)
+        db_session.commit()
+
+        counts = analyst.load_finance_agent_fixtures(db_session)
+
+        db_session.refresh(chat_agent)
+        assert (
+            chat_agent.system_prompt == "## ROLE\n\nWho she is.\n\n## MEMORY\n\nRules."
+        )
+        assert counts["finance_prompt_trims"] == 1
+        recorded = db_session.exec(
+            select(AgentPromptChange).where(AgentPromptChange.agent_id == chat_agent.id)
+        ).all()
+        assert [c.source for c in recorded] == ["seed", "seed"]
+        assert (
+            analyst.load_finance_agent_fixtures(db_session)["finance_prompt_trims"] == 0
+        )
 
     @pytest.mark.queryspy(threshold=5)  # seeds twice, reads the agent back
     def test_an_edited_agent_survives_reseeding(self, db_session: Session) -> None:
@@ -1844,11 +1883,7 @@ class TestTheSplitGuidanceStatesTheLimit:
     exactly", which reads as close-enough in both directions."""
 
     def test_it_says_parts_can_never_exceed_the_charge(self) -> None:
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "can never total" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "can never total" in PROPOSING_CHANGES
 
     def test_an_overshoot_is_allocated_not_refused(self) -> None:
         """The first wording told her to propose NOTHING, and she duly
@@ -1863,14 +1898,10 @@ class TestTheSplitGuidanceStatesTheLimit:
         WHICH charge an item landed on is a fact a proportion would
         fabricate.
         """
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "IN PROPORTION to their" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "arithmetic, not invention" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "IN PROPORTION to their" in PROPOSING_CHANGES
+        assert "arithmetic, not invention" in PROPOSING_CHANGES
         # And it still forbids the case that IS a fabrication.
-        assert "ACROSS charges" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "ACROSS charges" in PROPOSING_CHANGES
 
     def test_the_allocation_it_asks_for_totals_the_charge(self) -> None:
         """The rule is only worth stating if the arithmetic lands: these
@@ -1892,12 +1923,8 @@ class TestMatchingAnOrderToItsCharge:
         """It matched on exact order dates and missed everything, until
         the user pointed out that charges post days later - a $16.20
         order on Feb 8 posted Feb 12."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "never an exact date" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "week either side" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "never an exact date" in PROPOSING_CHANGES
+        assert "week either side" in PROPOSING_CHANGES
 
     def test_the_window_ranks_candidates_and_never_discards_the_only_one(
         self,
@@ -1907,73 +1934,47 @@ class TestMatchingAnOrderToItsCharge:
         agent dismissed it as "outside a 7-day window" - then did the
         same to a $34.88 order. A unique amount match is evidence; a
         calendar distance is not."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "FIRST look, not the only one" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "widen to a month either side" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "IS the match" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "within a month has not" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "FIRST look, not the only one" in PROPOSING_CHANGES
+        assert "widen to a month either side" in PROPOSING_CHANGES
+        assert "IS the match" in PROPOSING_CHANGES
+        assert "within a month has not" in PROPOSING_CHANGES
 
     def test_she_looks_before_she_asks(self) -> None:
         """Three times in one session the user had to say "check the
         account, you will see": the card's interest history was eight
         rows in the ledger, and what they would pay this month was a
         $1,800 recurring stream already on file."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "LOOK BEFORE YOU ASK" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "name which tool could hold it" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "Ask only for what the ledger CANNOT know" in (
-            FINANCE_CHAT_SYSTEM_PROMPT
-        )
+        assert "LOOK BEFORE YOU ASK" in PROPOSING_CHANGES
+        assert "name which tool could hold it" in PROPOSING_CHANGES
+        assert "Ask only for what the ledger CANNOT know" in (PROPOSING_CHANGES)
         # A name they used was taken for the wrong company and an answer
         # built on it (#453): a name is a payee to look up, not hers.
-        assert "transactions(payee=...) first, never yours" in (
-            FINANCE_CHAT_SYSTEM_PROMPT
-        )
+        assert "transactions(payee=...) first, never yours" in (PROPOSING_CHANGES)
         # Told "I have a 1098 from Citizens", she answered from memory that
         # the Citizens form was a 1099-INT - though the mortgage payments
         # go to Citizens: paper not yet seen is new paper (#453).
         assert "paper they name that you have not seen is new paper" in (
-            FINANCE_CHAT_SYSTEM_PROMPT
+            PROPOSING_CHANGES
         )
 
     def test_one_question_at_a_time(self) -> None:
         """A list of five things to go and find is a list nobody works
         through; the user twice had to say so."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "One question at a time" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "One question at a time" in PROPOSING_CHANGES
 
     def test_a_figure_carries_when_it_is_from(self) -> None:
         """An export lags the lender. The user had to point that out
         after a balance was quoted flat, as though it were current."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "as fresh as its last IMPORT" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "say WHEN a figure is from" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "as fresh as its last IMPORT" in PROPOSING_CHANGES
+        assert "say WHEN a figure is from" in PROPOSING_CHANGES
         # Which source wins is not a matter of taste.
-        assert "portal wins for what is OWED" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "portal wins for what is OWED" in PROPOSING_CHANGES
 
     def test_a_budget_question_goes_to_the_budget_tool(self) -> None:
         """ "what is our budget for Medicine/Drugs?" got "the budget
         target isn't exposed here" - true at the time. The ledger holds
         what was SPENT, which is a different question."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "BUDGETED at is `budget()`, never `ledger()`" in (
-            FINANCE_CHAT_SYSTEM_PROMPT
-        )
+        assert "BUDGETED at is `budget()`, never `ledger()`" in (PROPOSING_CHANGES)
 
     def test_the_chat_agent_is_granted_the_budget_tool(self) -> None:
         from app.services.finance.domains.detection.analyst.seeds import (
@@ -1986,35 +1987,19 @@ class TestMatchingAnOrderToItsCharge:
         """The sweep checked only that a row had left plain Shopping, so
         27 Amazon purchases sitting in Assets:Properties were reported as
         already categorized. "Categorized" is not "categorized right"."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert '"Categorized" is not "categorized CORRECTLY"' in (
-            FINANCE_CHAT_SYSTEM_PROMPT
-        )
-        assert "unfinished work, not handled" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert '"Categorized" is not "categorized CORRECTLY"' in (PROPOSING_CHANGES)
+        assert "unfinished work, not handled" in PROPOSING_CHANGES
 
     def test_the_outstanding_list_is_printed_once(self) -> None:
         """A 60-row table re-printed every turn spends the answer the
         user is waiting for; the user had to ask it to stop."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "Do not re-print the unmatched set every turn" in (
-            FINANCE_CHAT_SYSTEM_PROMPT
-        )
+        assert "Do not re-print the unmatched set every turn" in (PROPOSING_CHANGES)
 
     def test_a_second_match_is_a_question_not_a_pick(self) -> None:
         """Amounts repeat hard on this payee, so picking between two
         matches is a coin flip dressed as an answer."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
-        )
-
-        assert "MORE THAN ONE row at that amount" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "ask which one" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "MORE THAN ONE row at that amount" in PROPOSING_CHANGES
+        assert "ask which one" in PROPOSING_CHANGES
 
 
 class TestRetirementSection:

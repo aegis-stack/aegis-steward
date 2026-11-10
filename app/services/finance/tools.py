@@ -24,6 +24,10 @@ from app.core.db import get_async_session
 from app.core.formatting import payee_label
 from app.core.tools import register_tool
 from app.services.finance.constants import UNCATEGORIZED_CATEGORY_NAMES
+
+# The memory-module fetchers register where the tools do, so every
+# process that can run her (chat, MCP, the CLI's test turn) has them.
+from app.services.finance.domains.detection.analyst import report  # noqa: F401
 from app.services.finance.domains.investments import queries as investment_queries
 from app.services.finance.domains.ledger.cash_flow import month_review
 from app.services.finance.domains.ledger.queries.accounts import EVERYONE, accounts_page

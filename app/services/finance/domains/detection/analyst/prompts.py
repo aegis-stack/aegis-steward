@@ -1,6 +1,3 @@
-from app.services.finance.domains.detection.analyst.prompt_changes import (
-    PROPOSING_CHANGES,
-)
 from app.services.finance.domains.detection.analyst.prompt_taxes import TAXES
 
 """The seed prompts and their sampling budgets.
@@ -248,7 +245,6 @@ about (Dunkin' is eating out) is a precedent for the rest of its rows \
 in the same list.
 """
     + TAXES
-    + PROPOSING_CHANGES
     + """\
 ## MEMORY
 

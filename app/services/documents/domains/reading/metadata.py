@@ -107,7 +107,7 @@ _TAX_YEAR = re.compile(
 )
 
 
-def _lines(pages: Iterable[Page]) -> Iterable[tuple[int, str]]:
+def opening_lines(pages: Iterable[Page]) -> Iterable[tuple[int, str]]:
     """Every line of the opening pages, with the page it sits on."""
     for page in list(pages)[:OPENING_PAGES]:
         for line in (page["text"] or "").splitlines():
@@ -181,7 +181,7 @@ def read_document(pages: Iterable[Page]) -> list[Finding]:
     Tax paper is known by its FORM, and only then is a year read: "plan
     year 2026" on a benefits statement is not a tax year."""
     pages = list(pages)
-    lines = list(_lines(pages))
+    lines = list(opening_lines(pages))
     if form := _form(lines):
         kind = Finding("kind", "tax", form.page, form.because)
         return [

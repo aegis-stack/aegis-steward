@@ -171,6 +171,24 @@ async def seed_txn(
     )
 
 
+async def seed_charge(db: AsyncSession, cents: int, day: date, name: str) -> int:
+    """One posted charge on an account of its own, by id: what waiting
+    paper (a receipt, a check scan, an order) is matched against."""
+    svc = FinanceService(db)
+    account = await seed_account(svc, name=f"VISA {name} {day}")
+    row = await seed_txn(svc, int(account.id or 0), cents, day, name=name)
+    return int(row.id or 0)
+
+
+async def pending_cards(
+    db: AsyncSession, change_type: str, status: str | None = "pending"
+) -> list[Any]:
+    """The queue's cards of one type, oldest first."""
+    from app.services.finance.domains.writes.queue import list_changes
+
+    return list(await list_changes(db, status=status, change_type=change_type))
+
+
 async def category_id(svc: FinanceService, hint: str) -> int:
     """The id of the category a ``"Parent:Child"`` hint names, made if new."""
     category = await svc.get_or_create_category_from_hint(hint)

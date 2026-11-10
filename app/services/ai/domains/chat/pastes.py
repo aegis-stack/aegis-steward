@@ -45,6 +45,7 @@ from app.services.ai.domains.chat.user_memory import (
     load_user_pastes,
     store_user_pastes,
 )
+from app.services.documents.service import PAGE_HEADING
 
 # What counts as "a wall of text" rather than a long question. Below it
 # the paste is just what someone typed and belongs in the message; above
@@ -63,10 +64,6 @@ ID_LENGTH = 8
 # stored and knows its own id.
 PLACEHOLDER = "\x00paste\x00"
 
-# Pages are named rather than run together: a figure's meaning often
-# depends on which page it came off, and statements repeat their
-# headings.
-PAGE_HEADING = "--- page {number} ---\n"
 
 # The id inside a marker this module wrote.
 _MARKER_ID = re.compile(r"\[pasted text #([0-9a-f]+)")

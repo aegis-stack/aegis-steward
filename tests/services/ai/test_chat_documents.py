@@ -156,12 +156,12 @@ class TestImagesAreUntouched:
 class TestSheKnowsToReadIt:
     def test_the_prompt_says_a_pdf_arrives_as_a_marker(self) -> None:
         """Otherwise the likely answer is one built from the filename."""
-        from app.services.finance.domains.detection.analyst.prompts import (
-            FINANCE_CHAT_SYSTEM_PROMPT,
+        from app.services.finance.domains.detection.analyst.prompt_changes import (
+            PROPOSING_CHANGES,
         )
 
-        assert "An attached PDF has already been READ" in FINANCE_CHAT_SYSTEM_PROMPT
-        assert "before answering from the filename" in FINANCE_CHAT_SYSTEM_PROMPT
+        assert "An attached PDF has already been READ" in PROPOSING_CHANGES
+        assert "before answering from the filename" in PROPOSING_CHANGES
 
 
 class TestAScheduleIsItsOwnKind:

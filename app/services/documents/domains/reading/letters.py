@@ -19,6 +19,11 @@ from datetime import date
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.documents.domains.reading.findings import Page, flat
+from app.services.documents.domains.reading.model import (
+    pages_text,
+    read_with_model,
+    when_reachable,
+)
 from app.services.matters.changes import ITEM_KIND_KEYS
 
 SURFACE = "documents:read-letter"
@@ -157,34 +162,14 @@ def checked(reading: LetterReading, pages: list[Page]) -> Checked | None:
 
 async def read_letter(pages: list[Page]) -> LetterReading:
     """Hand the letter's text to the model and take back its reading."""
-    from pydantic_ai import Agent as PydanticAgent
-
-    from app.core.config import settings
-    from app.services.ai.service import active_model, extract_usage, record_usage
-
-    model, model_name = await active_model.model_for_active(settings)
-    agent: PydanticAgent[None, LetterReading] = PydanticAgent(
-        model, instructions=INSTRUCTIONS, output_type=LetterReading
+    return await read_with_model(
+        f"Read this letter.\n\n{pages_text(pages)}",
+        instructions=INSTRUCTIONS,
+        output_type=LetterReading,
+        surface=SURFACE,
     )
-    written = "\n\n".join(
-        f"--- page {page['page']} ---\n{page['text']}" for page in pages if page["text"]
-    )
-    result = await agent.run(f"Read this letter.\n\n{written}")
-    await record_usage(
-        action=SURFACE, model_name=model_name, usage=extract_usage(result), user_id=None
-    )
-    return result.output
 
 
 async def letter_reader():  # noqa: ANN201
-    """The reader, or None when no model is reachable. A stack without
-    the AI service reads paper and proposes its metadata as before;
-    only the demands go unread."""
-    from app.core.config import settings
-    from app.services.ai.service import ProviderSetupError, active_model
-
-    try:
-        await active_model.model_for_active(settings)
-    except ProviderSetupError:
-        return None
-    return read_letter
+    """The reader, or None when no model is reachable."""
+    return await when_reachable(read_letter)

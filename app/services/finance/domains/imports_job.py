@@ -48,7 +48,7 @@ async def _import(
     owner_user_id: int | None,
     on_label: SetLabel | None,
 ) -> dict[str, Any]:
-    from app.services.documents.service import receipts
+    from app.services.documents.service import waiting
     from app.services.finance.schemas import import_result_payload
     from app.services.finance.service import FinanceService
 
@@ -60,7 +60,7 @@ async def _import(
         on_label=on_label,
     )
     # A charge a waiting receipt is for may be in the file (#330).
-    await receipts.match_waiting(session, owner_user_id=owner_user_id)
+    await waiting.look_again(session, owner_user_id=owner_user_id)
     await session.commit()
     return import_result_payload(result)
 

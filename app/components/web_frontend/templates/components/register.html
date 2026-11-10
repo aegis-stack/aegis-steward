@@ -97,6 +97,9 @@
     <summary class="list-none cursor-pointer text-xs px-2.5 py-1 rounded border border-aegis-border text-aegis-muted hover:text-aegis-text">Views</summary>
     <div class="absolute z-20 mt-1 w-72 floating p-2"><div {{ hx_load("/accounts/views") }}></div></div>
   </details>
+  {# These rows, with their receipts and claims, as one zip (issue 332). #}
+  <a href="{{ register.export_path }}" data-export
+     class="self-start text-xs px-2.5 py-1 rounded border border-aegis-border text-aegis-muted hover:text-aegis-text">Export</a>
 
   {# What a search replaces: the rows, their pager and the empty states.
      Everything above stays put, which is the whole point. #}

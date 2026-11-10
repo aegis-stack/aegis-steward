@@ -27,6 +27,9 @@ from app.services.finance.domains.detection.analyst.facts import (
     diff_facts,
     snapshot_before,
 )
+from app.services.finance.domains.detection.analyst.prompt_changes import (
+    PROPOSING_CHANGES,
+)
 from app.services.finance.domains.detection.analyst.sections import (
     ReportContext,
     _accounts_section,
@@ -39,6 +42,7 @@ from app.services.finance.domains.detection.analyst.sections import (
     _signed,
 )
 from app.services.finance.domains.detection.analyst.shared import (
+    CHANGES_MODULE_SLUG,
     SNAPSHOT_MODULE_SLUG,
     owner_user_id_for,
 )
@@ -237,3 +241,16 @@ register_fetcher(
         "spending vs norm, recent transactions, open anomalies, cash forecast."
     ),
 )
+
+
+async def proposing_changes(ctx: FetchContext) -> str | None:
+    """Memory-module fetcher: what she may propose, as the code says now.
+
+    Her row's prompt is seeded once and never re-read, so a change type
+    registered after that was advertised to nobody - three times over
+    (2026-09-17, 2026-11-09). Read from code on every turn instead,
+    registering a change type and telling her about it are one step."""
+    return PROPOSING_CHANGES
+
+
+register_fetcher(CHANGES_MODULE_SLUG, proposing_changes)

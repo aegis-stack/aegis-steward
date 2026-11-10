@@ -143,6 +143,19 @@ class InsuranceService:
         )
         return list((await self.db.exec(query)).all())
 
+    async def claims_paid_by(self, transaction_ids: list[int]) -> list[InsuranceClaim]:
+        """The claims these charges paid, in one read: what a packet of
+        transactions carries beside its receipts (#332)."""
+        if not transaction_ids:
+            return []
+        query = (
+            select(InsuranceClaim)
+            .where(col(InsuranceClaim.paid_transaction_id).in_(transaction_ids))
+            .where(col(InsuranceClaim.deleted_at).is_(None))
+            .order_by(col(InsuranceClaim.service_on), col(InsuranceClaim.id))
+        )
+        return list((await self.db.exec(query)).all())
+
     async def patient_owes_total(self, policy_id: int) -> int:
         """What the EOBs on this policy say is still owed to providers,
         in cents: claims with no paying charge linked."""

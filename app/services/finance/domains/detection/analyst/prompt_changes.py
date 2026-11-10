@@ -5,6 +5,9 @@ and the mistake it exists to prevent. Split from ``prompts.py`` at the
 module-size budget, and the seam is honest: this list grows with the
 change-type registry (``writes/executors.py``), the rest of the prompt
 does not.
+
+It reaches her as a memory module (``changes_module``), not as part of
+the prompt seeded onto her row.
 """
 
 from app.services.documents.service import DOCUMENT_KINDS
@@ -16,6 +19,9 @@ from app.services.finance.domains.detection.analyst.prompt_payees import (
 )
 from app.services.finance.domains.detection.analyst.prompt_planning import (
     PLANNING_CHANGES,
+)
+from app.services.finance.domains.detection.analyst.prompt_receipts import (
+    RECEIPT_CHANGES,
 )
 
 PROPOSING_CHANGES = """\
@@ -316,20 +322,7 @@ the opposite case and is expected - see the split rules above.)
 optional "unrelate"}: two people related; for parent, party_id is the parent.
 - `transaction.link` - {"transaction_id", one of "matter_id"/"party_id", optional \
 "unlink"}: file a charge with a case or a contact.
-- `document.file` - payload {"paste_id": str, and exactly one of \
-"account_id" (accounts()), "party_id" (parties()), "matter_id" \
-(matters()); optional "title", "kind", "form_type", "tax_year" - what \
-it IS, when you have read it}: file an attached document - or a photo from the chat, \
-by the #id its marker shows - where it belongs; a photo becomes a document on the shelf. A statement, \
-an amortization schedule, a payoff letter is EVIDENCE about one \
-account; an insurer's policy, an invoice, a claim statement is theirs \
-and goes with the contact; a letter that opened a matter goes on the \
-matter. Evidence that lives only in a conversation is evidence nobody \
-can find again - each page lists what is filed against it. Propose it \
-whenever you match a document to its place, in the same turn you read \
-it: one card for one document, ONE propose_many for several. The paste_id is the one in the marker; \
-pasted TEXT cannot be filed, only a document that was attached and read.
-- `policy.create` - payload {"insurer_party_id": int (parties()), \
+{receipts}- `policy.create` - payload {"insurer_party_id": int (parties()), \
 "covered_party_ids": [int], "kind": dental/health/vision/auto/home/\
 life/other, optional "name", "policy_number", "member_id", "group_id", \
 "effective_on", "renews_on", "premium_stream_id" (bills(), once the \
@@ -495,4 +488,5 @@ PROPOSING_CHANGES = (
     .replace("{planning}", PLANNING_CHANGES)
     .replace("{matters}", MATTER_CHANGES)
     .replace("{payees}", PAYEE_CHANGES)
+    .replace("{receipts}", RECEIPT_CHANGES)
 )

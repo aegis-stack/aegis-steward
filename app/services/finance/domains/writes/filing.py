@@ -16,10 +16,15 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.formatting import before_and_after
 from app.services.finance.schemas import ChangeDisplayRow
 
+# Where a receipt with no charge yet is filed, in the card's words.
+WAITS = "The shelf, waiting for its charge"
+
 
 class FileDocumentPayload(BaseModel):
     """Which document belongs where: an account, a contact, a matter or
-    a transaction (its receipt, #331), exactly one of them.
+    a transaction (its receipt, #331), exactly one of them - or, for a
+    receipt whose charge is not on file yet, no place at all: it waits
+    on the shelf for the charge to post (#424).
 
     Takes the PASTE id, because that is what the conversation is holding:
     an attached PDF is read once and stands in the message as
@@ -78,11 +83,19 @@ class FileDocumentPayload(BaseModel):
             )
             if v is not None
         ]
-        if len(given) != 1:
+        if len(given) != 1 and not self.waits:
             raise ValueError(
-                "Exactly one of account_id, party_id, matter_id, transaction_id."
+                "Exactly one of account_id, party_id, matter_id, transaction_id; "
+                "only a receipt may have none, to wait for its charge."
             )
         return self
+
+    @property
+    def waits(self) -> bool:
+        """A receipt filed with no place: on the shelf, for its charge."""
+        return self.kind == "receipt" and not any(
+            (self.account_id, self.party_id, self.matter_id, self.transaction_id)
+        )
 
 
 async def place(
@@ -184,16 +197,18 @@ async def _as_document(
 async def file_document_execute(
     db: AsyncSession, payload: FileDocumentPayload, owner_user_id: int | None
 ) -> dict[str, Any]:
-    from app.services.documents.service import DocumentService
+    from app.services.documents.service import DocumentService, receipts
 
-    tag, _name = await place(
-        db,
-        owner_user_id,
-        account_id=payload.account_id,
-        party_id=payload.party_id,
-        matter_id=payload.matter_id,
-        transaction_id=payload.transaction_id,
-    )
+    tag = None
+    if not payload.waits:
+        tag, _name = await place(
+            db,
+            owner_user_id,
+            account_id=payload.account_id,
+            party_id=payload.party_id,
+            matter_id=payload.matter_id,
+            transaction_id=payload.transaction_id,
+        )
     entry = await chat_entry(db, payload.paste_id, owner_user_id)
     if entry is None:
         raise ValueError(
@@ -206,7 +221,13 @@ async def file_document_execute(
         if not made
         else await _as_document(db, entry, owner_user_id)
     )
-    await DocumentService(db).tag(document_id, tag)
+    if payload.transaction_id is not None:
+        # Onto a charge the one way (#329): its split follows when read.
+        await receipts.file_on_charge(
+            db, document_id, payload.transaction_id, owner_user_id=owner_user_id
+        )
+    elif tag is not None:
+        await DocumentService(db).tag(document_id, tag)
     if payload.naming():
         await DocumentService(db).update(document_id, payload.naming())
     await DocumentService(db).add_figures(document_id, payload.figures)
@@ -229,17 +250,19 @@ async def file_document_read(result: dict[str, Any]) -> None:
 async def file_document_describe(
     db: AsyncSession, payload: FileDocumentPayload, owner_user_id: int | None
 ) -> list[ChangeDisplayRow]:
-    try:
-        _tag, name = await place(
-            db,
-            owner_user_id,
-            account_id=payload.account_id,
-            party_id=payload.party_id,
-            matter_id=payload.matter_id,
-            transaction_id=payload.transaction_id,
-        )
-    except ValueError as exc:
-        name = str(exc)
+    name = WAITS
+    if not payload.waits:
+        try:
+            _tag, name = await place(
+                db,
+                owner_user_id,
+                account_id=payload.account_id,
+                party_id=payload.party_id,
+                matter_id=payload.matter_id,
+                transaction_id=payload.transaction_id,
+            )
+        except ValueError as exc:
+            name = str(exc)
     found = await chat_entry(db, payload.paste_id, owner_user_id)
     said = (
         str(found.get("title") or "document") if found else f"paste {payload.paste_id}"
