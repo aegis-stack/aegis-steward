@@ -6,7 +6,6 @@ transactional test session so ingested rows are visible and rolled back.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -28,29 +27,6 @@ def _tools_use_test_session(
     async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(ai_tools, "get_async_session", opens(async_db_session))
-
-
-@pytest.fixture
-def open_session(async_db_session: AsyncSession):
-    @asynccontextmanager
-    async def _open():
-        yield async_db_session
-
-    return _open
-
-
-@pytest.fixture
-def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    from app.services.documents.domains.extraction import dispatch
-
-    asked: list[int] = []
-
-    async def _fake(document_id: int, *, owner_user_id: Any, force: bool) -> str:
-        asked.append(document_id)
-        return "job"
-
-    monkeypatch.setattr(dispatch, "start_extraction", _fake)
-    return asked
 
 
 def test_arrivals_registers_on_import() -> None:
@@ -102,3 +78,14 @@ async def test_days_one_returns_the_latest_day_when_today_is_empty(
     days = (await ai_tools.arrivals(days=1))["days"]
     assert [m["subject"] for d in days for m in d["messages"]] == ["yesterday"]
     assert days[0]["date"] == row.created_at.date().isoformat()
+
+
+@pytest.mark.asyncio
+async def test_without_a_mailbox_the_tool_says_none() -> None:
+    """The page's status line and the assistant's read the same thing:
+    which mailbox is pulled, or that none is."""
+    from app.services.mail import pull
+    from tests._secret_settings import secret_settings
+
+    with secret_settings(pull.HOST, pull.USER, pull.FOLDER, pull.PASSWORD):
+        assert (await ai_tools.arrivals())["mailbox"] is None

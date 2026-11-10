@@ -71,7 +71,7 @@ def messages(data: bytes, filename: str) -> list[ParsedMessage]:
             f"{filename!r} is not a mailbox export (.mbox) or a saved message (.eml)."
         )
     if filename.lower().endswith(".eml"):
-        return [_read(message_from_bytes(data, policy=policy.default))]
+        return [one(data)]
     # mailbox.mbox reads a path, not bytes: it seeks. A temp file is the
     # honest way in, and it is gone before this returns.
     with tempfile.TemporaryDirectory() as tmp:
@@ -88,6 +88,12 @@ def messages(data: bytes, filename: str) -> list[ParsedMessage]:
             return [_read(one) for one in islice(box, cap)]
         finally:
             box.close()
+
+
+def one(data: bytes) -> ParsedMessage:
+    """One message from its raw bytes: a saved ``.eml``, or a message as
+    an IMAP server hands it over."""
+    return _read(message_from_bytes(data, policy=policy.default))
 
 
 def _read(mail: EmailMessage) -> ParsedMessage:

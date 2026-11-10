@@ -17,6 +17,7 @@ from app.components.web_frontend.rendering import render
 from app.core.db import get_async_session
 from app.services.finance.deps import get_owner_user_id
 from app.services.mail.arrivals import Arrival, Day, arrivals
+from app.services.mail.pull import mailbox_status
 
 SECTION = section("mail")
 router = APIRouter(prefix=SECTION.path)
@@ -27,6 +28,7 @@ COLUMNS = (
     {"key": "subject", "label": "Subject", "kind": "open", "phone": "primary"},
     {"key": "attachments", "label": "Attachments", "kind": "open"},
     {"key": "became", "label": "Became"},
+    {"key": "via", "label": "Via"},
 )
 
 
@@ -52,6 +54,7 @@ def _row(arrival: Arrival) -> dict[str, Any]:
         ]
         or "",
         "became": arrival.became,
+        "via": arrival.via,
     }
 
 
@@ -65,6 +68,7 @@ async def page(
 ) -> Response:
     async with get_async_session() as db:
         days = await arrivals(db, owner_user_id=owner_user_id)
+        mailbox = await mailbox_status(db)
     return render(
         request,
         "pages/mail.html",
@@ -74,5 +78,6 @@ async def page(
             "upload": f"{DOCUMENTS}/new",
             "columns": list(COLUMNS),
             "days": [_day(d) for d in days],
+            "mailbox": mailbox,
         },
     )

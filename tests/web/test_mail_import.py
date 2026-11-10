@@ -7,7 +7,6 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi.testclient import TestClient
-import pytest
 
 from tests._mbox import PDF, eml_bytes, mbox_bytes, message
 from tests.web.conftest import follow
@@ -28,21 +27,6 @@ MBOX = (
 # real path.
 
 
-@pytest.fixture
-def no_reader(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """The attachments' reads would go to the worker; record them instead."""
-    from app.services.documents.domains.extraction import dispatch
-
-    asked: list[int] = []
-
-    async def _fake(document_id: int, *, owner_user_id: Any, force: bool) -> str:
-        asked.append(document_id)
-        return "job-read"
-
-    monkeypatch.setattr(dispatch, "start_extraction", _fake)
-    return asked
-
-
 def _upload(client: TestClient, upload: tuple) -> Any:
     return client.post("/documents/new", files={"file": upload}, data={"kind": "other"})
 
@@ -54,7 +38,7 @@ class TestTheDoor:
         assert ".mbox" in accept and ".eml" in accept
 
     def test_an_mbox_is_followed_not_filed(
-        self, client: TestClient, no_reader: list[int]
+        self, client: TestClient, dispatched: list[int]
     ) -> None:
         """Any other file is filed and the dialog closes. A mailbox is a
         job, and the answer is the follower - pattern 5, as the finance
@@ -65,7 +49,7 @@ class TestTheDoor:
         assert follower.get("hx-ext") == "sse" and follower.get("sse-swap") == "status"
 
     def test_a_single_message_is_mail_too(
-        self, client: TestClient, no_reader: list[int]
+        self, client: TestClient, dispatched: list[int]
     ) -> None:
         eml = ("claim.eml", eml_bytes(message()), "message/rfc822")
         one(_upload(client, eml).text, "[sse-connect]")
@@ -73,7 +57,7 @@ class TestTheDoor:
 
 class TestFollowedToTheEnd:
     def test_the_frame_counts_what_landed_and_the_paper_is_on_the_shelf(
-        self, live_client: TestClient, no_reader: list[int]
+        self, live_client: TestClient, dispatched: list[int]
     ) -> None:
         status, final = follow(live_client, _upload(live_client, MBOX).text)
         assert status == "done"
@@ -90,10 +74,10 @@ class TestFollowedToTheEnd:
             f"unsearched: {[text(r) for r in select(live_client.get('/documents').text, '#documents tbody tr')][:8]}"
         )
         # And the shelf was asked to read both: the letter and its statement.
-        assert len(no_reader) == 2
+        assert len(dispatched) == 2
 
     def test_the_letter_opens_as_its_own_text(
-        self, live_client: TestClient, no_reader: list[int]
+        self, live_client: TestClient, dispatched: list[int]
     ) -> None:
         """A message filed as a letter IS text: the page text is the
         original, not a reading of it, so the dialog shows it where a PDF

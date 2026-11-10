@@ -2,8 +2,15 @@
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import Any
 
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
+
+
+async def rows_of(db: AsyncSession, model: Any) -> list[Any]:
+    """Every row of ``model``, for a test reading back what it wrote."""
+    return list((await db.exec(select(model))).all())
 
 
 def opens(

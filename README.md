@@ -1,191 +1,108 @@
-# aegis-steward
+<p align="center">
+  <img src="app/components/web_frontend/static/brand-mark.png" alt="Aegis Steward" width="160">
+</p>
 
-A production-ready async Python application built with Aegis Stack
+<p align="center"><em>Your money, and the paperwork around it, on a server you own.</em></p>
 
-## Components
+<p align="center"><img src="docs/images/overview.png" alt="Steward overview: net worth, spending, upcoming bills" width="900"></p>
 
-This Aegis Stack project includes the following components:
+Steward pulls in your accounts, shows where your money is and where it's headed, and keeps the letters, forms and deadlines that come with it in one place. Illiana, its assistant, answers questions about all of it and proposes changes, and nothing changes until you approve. It runs on your own machine or server, and your data stays there.
 
-- **Backend**: FastAPI-based async web server
-- **Frontend**: Flet-based Python UI framework (Overseer dashboard at `/dashboard`)
-- **Web Frontend**: Server-rendered pages at `/` (Jinja2 + htmx + Alpine, Tailwind/DaisyUI)
-- **Scheduler**: APScheduler-based async task scheduling
-- **Database**: SQLite database with SQLModel ORM
+Built on [Aegis Stack](https://github.com/lbedner/aegis-stack).
 
+<table>
+<tr>
+<td width="50%" valign="top">
 
-## Services
-- **AI**: Multi-provider AI integration with PydanticAI
-- **Comms**: Email, SMS, and voice communications
+### Connect
+**Your accounts.** Link banks through SimpleFIN or Plaid and brokerages through SnapTrade, import OFX, QFX, QIF and CSV statements, or add accounts by hand, including your house and car. On a server, connected accounts sync every six hours.
 
+</td>
+<td width="50%" valign="top">
 
-## Getting Started
+### See
+**Where it stands.** Net worth by type (with or without the house), cash flow and savings rate, spending against your usual month, recurring bills and income found automatically, and a Review queue for anything uncategorized or worth a look.
 
-### Prerequisites
+</td>
+</tr>
+<tr>
+<td valign="top">
 
-- Python 3.14+
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+### Plan
+**Where it's going.** A daily cash forecast up to two years out, budgets with goals and envelopes, a debt payoff plan (avalanche or snowball) with your debt-free date, and a retirement plan that runs 300 simulations to show a likely range and the chance it holds.
 
-### Installation
+</td>
+<td valign="top">
 
-1. **Install dependencies:**
-   ```bash
-   uv sync                    # Core dependencies only
-   # Or for development: uv sync --all-extras
-   ```
+### Ask
+**Illiana.** Ask about your money in plain words, from the chat page or the drawer on any page. She reads your ledger, accounts, bills, budget, plan and paperwork, and every change she suggests arrives as a card you approve, edit or reject.
 
-2. **Activate virtual environment:**
-   ```bash
-   source .venv/bin/activate        # Windows: .venv\Scripts\activate
-   ```
+</td>
+</tr>
+</table>
 
-3. **No `make`?** Every `make <target>` in this README also runs as
-   `uv run poe <target>` — same tasks, no make needed, which is how
-   Windows gets through the rest of this page. `uv run poe -h` lists
-   them.
+## Matters
 
-4. **Set up environment:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
+Some money comes with paperwork attached: Medicaid renewals, insurance claims, taxes, an estate. A **matter** is one of those relationships, with the agency, your reference number and when the next letter is due.
 
-5. **Set up database:**
-   ```bash
-   # Create data directory for SQLite database
-   mkdir -p data
+- **Asked for:** each letter's demands, one ask per line, marked done, not applicable or waived
+- **Papers:** the documents that answer each ask, filed on the matter
+- **Facts:** figures about your money with where each one came from, kept, never overwritten
+- **Spent:** the transactions that belong to it
+- **Timeline:** calls, mailings, visits and notes
+- **Answer sheet:** everything they asked for and what answers it, ready to print
 
-   # Database will be created automatically on first run
-   # Default location: data/app.db
-   ```
+Deadlines show up in Review before they're late. Steward can also read your mail over IMAP, file letters and attachments as documents, and link them to the matters they belong to.
 
-6. **Run the application:**
-   ```bash
-   make serve
-   ```
+<p align="center"><img src="docs/images/matter-asked.png" alt="A matter's Asked for tab" width="900"></p>
 
-The application will be available at `http://127.0.0.1:8000`. If port 8000 is
-already taken, `make serve` picks the next free port and prints the URL it
-chose, so two stacks can run side by side without editing any config.
+## Nothing changes without you
 
-Every command in this README also works as `uv run poe <target>` (for
-example `uv run poe serve`), once the dev dependencies are installed
-(`uv sync --all-extras`); run `uv run poe -h` for the full list.
+Every change Illiana proposes, from categorizing a charge to filing a document on a matter, is a card in your Review queue. Approve one at a time or a batch at once, veto single rows, or edit a card before it applies. Approval is the only way a change happens.
 
-## Development
+## Your data stays yours
 
-### Running Tests
-```bash
-make test
-```
+- **Encrypted at rest:** provider tokens, account numbers and saved sign-ins are encrypted with AES-256-GCM. Outside development, Steward won't start without an encryption key.
+- **Locked by default:** password sign-in, rate limits and lockout, no public registration. Every page sits behind sign-in.
+- **What leaves the server:** what you connect, which is your AI provider, your finance providers and your mail server. Besides those, Steward fetches merchant icons from Google's favicon service and refreshes its AI model price list. No analytics, no error tracking, no update checks.
+- **Backups:** a nightly backup on the server, plus an optional encrypted off-site copy to S3 or DigitalOcean Spaces.
 
-### Code Quality
-```bash
-make check  # Run linting, type checking, and tests
-```
+<p align="center">
+  <img src="docs/images/accounts.png" alt="Accounts" width="290">
+  <img src="docs/images/plan.png" alt="Retirement plan" width="290">
+  <img src="docs/images/review.png" alt="Review queue" width="290">
+</p>
 
-### CLI Commands
-
-Your project gets its own CLI command **automatically installed** when first used - no setup required! 
+## Try it
 
 ```bash
-# Health monitoring (auto-installs CLI if needed)
-make health                     # Basic health check
-make health-detailed            # Detailed component status
-make health-json               # JSON output for scripts
-make health-quick              # Quick healthy/unhealthy check
-
-# Direct CLI usage (after first make command)
-aegis-steward health check              # Basic health check
-aegis-steward health check --detailed   # Detailed component status
-aegis-steward health check --json       # JSON output for scripts
-aegis-steward health quick              # Quick healthy/unhealthy check
-
-# Explore all commands
-aegis-steward --help                    # See all available commands
-aegis-steward health --help             # See health subcommand options
+git clone https://github.com/aegis-stack/aegis-steward
+cd aegis-steward
+cp .env.example .env
+make serve
 ```
 
-**Environment Issues?** If CLI commands don't work:
-```bash
-# Ensure you're in the project's virtual environment
-unset VIRTUAL_ENV               # Clear Docker contamination
-source .venv/bin/activate       # Activate local venv
-make health                     # This will auto-install CLI
-# Or manually: make install-cli
-```
-
-### Documentation
-```bash
-make docs-serve  # Serve docs at http://localhost:8001/aegis-steward/
-```
-
-## Docker
-
-### Development
-```bash
-docker compose --profile dev up
-```
-
-### Production
-```bash
-docker compose --profile prod up
-```
-
-## Configuration
-
-### Database Settings
-
-The database component uses SQLite with the following default configuration:
+`make serve` stays in the foreground. In a second terminal:
 
 ```bash
-# Environment variables (add to .env file)
-DATABASE_URL=sqlite:///data/app.db          # Database file location
-DATABASE_ENGINE_ECHO=false                  # Enable SQL query logging
+make cli ARGS="auth create-user --email you@example.com"
+make cli ARGS="finance seed-demo"   # six accounts, eight months of sample data
 ```
 
-### Database Usage
+Set `ADMIN_USER_EMAILS=["you@example.com"]` in `.env`, then open `http://localhost:<port>`, where the port is `WEBSERVER_HOST_PORT` in `.env.ports`. Illiana needs a model: the example config uses a local Ollama with `llama3.2:3b`, or set `AI_PROVIDER` to the provider you use.
 
-```python
-from app.core.db import db_session
-from sqlmodel import SQLModel, Field, select
+To connect real accounts, add a SimpleFIN setup token under Settings, Connections (no keys needed), or set `PLAID_CLIENT_ID` and `PLAID_SECRET`, or `SNAPTRADE_CLIENT_ID` and `SNAPTRADE_CONSUMER_KEY`.
 
-# Define a model
-class User(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    name: str
-    email: str
+## Run it on your own server
 
-# Use the database
-with db_session() as session:
-    user = User(name="John Doe", email="john@example.com")
-    session.add(user)
-    # Auto-committed by context manager
-```
+Steward deploys from GitHub Actions: open **Actions, Deploy, Run workflow**. Set `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_CONFIG` as repository secrets. Put the server's environment in a `DEPLOY_ENV` secret, starting from `.env.deploy.example`: it needs `DOMAIN`, `ACME_EMAIL`, `REDIS_PASSWORD`, `ENCRYPTION_KEY` and `APP_ENV=prod`. `scripts/server-setup.sh` prepares a fresh Ubuntu, Debian or Fedora box. HTTPS comes from Traefik.
 
-## Project Structure
+## Not there yet
 
-```
-aegis-steward/
-├── app/                    # Application code
-│   ├── components/         # Component implementations
-│   │   ├── backend/       # FastAPI backend
-│   │   └── frontend/      # Flet frontend
-│   │   └── web_frontend/  # htmx web frontend (pages at /)
-│   │   └── scheduler/     # APScheduler background tasks
-│   ├── cli/               # CLI commands and health monitoring
-│   ├── core/              # Core utilities
-│   │   ├── config.py      # Environment-dependent configuration
-│   │   ├── constants.py   # Immutable constants (12-Factor App)
-│   │   ├── db.py          # Database connection and session management
-│   │   └── log.py         # Structured logging
-│   ├── entrypoints/       # Execution entry points
-│   ├── integrations/      # App composition layer
-├── tests/                 # Test suite
-├── docs/                  # Documentation
-├── docker-compose.yml     # Docker services
-└── pyproject.toml        # Project configuration
-```
+- A connected account can attach to an existing manual account only when you first link it, not afterward.
+- There's no Sync now button. Connections sync on the server's schedule, or run `finance sync`.
+- Restoring a backup is done by the deploy tool, not from inside the app.
 
----
+## License
 
-Generated with [Aegis Stack](https://github.com/lbedner/aegis-stack)
+[TBD]

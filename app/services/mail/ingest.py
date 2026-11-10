@@ -24,7 +24,12 @@ from app.services.documents.models import DocumentPage
 from app.services.documents.service import DocumentService
 from app.services.finance.service import FinancePendingChange, propose
 from app.services.mail import parse
-from app.services.mail.models import MailAttachment, MailBatch, MailMessage
+from app.services.mail.models import (
+    SOURCE_FILE,
+    MailAttachment,
+    MailBatch,
+    MailMessage,
+)
 from app.services.matters.models.core import party_tag
 from app.services.system.jobs import SetLabel, unwatched
 
@@ -78,11 +83,33 @@ async def ingest_mail(
     that already read them, and a message already filed - by Message-ID,
     whatever file it came in - is counted and left alone.
     """
-    say = on_label or unwatched
     # Refuses a file that is not mail before anything is written.
     messages = parse.messages(data, file_name)
-    sha = hashlib.sha256(data).hexdigest()
+    return await ingest_messages(
+        open_session,
+        messages,
+        file_name=file_name,
+        sha=hashlib.sha256(data).hexdigest(),
+        owner_user_id=owner_user_id,
+        on_label=on_label,
+    )
 
+
+async def ingest_messages(
+    open_session: OpenSession,
+    messages: list[parse.ParsedMessage],
+    *,
+    file_name: str,
+    sha: str,
+    source: str = SOURCE_FILE,
+    owner_user_id: int | None = None,
+    on_label: SetLabel | None = None,
+) -> MailImportResult:
+    """Messages already parsed - from a file or a mailbox pull - into the
+    shelf. ``file_name`` is what the batch is called (the file, or the
+    mailbox); ``sha`` is over the bytes they came from, so the same bytes
+    are answered with the batch that already read them."""
+    say = on_label or unwatched
     async with open_session() as db:
         already = (
             await db.exec(select(MailBatch).where(MailBatch.file_sha256 == sha))
@@ -98,6 +125,7 @@ async def ingest_mail(
             owner_user_id=owner_user_id,
             file_name=file_name,
             file_sha256=sha,
+            source=source,
             messages_total=len(messages),
         )
         db.add(batch)

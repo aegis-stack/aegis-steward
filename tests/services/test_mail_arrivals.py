@@ -10,7 +10,6 @@ so they cannot disagree.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -20,29 +19,6 @@ from app.services.mail import ingest
 from app.services.mail.arrivals import arrivals
 from app.services.matters.service import PartyService
 from tests._mbox import PDF, eml_bytes, mbox_bytes, message
-
-
-@pytest.fixture
-def open_session(async_db_session: AsyncSession):
-    @asynccontextmanager
-    async def _open():
-        yield async_db_session
-
-    return _open
-
-
-@pytest.fixture
-def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    from app.services.documents.domains.extraction import dispatch
-
-    asked: list[int] = []
-
-    async def _fake(document_id: int, *, owner_user_id: Any, force: bool) -> str:
-        asked.append(document_id)
-        return "job"
-
-    monkeypatch.setattr(dispatch, "start_extraction", _fake)
-    return asked
 
 
 class TestWhatCameIn:

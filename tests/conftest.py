@@ -1002,3 +1002,21 @@ def clean_agent_cache():
     invalidate_agent_cache()
     yield
     invalidate_agent_cache()
+
+
+@pytest.fixture
+def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Every document the shelf asked to have read, in order. The reads
+    would go to the worker; ``read_quietly`` looks ``start_extraction``
+    up at call time, so the real guard runs and only the enqueue is
+    faked."""
+    from app.services.documents.domains.extraction import dispatch
+
+    asked: list[int] = []
+
+    async def _fake(document_id: int, *, owner_user_id: Any, force: bool) -> str:
+        asked.append(document_id)
+        return f"job-{document_id}"
+
+    monkeypatch.setattr(dispatch, "start_extraction", _fake)
+    return asked
