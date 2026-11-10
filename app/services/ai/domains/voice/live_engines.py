@@ -26,7 +26,7 @@ DEFAULT = setting_default("VOICE_LIVE_ENGINE")
 # Whose realtime models a browser call can reach, and how. Pydantic AI
 # answers the browser's WebRTC offer for OpenAI, so audio goes straight
 # there ("realtime"); Gemini Live speaks only a WebSocket holding the key,
-# so our server carries the audio both ways ("relay", chat_live.py).
+# so our server carries the audio both ways ("relay", chat_live_relay.py).
 CALL_TRANSPORTS: dict[str, Transport] = {"openai": "realtime", "google": "relay"}
 
 enabled = queries.enabled_engines

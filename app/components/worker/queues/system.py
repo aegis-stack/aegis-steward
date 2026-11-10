@@ -10,6 +10,7 @@ from app.components.worker import arq_hooks
 from app.components.worker.tasks.chat_tasks import (
     announce_approval_task,
     fold_conversation_task,
+    read_photo_task,
 )
 from app.components.worker.tasks.document_tasks import extract_document_task
 from app.components.worker.tasks.finance_tasks import (
@@ -53,6 +54,7 @@ class WorkerSettings:
         cleanup_temp_files,
         announce_approval_task,
         fold_conversation_task,
+        read_photo_task,
         extract_document_task,
         finance_import_task,
         finance_sync_connection_task,

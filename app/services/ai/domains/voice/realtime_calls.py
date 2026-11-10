@@ -4,7 +4,7 @@ The realtime model IS her brain here: her voice agent's prompt, tools and
 code mode, built exactly as a turn builds it. Two ways the audio travels:
 the browser's WebRTC offer answered by Pydantic AI (OpenAI), with a server
 sideband attached to the same call; or the relay (Gemini Live), where our
-server holds the session and carries the audio (``chat_live.py``). Either
+server holds the session and carries the audio (``chat_live_relay.py``). Either
 way ``drive`` runs her tools in a turn's context, saves each finished turn
 into the conversation (what you said, what she said, her steps - so the
 thread shows it like a typed turn), and ledgers the priced usage when it
@@ -51,7 +51,7 @@ def end_call() -> str:
 
 # A call ends on her tool, not on a phrase the page listens for: a model
 # can drop a phrase (Gemini said "Have a great day!" for "Talk soon."). The
-# page hangs up when it sees the call (``chat_live``, voice.js).
+# page hangs up when it sees the call (``chat_live`` / ``chat_live_relay``, voice.js).
 END_CALL = end_call.__name__
 CALL_TOOLS = FunctionToolset([end_call])
 

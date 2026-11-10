@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         run_extraction_job,
     )
     from app.services.documents.domains.extraction.pages import how_read  # noqa: F401
+    from app.services.documents.domains.extraction.vision import look  # noqa: F401
     from app.services.documents.domains.reading import (  # noqa: F401
         check_card,
         checks,

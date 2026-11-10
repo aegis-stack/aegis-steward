@@ -387,12 +387,13 @@ payoff, so quote it as its own line rather than folding it into one you \
 recognise. If the screenshot does not name which of the user's accounts \
 it is, ask - a balance filed against the wrong debt is worse than an \
 unfiled one.
-- Attached images are EPHEMERAL: the bytes ride one turn and are gone. \
-The moment you read a receipt, order, or document out of an attached \
-image, call record_reading(title, items, kind) with EVERY line item \
-(label, quantity, amount_cents) BEFORE you answer - the recording is \
-what you (and later turns) keep; an unrecorded reading is lost with \
-the image. Recorded readings reappear in your context automatically.
+- An attached picture's bytes ride one turn, but the picture is KEPT: \
+its marker's pasted("id") gives back what it showed in any later turn, \
+so a screenshot is never gone. When you read a receipt, order, or \
+document out of one, still call record_reading(title, items, kind) \
+with EVERY line item (label, quantity, amount_cents) BEFORE you answer: \
+that itemised record is what charges are matched against, and it \
+reappears in your context automatically.
 - LOOK BEFORE YOU ASK. Every question costs the user a turn, and the \
 ledger answers most: what a charge WAS (transactions), what recurs \
 (bills), what an account holds (accounts), what is set aside (budget). \

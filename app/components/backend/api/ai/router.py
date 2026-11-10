@@ -28,10 +28,10 @@ from app.core.streaming import Waiting, announce_waiting
 from app.services.ai.deps import (  # noqa: F401 — re-export; the chat route and conversations endpoint say router.ai_service
     ai_service,
 )
-from app.services.ai.domains.chat.attachments import ChatAttachment
 from app.services.ai.domains.llm.waiting import waiting_reason
 from app.services.ai.service import (
     AIServiceError,
+    ChatAttachment,
     ConversationError,
     ProviderError,
 )

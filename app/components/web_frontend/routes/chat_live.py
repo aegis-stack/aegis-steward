@@ -7,24 +7,18 @@ to the CLIENT: when GPT-Live needs real work, the browser sends what was
 said to ``DELEGATIONS``, which runs her voice agent's turn in the
 conversation - her prompt, tools and approval cards - and returns what
 GPT-Live should say.
+
+A picture shown mid-call (``LOOKS``) is the same kind of turn with the
+picture attached: she looks at it in the conversation and says what she
+saw, so a screenshot never means leaving the call.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, WebSocket
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field, field_validator
-from pydantic_ai.messages import (
-    FunctionToolCallEvent,
-    PartEndEvent,
-    PartStartEvent,
-    RealtimeResponseInterruptedEvent,
-    RealtimeTurnCompleteEvent,
-    SpeechPart,
-)
 from starlette.responses import JSONResponse, Response
 
 from app.components.backend.api.ai.router import ai_service, sync_active_model
@@ -33,24 +27,22 @@ from app.components.web_frontend.routes.chat import (
     CHAT_URLS,
     SECTION,
     SURFACE,
-    component_url,
     owned,
 )
 from app.components.web_frontend.routes.chat_speech import transcription_hint
-from app.core.chat_transcript import readable, trace_label
+from app.core.chat_transcript import readable
 from app.core.config import settings
 from app.core.db import get_async_session
 from app.core.log import logger
 from app.services.ai.service import (
-    MARKER,
     AIProvider,
+    ChatAttachment,
     LiveEngine,
     live_engines,
     realtime_calls,
     to_spoken,
     usage_recording,
 )
-from app.services.ai.service.trace import record_tool_call
 from app.services.finance.service import (
     FINANCE_VOICE_AGENT_SLUG,
     LIVE_SIGN_OFF,
@@ -64,11 +56,17 @@ router = APIRouter(dependencies=[Depends(sync_active_model)])
 LIVE = SECTION.path + "/live"
 SESSIONS = LIVE + "/sessions"
 DELEGATIONS = LIVE + "/delegations"
+LOOKS = LIVE + "/looks"
 USAGE = LIVE + "/usage"
 ENGINE = LIVE + "/engine"
 RELAY = LIVE + "/ws"
 CHAT_URLS.update(
-    engine=ENGINE, relay=RELAY, sessions=SESSIONS, delegations=DELEGATIONS, usage=USAGE
+    engine=ENGINE,
+    relay=RELAY,
+    sessions=SESSIONS,
+    delegations=DELEGATIONS,
+    looks=LOOKS,
+    usage=USAGE,
 )
 
 # A delegation's result is spoken as commentary, capped at 500 tokens.
@@ -117,8 +115,17 @@ LIVE_GOODBYE = (
 )
 LIVE_CUES = {"check_in": LIVE_CHECK_IN, "goodbye": LIVE_GOODBYE}
 
+# A picture shown mid-call: what the turn is asked with it (nothing was
+# said - the picture is the question), and the cue she says what she saw
+# from, in her own voice on any engine.
+LIVE_SHOWN = "(showing you this on the call)"
+LIVE_SAW = (
+    "They just showed you a picture on the call and you looked at it. Tell "
+    'them what you saw, in your own words: "{seen}"'
+)
 
-def _opening(conversation: Any) -> str:
+
+def opening(conversation: Any) -> str:
     """How she opens the call: picking up a dropped one, carrying on a
     conversation, or a first greeting."""
     if conversation is None:
@@ -166,6 +173,18 @@ class Said(BaseModel):
         return value.strip()
 
 
+class Shown(BaseModel):
+    image: ChatAttachment
+    conversation_id: str | None = None
+
+    @field_validator("image")
+    @classmethod
+    def _a_picture(cls, value: ChatAttachment) -> ChatAttachment:
+        if not value.media_type.startswith("image/"):
+            raise ValueError("only a picture can be shown on a call")
+        return value
+
+
 def _live_api() -> Any:
     from openai import AsyncOpenAI
 
@@ -192,7 +211,7 @@ async def _history(conversation_id: str | None) -> list[dict[str, Any]]:
     return items[-LIVE_HISTORY:]
 
 
-async def _engine_now() -> tuple[LiveEngine | None, dict[str, Any] | None]:
+async def current_engine() -> tuple[LiveEngine | None, dict[str, Any] | None]:
     """The engine her voice profile names, and what the call bar shows of
     it: its name, and its rate when it bills by the second (a token-billed
     engine is priced after the call). Its own short session: SQLite
@@ -210,7 +229,7 @@ async def _engine_now() -> tuple[LiveEngine | None, dict[str, Any] | None]:
 async def engine_now() -> Response:
     """How the phone dials: WebRTC (GPT-Live, OpenAI realtime) or the
     relay's WebSocket (Gemini Live)."""
-    engine, info = await _engine_now()
+    engine, info = await current_engine()
     if engine is None:
         return Response(status_code=503)
     return JSONResponse({"transport": engine.transport, "engine": info})
@@ -222,7 +241,7 @@ async def open_session(offer: Offer) -> Response:
     (#273): GPT-Live handing real work back to the page, or a realtime
     model running her own agent. The answer says which, so the page
     speaks that engine's events."""
-    engine, info = await _engine_now()
+    engine, info = await current_engine()
     if engine is None:
         return Response(status_code=503)
     if engine.transport == "realtime":
@@ -254,14 +273,16 @@ async def open_session(offer: Offer) -> Response:
             "session_id": opened.session.id,
             "transport": "gpt_live",
             "engine": info,
-            "greeting": _opening(
+            "greeting": opening(
                 await owned(offer.conversation_id) if offer.conversation_id else None
             ),
         }
     )
 
 
-async def _call(conversation_id: str | None, engine: LiveEngine) -> tuple[Any, Any]:
+async def start_call(
+    conversation_id: str | None, engine: LiveEngine
+) -> tuple[Any, Any]:
     """Her voice agent as a realtime engine's brain, and the conversation
     its turns are saved into - a call without one starts one."""
     model = live_engines.realtime_model(engine)
@@ -296,7 +317,7 @@ async def _call(conversation_id: str | None, engine: LiveEngine) -> tuple[Any, A
     return conversation, realtime
 
 
-def _driving(conversation: Any, engine: LiveEngine) -> dict[str, Any]:
+def driving(conversation: Any, engine: LiveEngine) -> dict[str, Any]:
     """Who the call is, for ``realtime_calls.drive``."""
     return {
         "conversation_id": conversation.id,
@@ -312,9 +333,9 @@ async def _open_realtime(
     """A realtime engine over WebRTC: Pydantic AI answers the offer, and
     the audio goes straight between the browser and the provider."""
     try:
-        conversation, realtime = await _call(offer.conversation_id, engine)
+        conversation, realtime = await start_call(offer.conversation_id, engine)
         sdp = await realtime_calls.open_call(
-            offer.sdp, realtime=realtime, **_driving(conversation, engine)
+            offer.sdp, realtime=realtime, **driving(conversation, engine)
         )
     except Exception:
         logger.exception("Opening a realtime call failed")
@@ -325,129 +346,9 @@ async def _open_realtime(
             "transport": "realtime",
             "conversation_id": conversation.id,
             "engine": info,
-            "greeting": _opening(conversation),
+            "greeting": opening(conversation),
         }
     )
-
-
-# --- The relay (#273): Gemini Live has no WebRTC hand-off, only a
-# WebSocket holding the key, so the call's audio comes through here. Mic
-# audio arrives as binary frames (PCM16 at the model's input rate) and her
-# voice goes back the same way (at its output rate); a few JSON events
-# tell the page what the call is doing. ``drive`` does the rest, as for a
-# WebRTC call: her tools, the saved turns, the priced usage.
-
-
-async def _tell(ws: WebSocket, event: Any) -> None:
-    """What the page shows of an event, if anything."""
-    said: dict[str, Any] | None = None
-    if isinstance(event, RealtimeResponseInterruptedEvent):
-        said = {"type": "interrupted"}  # flush what has not been played
-    elif isinstance(event, FunctionToolCallEvent):
-        if event.part.tool_name == realtime_calls.END_CALL:
-            said = {"type": "hang_up"}  # after her goodbye has played
-        else:
-            step: list[dict[str, Any]] = []
-            record_tool_call(step, event)
-            said = {"type": "working", "label": trace_label(step[0])}
-    elif isinstance(event, RealtimeTurnCompleteEvent):
-        said = {"type": "done"}
-    elif (
-        isinstance(event, PartStartEvent)
-        and isinstance(event.part, SpeechPart)
-        and event.part.speaker == "user"
-    ):
-        # Gemini reports no speech onset; your first transcribed words are
-        # it, and "heard" is the end (#458).
-        said = {"type": "hearing"}
-    elif isinstance(event, PartEndEvent) and isinstance(event.part, SpeechPart):
-        side = "heard" if event.part.speaker == "user" else "said"
-        said = {"type": side, "text": event.part.transcript or ""}
-    if said:
-        await _send(ws, said)
-
-
-def drawn_card(card_id: str) -> dict[str, Any]:
-    """What the page is told of a card she drew mid-call: where it loads,
-    so a chart is up while she talks about it."""
-    return {"type": "card", "url": component_url(MARKER, card_id)}
-
-
-async def _show_cards(ws: WebSocket, card_ids: list[str]) -> None:
-    for card_id in card_ids:
-        await _send(ws, drawn_card(card_id))
-
-
-async def _send(ws: WebSocket, message: dict[str, Any]) -> None:
-    try:
-        await ws.send_json(message)
-    except Exception:  # the page hung up first
-        return
-
-
-async def _carry(
-    ws: WebSocket, session: Any, conversation: Any, info: dict[str, Any] | None
-) -> None:
-    """The audio, both ways, until the page hangs up."""
-    await ws.send_json(
-        {
-            "type": "ready",
-            "input_rate": session.audio_input_sample_rate,
-            "output_rate": session.audio_output_sample_rate,
-            "conversation_id": conversation.id,
-            "engine": info,
-        }
-    )
-
-    async def speak() -> None:
-        async for chunk in session.stream_audio():
-            await ws.send_bytes(chunk)
-
-    voice = asyncio.create_task(speak())
-    try:
-        await session.send(_opening(conversation))
-        while True:
-            message = await ws.receive()
-            if message["type"] == "websocket.disconnect":
-                break
-            if message.get("bytes"):
-                await session.send_audio(message["bytes"])
-            elif message.get("text"):
-                # The page's cue into the quiet: only lines of hers.
-                line = LIVE_CUES.get(json.loads(message["text"]).get("line"))
-                if line:
-                    await session.send(line)
-    finally:
-        voice.cancel()
-        await session.close()
-
-
-@router.websocket(RELAY)
-async def relay(ws: WebSocket, conversation_id: str | None = None) -> None:
-    """A call on a relay engine, for as long as the page holds the socket."""
-    await ws.accept()
-    engine, info = await _engine_now()
-    if engine is None or engine.transport != "relay":
-        await ws.close(code=1008, reason="The live engine is not a relay engine.")
-        return
-    try:
-        conversation, realtime = await _call(conversation_id, engine)
-    except Exception:
-        logger.exception("Opening a relay call failed")
-        await ws.close(code=1011)
-        return
-    await realtime_calls.drive(
-        realtime,
-        alongside=lambda session: _carry(ws, session, conversation, info),
-        on_event=lambda event: _tell(ws, event),
-        on_saved=lambda cost: _send(ws, {"type": "saved", "cost": cost}),
-        on_drawn=lambda card_ids: _show_cards(ws, card_ids),
-        **_driving(conversation, engine),
-    )
-    try:
-        await ws.close()
-    except Exception:  # already closed by the page
-        return
 
 
 @router.post(USAGE, include_in_schema=False)
@@ -460,31 +361,45 @@ async def billed(report: Billed) -> Response:
     return Response(status_code=204 if known else 404)
 
 
-@router.post(DELEGATIONS, include_in_schema=False)
-async def delegate(said: Said) -> Response:
-    """Her voice agent's turn on what was said, as what GPT-Live says back.
+async def turn(
+    message: str,
+    conversation_id: str | None,
+    picture: ChatAttachment | None = None,
+) -> dict[str, Any]:
+    """Her voice agent's turn, as what she says back on the call: her
+    answer, or with a ``picture`` the cue to say what she saw in it.
     The typed turn (#455): it keeps the tool trace, model and cost the
     thread draws the trail, the approval cards and the footer from. A
     failure is still something to say: the session stays up."""
     try:
         reply = await ai_service.chat(
-            message=said.text,
-            conversation_id=said.conversation_id,
+            message=message,
+            conversation_id=conversation_id,
             user_id=STANDALONE_USER_ID,
             agent_slug=FINANCE_VOICE_AGENT_SLUG,
             surface=SURFACE,
+            attachments=[picture] if picture else None,
         )
     except Exception:
-        logger.exception("A live delegation failed")
-        return JSONResponse(
-            {"speak": LIVE_SORRY, "conversation_id": None, "cost": None}
-        )
-    return JSONResponse(
-        {
-            "speak": to_spoken(readable(reply.content), LIVE_ANSWER_CHARS),
-            "conversation_id": reply.metadata.get("conversation_id"),
-            # The turn's price, for the call bar: the voice's minutes are
-            # not the call's whole cost (#595).
-            "cost": reply.metadata.get("cost"),
-        }
-    )
+        logger.exception("A live turn failed")
+        return {"speak": LIVE_SORRY, "conversation_id": None, "cost": None}
+    spoken = to_spoken(readable(reply.content), LIVE_ANSWER_CHARS)
+    return {
+        "speak": LIVE_SAW.format(seen=spoken) if picture else spoken,
+        "conversation_id": reply.metadata.get("conversation_id"),
+        # The turn's price, for the call bar: the voice's minutes are
+        # not the call's whole cost (#595).
+        "cost": reply.metadata.get("cost"),
+    }
+
+
+@router.post(DELEGATIONS, include_in_schema=False)
+async def delegate(said: Said) -> Response:
+    """Her voice agent's turn on what was said, as what GPT-Live says back."""
+    return JSONResponse(await turn(said.text, said.conversation_id))
+
+
+@router.post(LOOKS, include_in_schema=False)
+async def look(shown: Shown) -> Response:
+    """A picture shown on a WebRTC call, as her cue to say what she saw."""
+    return JSONResponse(await turn(LIVE_SHOWN, shown.conversation_id, shown.image))

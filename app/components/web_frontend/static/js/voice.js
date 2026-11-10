@@ -510,27 +510,46 @@
   const cue = (line) => (call.transport === 'relay'
     ? call.ws.send(JSON.stringify({ type: 'cue', line }))
     : tell(JSON.parse(phone().dataset.cues)[line]));
-  const delegate = async (id) => {
+  // Her voice agent's turn, posted to ``url``, and what she says of it:
+  // a delegation's answer, or what she saw in a picture.
+  const turn = async (url, body, speak) => {
     const asked = call;
-    const text = call.heard.trim();
-    call.heard = '';
-    if (!text) return answer(id, phone().dataset.notHeard);
     stepping();
     let data = {};
     try {
-      const answer = await fetch(phone().dataset.delegations, {
+      const answer = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, conversation_id: conversationId() }),
+        body: JSON.stringify({ ...body, conversation_id: conversationId() }),
       });
       data = await answer.json();
     } catch (_) {}
     if (call !== asked) return; // that call is over
-    stepped();
-    answer(id, data.speak || phone().dataset.sorry);
-    if (data.cost) { call.thinking += data.cost; tick(); }
-    showTurns(data.conversation_id);
+    speak(data.speak || phone().dataset.sorry);
+    landed(data.cost, data.conversation_id);
   };
+  // A turn of hers is done, whichever way it went: her steps end, its
+  // price joins the call's, and the thread shows it.
+  const landed = (cost, id) => {
+    stepped();
+    if (cost) { call.thinking += cost; tick(); }
+    showTurns(id);
+  };
+  const delegate = (id) => {
+    const text = call.heard.trim();
+    call.heard = '';
+    if (!text) return answer(id, phone().dataset.notHeard);
+    return turn(phone().dataset.delegations, { text }, (speak) => answer(id, speak));
+  };
+  // A picture shown on the call (chat.js hands it over while the call bar
+  // is up). The relay takes no words for her from the page, so there the
+  // picture goes up the socket and the server says what she saw.
+  document.addEventListener('chat:show', ({ detail: image }) => {
+    if (!call || call.closing) return;
+    if (call.transport !== 'relay') return turn(phone().dataset.looks, { image }, tell);
+    stepping();
+    call.ws.send(JSON.stringify({ type: 'shown', image }));
+  });
   // Every live minute is metered (issue 270): OpenAI reports the call's
   // billed seconds as a running total, and the server's ledger keeps it.
   const bill = (seconds, reason = null) => {
@@ -750,6 +769,8 @@
       const slot = clone('chat-live-card');
       chatThread().append(slot);
       htmx.ajax('GET', event.url, { target: slot, swap: 'innerHTML' });
+    } else if (event.type === 'looked') {
+      landed(event.cost, call.conversation);
     } else if (event.type === 'saved') {
       showTurns(call.conversation);
       // Token-billed: the server prices the call at each saved turn.

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
         seed_agent,
         update_agent,
     )
-    from app.services.ai.domains.chat.attachments import lift_pastes
+    from app.services.ai.domains.chat.attachments import ChatAttachment, lift_pastes
     from app.services.ai.domains.chat.cards import MARKER, markers_of
     from app.services.ai.domains.chat.fetchers import FetchContext, register_fetcher
     from app.services.ai.domains.chat.memory_modules import (
@@ -32,8 +32,10 @@ if TYPE_CHECKING:
     from app.services.ai.domains.chat.pastes import (
         PASTE_THRESHOLD,
         document_text,
+        is_picture,
         marker,
         read_paste,
+        read_photo,
         store_document,
         store_paste,
         title_of,

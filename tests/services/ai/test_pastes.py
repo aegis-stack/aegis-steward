@@ -127,6 +127,82 @@ class TestStoringAndReadingBack:
             assert await pasted(paste["id"]) == PAGE
 
 
+class TestAPictureIsRead:
+    """A picture shared in chat rides one model call as bytes. What it
+    showed is read once, off the request path, and kept: ``pasted``
+    answers it in every later turn, so a screenshot is not forgotten the
+    turn after it was sent."""
+
+    @staticmethod
+    def _looks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[bytes, str]]:
+        from app.services.documents import service as documents
+
+        seen: list[tuple[bytes, str]] = []
+
+        async def look(image: bytes, media_type: str, **_: object) -> tuple[str, str]:
+            seen.append((image, media_type))
+            return "A bank's transfer screen.\nFrom: Checking", "vision-model"
+
+        monkeypatch.setattr(documents, "look", look)
+        return seen
+
+    @pytest.mark.asyncio
+    async def test_what_it_showed_is_read_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.storage import get_storage
+        from app.services.ai.domains.chat import pastes
+
+        seen = self._looks(monkeypatch)
+        key = await get_storage().put(b"shot", content_type="image/png")
+        with memory_user("photo-u1"):
+            photo = await pastes.store_image("photo-u1", key, "image/png", "shot.png")
+            assert await pasted(photo["id"]) == pastes.PICTURE_UNREAD
+
+            await pastes.read_photo("photo-u1", photo["id"])
+
+            assert await pasted(photo["id"]) == (
+                "A bank's transfer screen.\nFrom: Checking"
+            )
+        assert seen == [(b"shot", "image/png")]
+
+    @pytest.mark.asyncio
+    async def test_the_worker_task_reads_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The task reaches the reader through the AI facade: a name the
+        facade does not list fails only when a worker runs it."""
+        from app.components.worker.tasks.chat_tasks import read_photo_task
+        from app.core.storage import get_storage
+        from app.services.ai.domains.chat import pastes
+
+        self._looks(monkeypatch)
+        key = await get_storage().put(b"task shot", content_type="image/png")
+        photo = await pastes.store_image("photo-u3", key, "image/png", "shot.png")
+
+        done = await read_photo_task({}, "photo-u3", photo["id"])
+
+        assert done == {"paste_id": photo["id"], "kept": True}
+
+    @pytest.mark.asyncio
+    async def test_sharing_it_again_keeps_the_reading(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.storage import get_storage
+        from app.services.ai.domains.chat import pastes
+
+        self._looks(monkeypatch)
+        key = await get_storage().put(b"shot again", content_type="image/png")
+        photo = await pastes.store_image("photo-u2", key, "image/png", "shot.png")
+        await pastes.read_photo("photo-u2", photo["id"])
+
+        again = await pastes.store_image("photo-u2", key, "image/png", "shot.png")
+
+        assert again["reading_key"]
+        with memory_user("photo-u2"):
+            assert (await pasted(photo["id"])).startswith("A bank's transfer screen.")
+
+
 class TestTheAgentCanActuallyCallIt:
     def test_the_name_resolves_to_a_callable(self) -> None:
         from app.services.ai.domains.chat.tools import resolve_tools

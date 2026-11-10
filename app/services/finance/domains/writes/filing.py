@@ -144,15 +144,14 @@ async def chat_entry(
 ) -> dict[str, Any] | None:
     """The user's index entry a paste id names: a read document, or a
     photo kept from a chat turn (#285); None for anything else."""
-    from app.services.ai.service import load_user_pastes
+    from app.services.ai.service import is_picture, load_user_pastes
     from app.services.finance.domains.detection.analyst.shared import user_id_for
 
     # The same mapping the agent's own deps use, not a second guess at
     # what a finance owner is called on the chat side.
     for paste in await load_user_pastes(user_id_for(owner_user_id), db):
         if paste.get("id") == paste_id and (
-            paste.get("document_id")
-            or str(paste.get("media_type", "")).startswith("image/")
+            paste.get("document_id") or is_picture(paste)
         ):
             return paste
     return None
@@ -290,11 +289,9 @@ def figure_rows(figures: dict[str, str]) -> list[ChangeDisplayRow]:
 
 def photo_key(entry: dict[str, Any] | None) -> str | None:
     """A photo kept from chat, not yet a document: its bytes in the store."""
-    if (
-        entry
-        and not entry.get("document_id")
-        and str(entry.get("media_type", "")).startswith("image/")
-    ):
+    from app.services.ai.service import is_picture
+
+    if entry and not entry.get("document_id") and is_picture(entry):
         return str(entry["key"])
     return None
 

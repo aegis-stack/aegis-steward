@@ -296,6 +296,9 @@
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, type, 0.9));
     return new File([blob], file.name, { type });
   };
+  // While a call is up the composer is hidden: a picture pasted, dropped
+  // or picked then is shown to her on the call (voice.js), not staged.
+  const onCall = () => document.getElementById('chat-call')?.hidden === false;
   // A PDF rides as itself and is READ on the server - the documents
   // service extracts it page by page and its text reaches the turn as a
   // marker. Only an image is shrunk, and only an image has a thumbnail.
@@ -303,24 +306,30 @@
   const stage = async (file) => {
     const { images, documents, max_bytes: maxBytes, max_files: maxFiles } = config().composer;
     const isImage = images.includes(file.type);
+    const showing = onCall();
+    if (showing && !isImage) {
+      toast(`${file.name || 'That'} is not a picture: only a picture can be shown on a call.`, 'error');
+      return;
+    }
     if (!isImage && !documents.includes(file.type)) {
       toast(`${file.name || 'That'} is not an image or a PDF.`, 'error');
       return;
     }
     if (file.size > maxBytes) { toast(`${file.name} is over ${maxBytes / 1024 / 1024} MB.`, 'error'); return; }
-    if (staged.length >= maxFiles) { toast(`Up to ${maxFiles} files per message.`, 'error'); return; }
+    if (!showing && staged.length >= maxFiles) { toast(`Up to ${maxFiles} files per message.`, 'error'); return; }
     let payload = file;
     if (isImage) {
       try { payload = await shrink(file); } catch (_) { /* undecodable: send as pasted, the model will say so */ }
     }
     const reader = new FileReader();
     reader.onload = () => {
-      staged.push({
+      const part = {
         name: file.name || (isImage ? 'image' : 'document'),
         media_type: payload.type,
         data_b64: String(reader.result).split(',')[1],
-        url: isImage ? URL.createObjectURL(payload) : '',
-      });
+      };
+      if (showing) return announce('chat:show', part);
+      staged.push({ ...part, url: isImage ? URL.createObjectURL(payload) : '' });
       drawChips();
     };
     reader.readAsDataURL(payload);

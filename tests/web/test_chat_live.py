@@ -17,10 +17,11 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.components.backend.api.ai.router import ai_service, sync_active_model
-from app.components.web_frontend.routes import chat_cards, chat_live
+from app.components.web_frontend.routes import chat_cards, chat_live, chat_live_relay
 from app.components.web_frontend.routes.chat_live import (
     DELEGATIONS,
     LIVE_SORRY,
+    LOOKS,
     SESSIONS,
 )
 from app.services.ai.domains.voice.realtime_calls import END_CALL
@@ -42,6 +43,8 @@ pytestmark = pytest.mark.usefixtures("live_engine_rows")
 # An engine is named by its catalog model.
 
 SECRET = "secret internal detail"
+# A screenshot as the page sends it: shrunk and base64'd by chat.js.
+SHOT = {"media_type": "image/png", "data_b64": "c2hvdA==", "name": "shot.png"}
 
 
 class _Live:
@@ -223,6 +226,63 @@ class TestDoingTheWork:
             "cost": None,
         }
         assert SECRET not in response.text
+
+
+class TestShowingHerAPicture:
+    """A picture pasted, dropped or picked while a call is up goes to her,
+    not to the hidden composer: her voice agent looks at it as a turn of
+    the conversation, and she says what she saw, without leaving the
+    call."""
+
+    def test_she_looks_at_it_as_a_turn_and_says_what_she_saw(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        turns = TestDoingTheWork._answers(monkeypatch, "A transfer of **$500**.")
+        response = client.post(LOOKS, json={"image": SHOT, "conversation_id": "c-9"})
+
+        assert response.status_code == 200
+        turn = turns[0]
+        assert turn["message"] == chat_live.LIVE_SHOWN
+        assert [(a.media_type, a.decoded()) for a in turn["attachments"]] == [
+            ("image/png", b"shot")
+        ]
+        assert turn["agent_slug"] == FINANCE_VOICE_AGENT_SLUG
+        assert turn["conversation_id"] == "c-9"
+        assert response.json() == {
+            "speak": chat_live.LIVE_SAW.format(seen="A transfer of $500."),
+            "conversation_id": "c-9",
+            "cost": 0.0047,
+        }
+
+    def test_only_a_picture_is_shown(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        turns = TestDoingTheWork._answers(monkeypatch, "unused")
+        pdf = {**SHOT, "media_type": "application/pdf"}
+        assert client.post(LOOKS, json={"image": pdf}).status_code == 422
+        assert turns == []
+
+    def test_a_failed_look_gives_her_something_to_say(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        TestDoingTheWork._answers(monkeypatch, "unused", fail=True)
+        response = client.post(LOOKS, json={"image": SHOT})
+        assert response.json() == {
+            "speak": LIVE_SORRY,
+            "conversation_id": None,
+            "cost": None,
+        }
+        assert SECRET not in response.text
+
+    @pytest.mark.parametrize("path_client", ["client", "hx"])
+    def test_the_call_bar_can_show_one(
+        self, request: pytest.FixtureRequest, path_client: str
+    ) -> None:
+        page = request.getfixturevalue(path_client).get("/chat").text
+        assert one(page, "#chat-composer button#chat-live").get("data-looks") == LOOKS
+        # The composer's own picker, reached from the call bar: one input,
+        # one set of checks (chat.js), whichever row is showing.
+        one(page, "#chat-call label[for=chat-attach]")
 
 
 class TestTheControl:
@@ -631,6 +691,54 @@ class TestTheRelay:
             ws.send_json({"type": "cue", "line": "anything else"})  # not hers
         assert gemini.live.sent[1:] == [chat_live.LIVE_CHECK_IN, chat_live.LIVE_GOODBYE]
 
+    def test_on_the_relay_she_says_what_she_saw(
+        self, client: TestClient, gemini: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The relay takes only her lines from the page, so a picture goes
+        up the socket and the server speaks what she saw."""
+        import json
+
+        turns = TestDoingTheWork._answers(monkeypatch, "Your checking balance.")
+        told: list[dict[str, Any]] = []
+        with client.websocket_connect(chat_live.RELAY) as ws:
+            ready = ws.receive_json()
+            ws.send_json({"type": "shown", "image": SHOT})
+            for _ in range(20):  # a bound, never a hang
+                message = ws.receive()
+                if message.get("text"):
+                    told.append(json.loads(message["text"]))
+                if any(t["type"] == "looked" for t in told):
+                    break
+
+        assert turns[0]["conversation_id"] == ready["conversation_id"]
+        assert chat_live.LIVE_SAW.format(seen="Your checking balance.") in (
+            gemini.live.sent
+        )
+        assert {"type": "looked", "cost": 0.0047} in told
+
+    def test_on_the_relay_a_file_that_is_not_a_picture_still_lands(
+        self, client: TestClient, gemini: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The page shows her working once it sends; a refusal must still
+        tell it the look is over, or the call bar stays on "working"."""
+        import json
+
+        turns = TestDoingTheWork._answers(monkeypatch, "unused")
+        told: list[dict[str, Any]] = []
+        with client.websocket_connect(chat_live.RELAY) as ws:
+            ws.receive_json()
+            pdf = {**SHOT, "media_type": "application/pdf"}
+            ws.send_json({"type": "shown", "image": pdf})
+            for _ in range(20):  # a bound, never a hang
+                message = ws.receive()
+                if message.get("text"):
+                    told.append(json.loads(message["text"]))
+                if any(t["type"] == "looked" for t in told):
+                    break
+
+        assert {"type": "looked", "cost": None} in told
+        assert turns == []
+
     def test_a_dropped_call_picks_up_where_it_stopped(
         self, client: TestClient, gemini: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -680,7 +788,7 @@ class TestTheRelay:
         puts it at the foot of the thread until the saved turn replaces it."""
         html = client.get("/chat").text
         one(html, "template#chat-live-card")
-        assert chat_live.drawn_card("c1") == {
+        assert chat_live_relay.drawn_card("c1") == {
             "type": "card",
             "url": f"{chat_cards.CARDS}/c1",
         }

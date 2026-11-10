@@ -81,7 +81,9 @@ Deadlines show up in Review before they're late. Steward can also read your mail
 
 ## Nothing changes without you
 
-Every change Illiana proposes, from categorizing a charge to filing a document on a matter, is a card in your Review queue. Approve one at a time or a batch at once, veto single rows, or edit a card before it applies. Approval is the only way a change happens.
+Every change Illiana proposes, from categorizing a charge to filing a document on a matter, is a card, right in the conversation and in your Review queue. Approve one at a time or a batch at once, veto single rows, or edit a card before it applies. Approval is the only way a change happens.
+
+<p align="center"><img src="docs/images/chat-proposal.png" alt="Illiana proposing a change in chat, waiting for approval" width="700"></p>
 
 ## Your data stays yours
 
@@ -91,9 +93,9 @@ Every change Illiana proposes, from categorizing a charge to filing a document o
 - **Backups:** a nightly backup on the server, plus an optional encrypted off-site copy to S3 or DigitalOcean Spaces.
 
 <p align="center">
-  <img src="docs/images/accounts.png" alt="Accounts" width="290">
-  <img src="docs/images/plan.png" alt="Retirement plan" width="290">
-  <img src="docs/images/review.png" alt="Review queue" width="290">
+  <img src="docs/images/accounts.png" alt="Accounts" width="440">
+  <img src="docs/images/plan.png" alt="Retirement plan" width="440">
+  <img src="docs/images/review.png" alt="Review queue" width="440">
 </p>
 
 ## Try it
@@ -122,4 +124,4 @@ Steward deploys from GitHub Actions: open **Actions, Deploy, Run workflow**. Set
 
 ## License
 
-[TBD]
+[MIT](LICENSE)
