@@ -41,6 +41,29 @@ Built on [Aegis Stack](https://github.com/lbedner/aegis-stack).
 </tr>
 </table>
 
+## Bring your data
+
+Start with what you already have, then let it keep itself current.
+
+<p align="center">
+  <img src="docs/images/import-preview.png" alt="Reviewing a Quicken import before anything is written" width="440">
+  <img src="docs/images/connect-simplefin.png" alt="Connecting banks through SimpleFIN" width="440">
+</p>
+
+**Quicken and statement files.** Export Quicken's All Transactions report as CSV and drop it on Accounts, Import. Steward recognizes the layout, routes each row to its account by name, and creates the accounts it hasn't seen. It also reads OFX, QFX and QIF files, Quicken Mac register exports, and Chase and American Express CSVs. Every import opens a review first: what it adds, what it updates, what you already have, and where the rows land. Nothing is written until you confirm. Re-importing an overlapping file is safe, because rows are matched by provider ID, then by content, then by account, date and amount.
+
+**Connections that sync themselves.** On a server, connected accounts sync every six hours, and Settings, Activity lists every import and sync run.
+
+| Integration | What it brings | What you need |
+|---|---|---|
+| [SimpleFIN Bridge](https://bridge.simplefin.org) | Bank and card accounts, balances, transactions including pending | A setup token from SimpleFIN, pasted under Settings, Connections. No keys on your side. |
+| [Plaid](https://plaid.com) | Banks, cards, loans and investments: balances, transactions, holdings, trades, with real-time webhooks | Your own `PLAID_CLIENT_ID` and `PLAID_SECRET` in `.env` |
+| [SnapTrade](https://snaptrade.com) | Brokerages: balances, positions, trades | `SNAPTRADE_CLIENT_ID` and `SNAPTRADE_CONSUMER_KEY` in `.env`. Access is by application. |
+| Mail | Letters, receipts and attachments, pulled over IMAP every 30 minutes, or a Google Takeout `.mbox` or `.eml` uploaded on Documents | An IMAP app password, saved on the Secrets page |
+| By hand | Your house, car, or anything no aggregator covers, with valuations over time | Nothing |
+
+**History and live data meet.** Bring years of Quicken history first, then connect the bank. When a new connection reports an account your exports already feed, an exact match attaches on its own, and one that could be several waits for you to pick.
+
 ## Matters
 
 Some money comes with paperwork attached: Medicaid renewals, insurance claims, taxes, an estate. A **matter** is one of those relationships, with the agency, your reference number and when the next letter is due.
@@ -91,17 +114,11 @@ make cli ARGS="finance seed-demo"   # six accounts, eight months of sample data
 
 Set `ADMIN_USER_EMAILS=["you@example.com"]` in `.env`, then open `http://localhost:<port>`, where the port is `WEBSERVER_HOST_PORT` in `.env.ports`. Illiana needs a model: the example config uses a local Ollama with `llama3.2:3b`, or set `AI_PROVIDER` to the provider you use.
 
-To connect real accounts, add a SimpleFIN setup token under Settings, Connections (no keys needed), or set `PLAID_CLIENT_ID` and `PLAID_SECRET`, or `SNAPTRADE_CLIENT_ID` and `SNAPTRADE_CONSUMER_KEY`.
+To bring in real accounts, see [Bring your data](#bring-your-data).
 
 ## Run it on your own server
 
 Steward deploys from GitHub Actions: open **Actions, Deploy, Run workflow**. Set `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_CONFIG` as repository secrets. Put the server's environment in a `DEPLOY_ENV` secret, starting from `.env.deploy.example`: it needs `DOMAIN`, `ACME_EMAIL`, `REDIS_PASSWORD`, `ENCRYPTION_KEY` and `APP_ENV=prod`. `scripts/server-setup.sh` prepares a fresh Ubuntu, Debian or Fedora box. HTTPS comes from Traefik.
-
-## Not there yet
-
-- A connected account can attach to an existing manual account only when you first link it, not afterward.
-- There's no Sync now button. Connections sync on the server's schedule, or run `finance sync`.
-- Restoring a backup is done by the deploy tool, not from inside the app.
 
 ## License
 
