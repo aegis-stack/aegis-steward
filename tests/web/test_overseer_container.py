@@ -662,6 +662,25 @@ def test_a_tier_wider_than_a_row_wraps() -> None:
     assert _widths(found)["s0"] == pytest.approx(overseer_map.FILL * 100 / 5)
 
 
+def test_a_crowded_row_widens_the_map_rather_than_cut_its_names() -> None:
+    """Seven side by side at the map's least width cut each name short: the
+    map grows so its slimmest node keeps ``MIN_NODE`` pixels, and says it is
+    wide (a dialog holding it grows, and past that it scrolls sideways). A
+    small map keeps its least width."""
+    shape = topology.Shape(tiers=[[f"s{n}" for n in range(7)]], links=[], hosted=[])
+    crowded = overseer_map.layout(
+        [_entry(f"s{n}") for n in range(7)], shape, compact=True, opened=True
+    )
+    slimmest = min(_widths(crowded).values())
+    assert crowded["map_min_width"] == pytest.approx(
+        overseer_map.MIN_NODE * 100 / slimmest
+    )
+    assert crowded["map_wide"] is True
+    small = overseer_map.layout([_entry("backend"), _entry("database")])
+    assert small["map_min_width"] == overseer_map.MIN_WIDTH
+    assert small["map_wide"] is False
+
+
 def test_across_the_foot_of_a_column_opens_its_hint_above() -> None:
     """The map clips what runs past its bottom: a column's last node's hint
     (a table's keys, Database > Tables) opens above it."""

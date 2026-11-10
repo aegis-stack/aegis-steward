@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         store_paste,
         title_of,
     )
+    from app.services.ai.domains.chat.path_card import PathCard
     from app.services.ai.domains.chat.prompts import DEFAULT_SYSTEM_PROMPT
     from app.services.ai.domains.chat.summary import fold_conversation
     from app.services.ai.domains.chat.tools import resolve_tools

@@ -51,6 +51,7 @@ from app.services.finance.domains.detection.analyst.sections import (
     context_label,
 )
 from app.services.finance.domains.detection.analyst.seeds import (
+    FINANCE_TOOL_GRANTS,
     analyst_agent_definition,
     load_finance_agent_fixtures,
     memory_module_definitions,
@@ -95,6 +96,7 @@ __all__ = [
     "context_label",
     "diff_facts",
     "findings_digest",
+    "FINANCE_TOOL_GRANTS",
     "load_finance_agent_fixtures",
     "memory_module_definitions",
     "owner_user_id_for",

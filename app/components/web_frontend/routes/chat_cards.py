@@ -13,13 +13,14 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 from starlette.responses import Response
 
+from app.components.web_frontend import overseer_replay
 from app.components.web_frontend.rendering import dialog, render
 from app.components.web_frontend.routes.chat import (
     COMPONENT_PATHS,
     component_url,
     owned,
 )
-from app.services.ai.service import cards
+from app.services.ai.service import PathCard, cards
 
 router = APIRouter()
 
@@ -35,18 +36,25 @@ async def card(request: Request, card_id: str, size: str = "") -> Response:
         return render(request, MISSING)
     try:
         await owned(row.conversation_id)
-        # Read through the kind's schema: its defaults fill in, and a
-        # payload an old version stored in another shape is missing, not
+        # Read through the shape the kind keeps: its defaults fill in, and
+        # a payload an old version stored in another shape is missing, not
         # a template error.
-        payload = kind.schema.model_validate(row.payload).model_dump()
+        kept = kind.stored.model_validate(row.payload)
     except (HTTPException, ValidationError):
         return render(request, MISSING)
     context = {
-        "card": payload,
+        "card": kept.model_dump(),
         "card_id": row.id,
         "card_url": component_url(cards.MARKER, row.id),
         "large": size == "large",
     }
+    # A path card's map and steps, played as the Replay page plays them:
+    # drawn from its hops, not kept with them.
+    if isinstance(kept, PathCard):
+        if kept.node:
+            context |= await overseer_replay.wiring(kept.node)
+        elif kept.path:
+            context |= await overseer_replay.card(kept.path, context["large"])
     if context["large"]:
         return dialog(request, kind.template, **context)
     return render(request, kind.template, context)

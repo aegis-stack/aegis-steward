@@ -288,10 +288,13 @@ async def _drawn(
     if zoom == HOST:
         stack, shape = overseer_zoom.opened(stack, model)
         await overseer_zoom.name_unkeyed(stack)
-        keys = await asyncio.to_thread(overseer_zoom.openable, stack, model)
-        for item in stack:
-            if item["key"] in keys:
-                item["zoom"] = zoom_url(item["key"])
+        # A path's map is inert (a replay's scene, a path card): no node on
+        # it opens, so which could (every service's pieces read) is not asked.
+        if not path:
+            keys = await asyncio.to_thread(overseer_zoom.openable, stack, model)
+            for item in stack:
+                if item["key"] in keys:
+                    item["zoom"] = zoom_url(item["key"])
     # The parts report, read once opened up: what each part should fix.
     found = (
         await asyncio.to_thread(overseer_conformance.conformance)

@@ -1,11 +1,13 @@
 """Tests for the agent config loader (DB source, fallback, cache)."""
 
 from collections.abc import Generator
+from dataclasses import replace
 from typing import Any
 
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.tools import Refused
 from app.services.ai.domains.chat.agent_loader import (
     DEFAULT_AGENT_SLUG,
     AgentConfig,
@@ -552,3 +554,42 @@ def test_her_prompt_says_writes_are_their_own_tools() -> None:
 
     assert "are NOT in the sandbox" in FINANCE_CHAT_SYSTEM_PROMPT
     assert "`propose`" in FINANCE_CHAT_SYSTEM_PROMPT
+
+
+class TestARefusedArgumentIsHersToCorrect:
+    """A tool's ValueError names what it knows: answered to the model, it
+    tries again; raised, Pydantic AI ends the turn ("No node 'service:ai'"
+    ended an Overseer turn on 2026-11-10)."""
+
+    @staticmethod
+    def _capability() -> Any:
+        config = replace(default_agent_config(), code_mode=False)
+        (refusals,) = [
+            c for c in agent_capabilities(config) if type(c).__name__ == "_Refusals"
+        ]
+        return refusals
+
+    async def test_the_refusal_is_answered(self) -> None:
+        async def refuses(_args: Any) -> Any:
+            raise ValueError("No node 'service:nope'")
+
+        answer = await self._capability().wrap_tool_execute(
+            None, call=None, tool_def=None, args={}, handler=refuses
+        )
+        assert answer == Refused(error="ValueError: No node 'service:nope'")
+
+    async def test_a_tools_own_validation_error_still_raises(self) -> None:
+        """A ValidationError is a ValueError too, but the tool's own bug:
+        answered, the model would take its argument for the fault."""
+        from pydantic import BaseModel, ValidationError
+
+        class Walk(BaseModel):
+            hops: int
+
+        async def broken(_args: Any) -> Any:
+            return Walk.model_validate({"hops": "many"})
+
+        with pytest.raises(ValidationError):
+            await self._capability().wrap_tool_execute(
+                None, call=None, tool_def=None, args={}, handler=broken
+            )

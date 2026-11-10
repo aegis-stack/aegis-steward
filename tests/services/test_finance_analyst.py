@@ -746,7 +746,6 @@ class TestFixtures:
 
         assert again["finance_agents"] == 0
         assert again["finance_module_links"] == 0
-        assert again["finance_tool_links"] == 0
         agents = db_session.exec(
             select(Agent).where(Agent.slug == analyst.ANALYST_AGENT_SLUG)
         ).all()
@@ -755,7 +754,7 @@ class TestFixtures:
     def test_chat_agent_gets_code_mode_and_its_tools(self, db_session: Session) -> None:
         """The chat agent seeds flagged for code mode with the finance
         tools attached, provided the tool rows exist (registry sync)."""
-        from app.services.ai.fixtures.agent_fixtures import load_agent_fixtures
+        from app.services.ai.fixtures import load_agent_registry_fixtures
         from app.services.finance.domains.detection.analyst.seeds import (
             FINANCE_CHAT_TOOL_NAMES,
         )
@@ -764,10 +763,8 @@ class TestFixtures:
         )
         import app.services.finance.tools  # noqa: F401 - registers tools
 
-        load_agent_fixtures(db_session)  # seeds tool rows from the registry
-        counts = analyst.load_finance_agent_fixtures(db_session)
+        load_agent_registry_fixtures(db_session)
 
-        assert counts["finance_tool_links"] == len(FINANCE_CHAT_TOOL_NAMES)
         chat_agent = db_session.exec(
             select(Agent).where(Agent.slug == FINANCE_CHAT_AGENT_SLUG)
         ).one()

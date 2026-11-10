@@ -60,6 +60,8 @@ PAYLOADS: dict[str, dict[str, Any]] = {
         "columns": ["Month", "Charged", "Note"],
         "rows": [{"label": "Aug", "values": ["$18.00", "Paid late; letter sent"]}],
     },
+    # How a part is wired: kept as the node, drawn from the map when opened.
+    "path": {"title": "How the database is wired", "node": "component:database"},
 }
 
 
@@ -173,6 +175,26 @@ class TestTheCards:
             "Paid late; letter sent"
         ]
         one(html, "[data-card=table][data-fit]")
+
+    def test_a_parts_wiring_is_the_map_still_in_the_thread(
+        self, hx: TestClient, drawn: dict[str, str]
+    ) -> None:
+        html = hx.get(f"{CARDS}/{drawn['path']}").text
+        card = one(html, "[data-card=path]")
+        assert "How the database is wired" in text(card)
+        assert "Wiring" in text(card)
+        # Shown whole in the thread too.
+        one(
+            html,
+            "[data-card=path] [data-thumb] [data-scene-map][inert][data-fit-whole]",
+        )
+
+    def test_opened_larger_a_wiring_fits_the_dialog_whole(
+        self, hx: TestClient, drawn: dict[str, str]
+    ) -> None:
+        large = hx.get(f"{CARDS}/{drawn['path']}", params={"size": "large"}).text
+        one(large, "[data-card=path] [data-scene-map][data-fit-whole]")
+        none(large, "[data-card=path] [data-thumb]")
 
     def test_a_card_opens_larger_in_the_dialog(
         self, hx: TestClient, drawn: dict[str, str]
