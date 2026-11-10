@@ -27,6 +27,11 @@ documents service (its text layer per page, a vision model over the
 pages that have none) and the entry points at the document rather than
 at a blob, so the text has ONE home and the agent has one way to ask for
 it. The marker, the tool and the chip do not care which kind it is.
+
+A PICTURE shared in chat lands here too. Its bytes ride the one model
+call, and what it showed is read once on the worker (``read_photo``) and
+kept beside it, so ``pasted`` answers a screenshot in every later turn
+as it answers a page.
 """
 
 from __future__ import annotations
@@ -69,8 +74,33 @@ PLACEHOLDER = "\x00paste\x00"
 _MARKER_ID = re.compile(r"\[pasted text #([0-9a-f]+)")
 
 
-# What a photo's handle is for, said wherever it is shown.
-IMAGE_HINT = "file it as a document with document.file and this paste_id"
+# What a picture's handle is for, said in its marker. Most pictures are
+# a screen to talk about, not paper to keep: filing is the exception.
+IMAGE_HINT = (
+    "file one with document.file and its paste_id only if it is paper to "
+    "keep, like a receipt, statement or letter"
+)
+
+# What ``pasted`` says of a picture before its reading has landed. The
+# turn that carries the picture names it too, and there the bytes are
+# right beside the marker: asking again would only cost a round trip.
+PICTURE_UNREAD = (
+    "(no reading on file yet: it is read just after it is shared. If the "
+    "picture is attached to this turn, look at it directly; do not ask "
+    "for it again in this turn)"
+)
+
+# How a shared picture is read (``read_photo``), and where its usage is
+# recorded: apart from paper read for the documents service.
+PICTURE_SURFACE = "chat:picture"
+PICTURE_READING = (
+    "You are shown a picture someone shared in a conversation: a "
+    "screenshot, a photo of paper, or something on their screen. Start "
+    "with one sentence saying what it is. Then give every piece of legible "
+    "text on it in reading order, keeping amounts, dates, names and numbers "
+    "exactly as shown; a table one row per line, cells separated by ' | '. "
+    "Do not interpret or add anything that is not in the picture."
+)
 
 
 def paste_id(key: str) -> str:
@@ -216,9 +246,11 @@ async def _index(
     user_id: str, entry: dict[str, Any], session: Any = None
 ) -> dict[str, Any]:
     """Keep ``entry`` in the user's index, newest last, one per id: the
-    same bytes again are the same entry, not a second row."""
-    entry = {**entry, "at": datetime.now(UTC).isoformat()}
+    same bytes again are the same entry, not a second row, and keep what
+    was learned of them (a picture's reading)."""
     index = await load_user_pastes(user_id, session)
+    known = next((p for p in index if p.get("id") == entry["id"]), {})
+    entry = {**known, **entry, "at": datetime.now(UTC).isoformat()}
     index = [p for p in index if p.get("id") != entry["id"]]
     index.append(entry)
     await store_user_pastes(user_id, index[-MAX_PASTES_PER_USER:], session)
@@ -262,8 +294,7 @@ async def read_paste(user_id: str, paste_id: str) -> tuple[dict[str, Any], str] 
     neither has to know whether the text came off the clipboard or out
     of a PDF.
     """
-    index = await load_user_pastes(user_id)
-    match = next((p for p in index if p.get("id") == paste_id), None)
+    match = await _entry(user_id, paste_id)
     if match is None:
         return None
     if match.get("document_id"):
@@ -272,13 +303,67 @@ async def read_paste(user_id: str, paste_id: str) -> tuple[dict[str, Any], str] 
             logger.warning("paste index points at an unread document", id=paste_id)
             return None
         return match, text
-    if str(match.get("media_type", "")).startswith("image/"):
-        return match, f"(a photo, not text: {IMAGE_HINT})"
-    data = await get_storage().get(str(match["key"]))
+    if is_picture(match):
+        reading = match.get("reading_key") and await _blob(
+            str(match["reading_key"]), paste_id
+        )
+        return match, reading or PICTURE_UNREAD
+    data = await _blob(str(match["key"]), paste_id)
+    return None if data is None else (match, data)
+
+
+async def _entry(user_id: str, paste_id: str) -> dict[str, Any] | None:
+    return next(
+        (p for p in await load_user_pastes(user_id) if p.get("id") == paste_id), None
+    )
+
+
+async def _blob(key: str, paste_id: str) -> str | None:
+    """The text a paste's key holds, or None (logged) when it is gone."""
+    data = await get_storage().get(key)
     if data is None:
         logger.warning("paste index points at missing bytes", paste_id=paste_id)
         return None
-    return match, data.decode("utf-8", errors="replace")
+    return data.decode("utf-8", errors="replace")
+
+
+def is_picture(entry: dict[str, Any]) -> bool:
+    """Whether an index entry is a picture kept from chat: the one test,
+    for every reader of the index."""
+    return str(entry.get("media_type", "")).startswith("image/")
+
+
+async def read_photo(user_id: str, paste_id: str) -> bool:
+    """Read what a shared picture showed and keep it (``read_photo_task``).
+
+    On the worker, after the turn: the turn that carried the picture saw
+    its bytes, and every later one reads this instead. False when there
+    is nothing to read: the entry or its bytes are gone."""
+    from app.services.documents import service as documents
+
+    entry = await _entry(user_id, paste_id)
+    if entry is None or not is_picture(entry):
+        return False
+    image = await get_storage().get(str(entry["key"]))
+    if image is None:
+        logger.warning("paste index points at missing bytes", paste_id=paste_id)
+        return False
+    text, _model = await documents.look(
+        image,
+        str(entry["media_type"]),
+        instructions=PICTURE_READING,
+        ask="What does this picture show?",
+        surface=PICTURE_SURFACE,
+    )
+    await keep_reading(user_id, entry, text)
+    return True
+
+
+async def keep_reading(user_id: str, entry: dict[str, Any], text: str) -> None:
+    """Store a picture's reading and point its entry at it, through the
+    index's one writer."""
+    key = await get_storage().put(text.encode("utf-8"), content_type="text/plain")
+    await _index(user_id, {**entry, "reading_key": key})
 
 
 async def document_text(
@@ -311,7 +396,8 @@ async def document_text(
 
 
 async def pasted(paste_id: str) -> str:
-    """Read back a block of text the user pasted earlier.
+    """Read back a block of text the user pasted earlier, or what a
+    picture they shared showed.
 
     A pasted page - an order listing, a log, a statement - is stored
     once and stands in the conversation as a one-line marker naming its
@@ -337,7 +423,7 @@ async def pasted(paste_id: str) -> str:
 register_tool(
     "pasted",
     pasted,
-    description="Read back a block of text the user pasted earlier",
+    description="Read back a pasted block of text, or what a shared picture showed",
     effect="read",
     replace=True,
 )

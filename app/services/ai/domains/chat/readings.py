@@ -1,7 +1,8 @@
-"""Durable readings: what the model extracted from an ephemeral image.
+"""Durable readings: the line items the model extracted from an image.
 
-Attachment bytes ride one turn by design (see ``attachments.py``); the
-EXTRACTION must not. ``record_reading`` is the schema-forced write the
+Attachment bytes ride one turn by design (see ``attachments.py``). What
+a picture SHOWED is kept beside it and read back with ``pasted``; this
+is the ITEMISED extraction, which must not ride one turn either. ``record_reading`` is the schema-forced write the
 agent calls the moment it reads a receipt, order, or document out of an
 image: the payload validates against a Pydantic contract (bad rows
 bounce back as a correctable tool error, the same door-guarding the

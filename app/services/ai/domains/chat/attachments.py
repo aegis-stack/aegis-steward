@@ -74,14 +74,18 @@ def annotate_attachments(
     History replays as text only, so this marker is how a later turn
     (or a text-only model) knows images rode this one. ``photos`` are the
     kept images' handles (``pastes.store_image``): named in the marker,
-    a photo can be filed later (#285)."""
+    a photo's reading is a ``pasted`` call away in any later turn, and
+    it can be filed (#285)."""
     if not attachments:
         return message
     noun = "image" if len(attachments) == 1 else "images"
     if photos:
         from app.services.ai.domains.chat.pastes import IMAGE_HINT
 
-        names = ", ".join(f"{p['title']} #{p['id']}" for p in photos)
+        names = ", ".join(
+            f'{p["title"]} #{p["id"]}, what it showed: pasted("{p["id"]}")'
+            for p in photos
+        )
         return (
             f"{message}\n\n[attached {len(attachments)} {noun}: {names} - {IMAGE_HINT}]"
         )
@@ -162,6 +166,7 @@ async def prepare_turn(
     text, lifted = await lift_pastes(text, user_id)
     stored = await persist_attachments(images)
     photos = await _keep_photos(stored, user_id)
+    await _read_later(user_id, photos)
     # The markers ``read_documents`` just wrote are markers, so
     # ``lift_pastes`` reports them too: the lists overlap by
     # construction and the message must not draw two chips for one file.
@@ -184,6 +189,31 @@ async def _keep_photos(
         await store_image(user_id, s["key"], s["media_type"], s.get("name") or "photo")
         for s in stored
     ]
+
+
+async def _read_later(user_id: str, photos: list[dict[str, Any]]) -> None:
+    """Queue each kept photo not yet read (``pastes.read_photo``).
+
+    On the worker: this turn already sends the bytes, and a second vision
+    call here would make every picture turn wait on two. Never fails the
+    turn - a stack with no worker keeps the photo, just unread."""
+    unread = [p for p in photos if not p.get("reading_key")]
+    if not unread:
+        return
+    from app.components.worker import pools
+    from app.core.constants import QueueName
+
+    for photo in unread:
+        try:
+            await pools.enqueue_task(
+                "read_photo_task",
+                QueueName.SYSTEM,
+                user_id,
+                photo["id"],
+                _job_id=f"read-photo:{user_id}:{photo['id']}",
+            )
+        except Exception as exc:  # noqa: BLE001 - the turn goes on regardless
+            logger.warning(f"Could not queue a photo to be read: {exc}")
 
 
 def _by_id(pastes: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -227,9 +227,9 @@ FINANCE_CHAT_TOOL_NAMES = (
     # A misread on a pending card put right when the user says so
     # ("it's Sweet Scoop"), across every card that has it (issue 420).
     "revise",
-    # Durable extraction: what was read out of an ephemeral image must
-    # be recorded before it is answered from - the recording is what
-    # later turns get instead of the pixels.
+    # Durable extraction: the line items read out of a picture, recorded
+    # before they are answered from - the itemised record charges are
+    # matched against (the picture's own text is ``pasted``'s).
     "record_reading",
     # A chart, ranking, comparison or table under the answer (#266),
     # drawn from inside run_code with the rows the script computed.

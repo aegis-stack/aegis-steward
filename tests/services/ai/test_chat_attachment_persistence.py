@@ -112,9 +112,11 @@ class TestPrepareTurn:
         assert metadata["attachments"][0]["key"] == content_key(b"fake png bytes")
 
     @pytest.mark.asyncio
-    async def test_a_photo_can_be_named_to_file_it(self, store) -> None:
+    async def test_a_photo_is_named_and_says_where_its_reading_is(self, store) -> None:
         """#285: a photographed statement could not be filed - it had no
-        handle. Its marker now names it, the way a read PDF's does."""
+        handle. Its marker now names it, the way a read PDF's does, and
+        points at what it showed rather than at filing it: most pictures
+        are a screen to talk about, not paper to keep."""
         from app.services.ai.domains.chat.pastes import paste_id
         from app.services.ai.domains.chat.user_memory import load_user_pastes
 
@@ -123,7 +125,7 @@ class TestPrepareTurn:
         )
 
         handle = paste_id(content_key(b"hvcu statement"))
-        assert f"#{handle}" in text and "document.file" in text
+        assert f"#{handle}" in text and f'pasted("{handle}")' in text
         entry = next(
             p for p in await load_user_pastes("photo-filer") if p["id"] == handle
         )
@@ -138,3 +140,49 @@ class TestPrepareTurn:
 
         assert text == "plain question"
         assert metadata == {}
+
+
+class TestReadingAPhoto:
+    """What a photo showed is read on the worker, not in the turn: the
+    turn that carries it already sees the bytes, and a second vision
+    call inline would make every picture turn wait on two."""
+
+    @staticmethod
+    def _queue(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
+        from app.components.worker import pools
+
+        enqueued: list[tuple[object, ...]] = []
+
+        async def enqueue(name: str, _queue: str, *args: object, **_: object) -> None:
+            enqueued.append((name, *args))
+
+        monkeypatch.setattr(pools, "enqueue_task", enqueue)
+        return enqueued
+
+    @pytest.mark.asyncio
+    async def test_a_kept_photo_is_queued_to_be_read(
+        self, store, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.services.ai.domains.chat.pastes import paste_id
+
+        enqueued = self._queue(monkeypatch)
+
+        await prepare_turn("see this", [_png(b"a screen")], user_id="photo-reader")
+
+        handle = paste_id(content_key(b"a screen"))
+        assert enqueued == [("read_photo_task", "photo-reader", handle)]
+
+    @pytest.mark.asyncio
+    async def test_a_photo_already_read_is_not_read_again(
+        self, store, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.services.ai.domains.chat import pastes
+
+        enqueued = self._queue(monkeypatch)
+        key = await store.put(b"read before", content_type="image/png")
+        photo = await pastes.store_image("photo-reread", key, "image/png", "r.png")
+        await pastes.keep_reading("photo-reread", photo, "A receipt.")
+
+        await prepare_turn("again", [_png(b"read before")], user_id="photo-reread")
+
+        assert enqueued == []

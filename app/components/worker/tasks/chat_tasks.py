@@ -35,3 +35,13 @@ async def fold_conversation_task(
 
     folded = await fold_conversation(conversation_id, upto)
     return {"conversation_id": conversation_id, "folded": folded}
+
+
+async def read_photo_task(
+    ctx: dict[str, Any], user_id: str, paste_id: str
+) -> dict[str, Any]:
+    """Read what a picture shared in chat showed: a vision call, so never
+    on the request path. Every later turn reads it with ``pasted``."""
+    from app.services.ai.service import read_photo
+
+    return {"paste_id": paste_id, "kept": await read_photo(user_id, paste_id)}

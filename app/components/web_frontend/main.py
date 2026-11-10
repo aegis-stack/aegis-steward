@@ -25,6 +25,9 @@ def create_web_frontend_app() -> APIRouter:
         router as chat_changes_router,
     )
     from app.components.web_frontend.routes.chat_live import router as chat_live_router
+    from app.components.web_frontend.routes.chat_live_relay import (
+        router as chat_live_relay_router,
+    )
     from app.components.web_frontend.routes.chat_models import (
         router as chat_models_router,
     )
@@ -91,6 +94,7 @@ def create_web_frontend_app() -> APIRouter:
     router.include_router(chat_models_router)
     router.include_router(chat_speech_router)
     router.include_router(chat_live_router)
+    router.include_router(chat_live_relay_router)
     router.include_router(chat_cards_router)
     router.include_router(chat_changes_router)
     router.include_router(chat_voices_router)
