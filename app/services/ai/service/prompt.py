@@ -116,8 +116,6 @@ class PromptMixin(ContextsMixin):
         is_compact = config.provider.value == "ollama"
         logger.debug(f"Compact mode: {is_compact} (provider={config.provider.value})")
 
-        formatted_rag = None
-
         formatted_health = None
         if health_context:
             formatted_health = health_context.format_for_prompt(compact=is_compact)
@@ -128,12 +126,9 @@ class PromptMixin(ContextsMixin):
             formatted_usage = usage_context.format_for_prompt(compact=is_compact)
 
         system_prompt_override = build_system_prompt(
-            self.settings,
-            rag_context=formatted_rag,
             health_context=formatted_health,
             usage_context=formatted_usage,
             catalog_context=catalog_context,
-            use_rag=formatted_rag is not None,
             current_model=config.model,
             current_provider=config.provider.value,
             persona=self._agent_persona(agent_config),

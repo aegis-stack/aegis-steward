@@ -32,7 +32,7 @@ from app.core.log import logger
 from app.services.ai.domains.chat import queries
 from app.services.ai.domains.chat.chat_kit import ContextProvider, ToolChatAgent
 from app.services.ai.domains.chat.module_context import MemoryModuleContextProvider
-from app.services.ai.domains.chat.prompts import get_default_system_prompt
+from app.services.ai.domains.chat.prompts import DEFAULT_SYSTEM_PROMPT
 from app.services.ai.domains.chat.tools import resolve_tools
 from app.services.ai.domains.spend.recording import record_usage
 from app.services.ai.models.agents import Agent
@@ -71,10 +71,22 @@ def default_agent_config() -> AgentConfig:
     return AgentConfig(
         slug=DEFAULT_AGENT_SLUG,
         name="Assistant",
-        system_prompt=get_default_system_prompt(),
+        system_prompt=DEFAULT_SYSTEM_PROMPT,
         model_id=None,
         temperature=settings.AI_TEMPERATURE,
         max_tokens=settings.AI_MAX_TOKENS,
+        # The registry seed grants these to the row (``attach_tools``).
+        tool_names=(
+            "ontology",
+            "aggregate",
+            "draw_card",
+            "health",
+            "errors",
+            "server_requests",
+            "plugins",
+            "web_search",
+            "read_page",
+        ),
     )
 
 
@@ -225,7 +237,33 @@ def agent_capabilities(config: AgentConfig) -> list[Any]:
             capabilities.append(_native_write_hints(granted_writes))
     if config.code_mode or config.tool_names:
         capabilities.append(_tool_output_limits(code_mode=config.code_mode))
+        capabilities.append(_refusals())
     return capabilities
+
+
+def _refusals() -> Any:
+    """A capability answering a tool's ``ValueError`` (an argument it
+    refuses, naming what it knows) as the model's to correct: raised,
+    Pydantic AI ends the turn. A ``ValidationError`` is the tool's own bug
+    and still raises. A script's tool calls inside ``run_code`` are the
+    sandbox's to answer, as its retry."""
+    from pydantic import ValidationError
+    from pydantic_ai.capabilities import AbstractCapability
+
+    from app.core.tools import Refused
+
+    class _Refusals(AbstractCapability[Any]):
+        async def wrap_tool_execute(
+            self, ctx: Any, *, call: Any, tool_def: Any, args: Any, handler: Any
+        ) -> Any:
+            try:
+                return await handler(args)
+            except ValidationError:
+                raise
+            except ValueError as exc:
+                return Refused(error=f"{type(exc).__name__}: {exc}")
+
+    return _Refusals()
 
 
 # How the sandbox says a name is not there: its checker before the script

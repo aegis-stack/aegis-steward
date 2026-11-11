@@ -201,6 +201,22 @@ async def _not_callable(provider: str) -> str:
     return f"{row.label} has no API key. Set {row.env_var} in .env first."
 
 
+async def unusable_reason(vendor: str | None) -> str | None:
+    """Why a model from ``vendor`` cannot answer here, or None when it can.
+
+    A vendor that maps to no provider has nothing to call it with: its
+    model name would go to whichever provider was active and fail.
+    """
+    if not vendor:
+        return None
+    provider = AIProvider.from_name(vendor)
+    if provider is None:
+        return f"No provider this app can call serves {vendor}'s models."
+    if provider.value not in await usable_providers(settings):
+        return await _not_callable(provider.value)
+    return None
+
+
 async def set_active_model(model_id: str, force: bool = False) -> SetModelResult:
     """Set the active LLM model.
 
@@ -277,17 +293,13 @@ async def set_active_model(model_id: str, force: bool = False) -> SetModelResult
 
     # A model whose provider cannot be called is refused: stored, it would
     # fail every answer after it until someone found the row.
-    if (
-        provider_value
-        and not force
-        and provider_value not in await usable_providers(settings)
-    ):
+    if not force and (why := await unusable_reason(vendor_name)):
         return SetModelResult(
             success=False,
             model_id=model_id,
             vendor=vendor_name,
             provider_updated=False,
-            message=await _not_callable(provider_value),
+            message=why,
         )
 
     # Persist. With a catalog database the selection is a row, which every

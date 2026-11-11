@@ -36,6 +36,9 @@ from app.components.backend.startup.finance_webhook_tunnel import (
 from app.core.config import settings
 from app.core.db import get_async_db
 from app.core.security import SESSION_COOKIE
+from app.core.tools import current_admin
+from app.models.user import User
+from app.services.auth.deps import is_admin
 from app.services.auth.service import UserService, get_current_user_from_token
 
 LOGIN = "/login"
@@ -79,25 +82,27 @@ def _writes(scope: Scope) -> bool:
     return scope["type"] == "websocket" or scope["method"] not in SAFE_METHODS
 
 
-async def signed_in(conn: HTTPConnection) -> bool:
-    """Whether the session cookie or a bearer token names an active user
-    whose session is live (``get_current_user_from_token``), read on the
-    session a route would get: ``get_async_db``, or what a test put there."""
+async def signed_in(conn: HTTPConnection) -> User | None:
+    """The active user the session cookie or a bearer token names, whose
+    session is live (``get_current_user_from_token``), read on the session
+    a route would get: ``get_async_db``, or what a test put there; None
+    when nobody is signed in."""
     token = conn.cookies.get(SESSION_COOKIE)
     bearer = conn.headers.get("authorization", "")
     if token is None and bearer.lower().startswith("bearer "):
         token = bearer[7:]
     if token is None and settings.AUTH_ENABLED:
-        return False
+        return None
     overrides = getattr(conn.scope.get("app"), "dependency_overrides", {})
     sessions = overrides.get(get_async_db, get_async_db)()
     try:
-        await get_current_user_from_token(token, UserService(await anext(sessions)))
+        return await get_current_user_from_token(
+            token, UserService(await anext(sessions))
+        )
     except HTTPException:
-        return False
+        return None
     finally:
         await sessions.aclose()
-    return True
 
 
 def _turned_away(conn: HTTPConnection) -> Response:
@@ -127,8 +132,18 @@ class RequestGate:
         refusal: Response | WebSocketClose
         if path != PLAID_WEBHOOK_PATH and _writes(scope) and _cross_site(conn):
             refusal = PlainTextResponse("Cross-site request refused", status_code=403)
-        elif is_public(path) or await signed_in(conn):
+        elif is_public(path):
             await self.app(scope, receive, send)
+            return
+        elif (user := await signed_in(conn)) is not None:
+            # Whether they are an admin rides the request: Steward's turns
+            # run as the household, so a tool called in one (Overseer's
+            # Illiana reading the app) could not otherwise tell.
+            admin = current_admin.set(is_admin(user))
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                current_admin.reset(admin)
             return
         else:
             refusal = _turned_away(conn)

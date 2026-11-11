@@ -21,6 +21,10 @@ TIER_GAP = 96
 # the most a node takes (percent of the map), however small the stack.
 FILL = 0.8
 MAX_NODE_WIDTH = 28.0
+# The map's least width in pixels, and a node's: a crowded row widens the
+# map so each name has room, and past its holder's width the map scrolls.
+MIN_WIDTH = 960
+MIN_NODE = 200
 ROW = 5  # the most nodes side by side; a wider tier wraps onto more rows
 # A compact map (the Server opened up, the Flow): small nodes, a name and
 # under it what it costs and carries. Opened up, ``COMPACT_ROW`` to a row,
@@ -72,6 +76,7 @@ def layout(
         ],
         "map_height": height,
         "map_width": WIDTH,
+        **_breadth(nodes),
         "map_compact": compact or across,
         "map_across": across,
         "map_target": target,
@@ -211,14 +216,14 @@ def lanes(
     items = {item["key"]: item for item in stack}
     placed = list(place.values())
     both = {(a, b) for a, b in links if (b, a) in links}
+    nodes = [
+        _placed(item, x, top, h, width, True) | {"hint_above": top + h > height * 0.6}
+        for item in stack
+        if item["key"] in place
+        for x, top, h in [place[item["key"]]]
+    ]
     return {
-        "map_nodes": [
-            _placed(item, x, top, h, width, True)
-            | {"hint_above": top + h > height * 0.6}
-            for item in stack
-            if item["key"] in place
-            for x, top, h in [place[item["key"]]]
-        ],
+        "map_nodes": nodes,
         "map_links": [
             _lane_line(
                 *_on_track(place[a], place[b], (a, b) in both),
@@ -234,6 +239,7 @@ def lanes(
         ],
         "map_height": height,
         "map_width": WIDTH,
+        **_breadth(nodes),
         "map_compact": True,
         "map_across": False,
         "map_lanes": [
@@ -293,6 +299,14 @@ def _lane_line(
         f"C {b - step / 2:.0f} {run:.0f}, {b - step / 2:.0f} {y2:.0f}, {b:.0f} {y2:.0f}"
     )
     return line | {"d": d, "mid": _mid((a + b) / 2, run)}
+
+
+def _breadth(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """The map's least width: enough that its slimmest node (its width a
+    percent of the map's) keeps ``MIN_NODE`` pixels; wide past ``MIN_WIDTH``."""
+    slimmest = min((node["width"] for node in nodes), default=100.0)
+    least = max(MIN_WIDTH, MIN_NODE * 100 / slimmest)
+    return {"map_min_width": least, "map_wide": least > MIN_WIDTH}
 
 
 def _mid(x: float, y: float) -> dict[str, float]:

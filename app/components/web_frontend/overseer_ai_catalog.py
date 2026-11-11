@@ -12,7 +12,10 @@ from urllib.parse import urlencode
 
 from app.core.config import settings
 from app.core.time import today
-from app.services.ai.domains.llm.llm_service import get_current_config
+from app.services.ai.domains.llm.llm_service import (
+    get_current_config,
+    unusable_reason,
+)
 from app.services.ai.domains.llm.provider_management import usable_providers
 
 from .overseer_ai_common import (
@@ -189,8 +192,12 @@ async def model_context(model_id: str) -> dict[str, Any] | None:
     return {
         "info": info,
         "current": current.model == info.model_id,
-        # Only a chat model can be the model the app answers with.
+        # Only a chat model can be the model the app answers with, and only
+        # one a provider here can call; the rest say what is missing.
         "use_url": f"{PARTIALS}/models/use" if info.mode == "chat" else None,
+        "use_blocked": await unusable_reason(info.vendor)
+        if info.mode == "chat"
+        else None,
         "facts": [
             ("Description", info.description or None),
             ("Vendor", label(info.vendor)),
