@@ -8,7 +8,8 @@ import pytest
 from sqlmodel import Session, select
 
 from app.core.tools import register_tool, unregister_tool
-from app.services.ai.domains.chat.prompts import get_default_system_prompt
+from app.services.ai.domains.chat.agent_loader import default_agent_config
+from app.services.ai.domains.chat.prompts import DEFAULT_SYSTEM_PROMPT
 from app.services.ai.domains.chat.tools import resolve_tools
 from app.services.ai.fixtures.agent_fixtures import (
     DEFAULT_AGENT_SLUG,
@@ -39,7 +40,7 @@ class TestAgentSeed:
             select(Agent).where(Agent.slug == DEFAULT_AGENT_SLUG)
         ).one()
         assert agent.is_active
-        assert agent.system_prompt == get_default_system_prompt()
+        assert agent.system_prompt == DEFAULT_SYSTEM_PROMPT
         # None = "use the service's active model".
         assert agent.model_id is None
 
@@ -57,6 +58,38 @@ class TestAgentSeed:
         assert sorted(
             (c.agent_id, c.system_prompt, c.source) for c in changes
         ) == sorted((a.id, a.system_prompt, "seed") for a in agents)
+
+    def test_the_default_agent_reads_the_app_and_draws(self) -> None:
+        """Overseer's Illiana: what the app is and what is wrong with it,
+        and a card to draw it on."""
+        names = default_agent_config().tool_names
+        assert {"ontology", "health", "errors", "server_requests", "draw_card"} <= set(
+            names
+        )
+        # ``requests`` is the matters tool: a letter's asks, not the app's.
+        assert "requests" not in names
+
+    @pytest.mark.queryspy(threshold=4)  # seeds three times
+    def test_a_row_seeded_without_tools_is_granted_them(self, session: Session) -> None:
+        """Additive and by name: a database seeded before the grant picks
+        the tools up on the next boot, and a re-seed grants nothing more."""
+        from app.services.ai.fixtures import load_agent_registry_fixtures
+
+        load_agent_registry_fixtures(session)
+        agent = session.exec(
+            select(Agent).where(Agent.slug == DEFAULT_AGENT_SLUG)
+        ).one()
+        agent.tools.clear()
+        session.commit()
+
+        counts = load_agent_registry_fixtures(session)
+
+        session.refresh(agent)
+        assert sorted(t.name for t in agent.tools) == sorted(
+            default_agent_config().tool_names
+        )
+        assert counts["tool_links"] == len(default_agent_config().tool_names)
+        assert load_agent_registry_fixtures(session)["tool_links"] == 0
 
     @pytest.mark.queryspy(threshold=3)  # seeds, then reads the rows back
     def test_seed_is_idempotent(self, session: Session) -> None:
@@ -195,7 +228,7 @@ class TestAgentToolLink:
         session.commit()
 
         session.refresh(agent)
-        assert [t.name for t in agent.tools] == ["save_memory"]
+        assert "save_memory" in [t.name for t in agent.tools]
 
     def test_attached_tool_resolves_to_registered_callable(
         self, session: Session
@@ -221,6 +254,6 @@ class TestAgentToolLink:
             names = [t.name for t in agent.tools if t.is_active]
             # ``resolve_tools`` wraps for the tool-call ledger, so compare
             # what the wrapper wraps.
-            assert [inspect.unwrap(t) for t in resolve_tools(names)] == [greet]
+            assert greet in [inspect.unwrap(t) for t in resolve_tools(names)]
         finally:
             unregister_tool("greet")

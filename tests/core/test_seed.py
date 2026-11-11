@@ -51,3 +51,15 @@ def test_where_scopes_what_counts_as_present(db_session: Session) -> None:
     )
 
     assert [row["slug"] for row in scoped] == ["inactive"]
+
+
+def test_a_key_of_several_columns_is_matched_whole(db_session: Session) -> None:
+    """A link row's pair: present only as the pair, and a pair asked for
+    twice is one row."""
+    db_session.add(MemoryModule(**_module("a")))
+    db_session.commit()
+    rows = [_module("a"), {**_module("a"), "name": "b"}, {**_module("a"), "name": "b"}]
+
+    missing = missing_rows(db_session, MemoryModule, ("slug", "name"), rows)
+
+    assert [(row["slug"], row["name"]) for row in missing] == [("a", "b")]

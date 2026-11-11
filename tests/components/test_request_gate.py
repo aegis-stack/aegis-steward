@@ -223,3 +223,35 @@ def test_a_cross_site_socket_is_refused() -> None:
 def test_an_unknown_host_is_refused(signed_out: TestClient) -> None:
     response = signed_out.get("/health/", headers={"host": "evil.example"})
     assert response.status_code == 400
+
+
+def _asks_who() -> FastAPI:
+    """One route behind the gate, saying whether its caller is an admin as
+    a tool call made in it would see it (``caller_is_admin``)."""
+    from app.services.shared.deps import caller_is_admin
+
+    probe = FastAPI()
+
+    @probe.get("/who")
+    async def who() -> dict[str, bool]:
+        return {"admin": await caller_is_admin()}
+
+    request_gate.register_middleware(probe)
+    return probe
+
+
+@pytest.mark.parametrize(
+    ("admins", "admin"), [(["owner1@test.local"], True), ([], False)]
+)
+def test_a_request_carries_whether_its_user_is_an_admin(
+    monkeypatch: pytest.MonkeyPatch, admins: list[str], admin: bool
+) -> None:
+    """Steward's turns run as the household, so a tool in one cannot tell
+    who asked: the gate, which already read the user, says (Overseer's
+    Illiana read a narrowed map for an admin, 2026-11-10)."""
+    monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+    monkeypatch.setattr(settings, "ADMIN_USER_EMAILS", admins)
+    token = create_access_token({"sub": "owner1@test.local"})
+    client = TestClient(_asks_who())
+    response = client.get("/who", headers={"Authorization": f"Bearer {token}"})
+    assert response.json() == {"admin": admin}

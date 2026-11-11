@@ -282,6 +282,24 @@ async def test_a_request_answered_in_the_server_goes_no_way_out(
     assert not [step for step in steps if step["says"].startswith("Back out")]
 
 
+async def test_a_path_drawn_on_the_server_asks_no_service_whether_it_opens(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path's map is inert (a replay's scene, a path card in chat): no
+    node on it opens up, so which services could is never worked out. It
+    read every service's pieces, seconds cold, for links nothing can click."""
+    client = zoomable(app, monkeypatch)
+    monkeypatch.setattr(overseer_zoom, "pieces_of", lambda subject, model: ([], {}))
+    monkeypatch.setattr(service_pieces, "held", lambda subject: [])
+
+    def asked(*_: object) -> set[str]:
+        raise AssertionError("a path's map asked which services open up")
+
+    monkeypatch.setattr(overseer_zoom, "openable", asked)
+    html = page_html(client, f"/overseer/replay/{(await _recorded()).id}")
+    none(one(html, SERVER), "[data-zoom]")
+
+
 def test_the_map_offers_a_replay(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
     html = page_html(zoomable(app, monkeypatch), "/overseer?view=map")
     assert one(html, "[data-replay-link]").get("href") == "/overseer/replay"

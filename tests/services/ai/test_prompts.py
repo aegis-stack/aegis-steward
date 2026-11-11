@@ -1,25 +1,26 @@
 """Tests for system prompt assembly (persona override)."""
 
-from unittest.mock import MagicMock
-
 from app.services.ai.domains.chat.prompts import build_system_prompt
-
-
-def _settings() -> MagicMock:
-    settings = MagicMock()
-    settings.AI_ENABLED = True
-    settings.PROJECT_NAME = "testproj"
-    return settings
 
 
 class TestPersonaOverride:
     def test_default_prompt_uses_builtin_persona(self) -> None:
-        prompt = build_system_prompt(_settings())
+        prompt = build_system_prompt()
 
         assert prompt.startswith("I'm Illiana.")
 
+    def test_the_builtin_persona_reads_the_app_through_its_tools(self) -> None:
+        """Not a stack list from memory, nor a claim it cannot see the code:
+        she reads the app with her tools and draws what she finds."""
+        prompt = build_system_prompt()
+
+        assert "ontology tool" in prompt
+        assert "I draw it as a card" in prompt
+        assert "Flet" not in prompt
+        assert "don't have codebase access" not in prompt
+
     def test_persona_replaces_builtin_block(self) -> None:
-        prompt = build_system_prompt(_settings(), persona="You are Custom.")
+        prompt = build_system_prompt(persona="You are Custom.")
 
         assert prompt.startswith("You are Custom.")
         assert "I'm Illiana" not in prompt
@@ -27,7 +28,6 @@ class TestPersonaOverride:
     def test_persona_keeps_dynamic_context_sections(self) -> None:
         """A custom persona still gets the live-data sections appended."""
         prompt = build_system_prompt(
-            _settings(),
             persona="You are Custom.",
             health_context="ALL COMPONENTS HEALTHY",
             usage_context="42 requests today",
@@ -42,7 +42,6 @@ class TestPersonaOverride:
 class TestMemoryContext:
     def test_memory_context_section_is_appended(self) -> None:
         prompt = build_system_prompt(
-            _settings(),
             memory_context="<user_memory>\n- [food] vegan\n</user_memory>",
         )
 
@@ -51,14 +50,14 @@ class TestMemoryContext:
         assert "- [food] vegan" in prompt
 
     def test_no_memory_context_no_section(self) -> None:
-        prompt = build_system_prompt(_settings())
+        prompt = build_system_prompt()
 
         assert "## Saved User Memory" not in prompt
 
     def test_catalog_context_renders_as_body_under_heading(self) -> None:
         """The catalog payload is body text, never part of the heading line."""
         catalog = "- gpt-x: fast\n- gpt-y: smart"
-        prompt = build_system_prompt(_settings(), catalog_context=catalog)
+        prompt = build_system_prompt(catalog_context=catalog)
 
         assert catalog in prompt
         first_line = next(line for line in prompt.splitlines() if "gpt-x" in line)

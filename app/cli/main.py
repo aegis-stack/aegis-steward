@@ -146,10 +146,14 @@ async def run_command(command: Coroutine[Any, Any, T]) -> T:
     loop: closed after the loop is gone, its Redis pool is torn down by the
     garbage collector and prints "Event loop is closed" at exit."""
     from app.core.cache import get_cache
+    from app.core.tools import current_admin
 
+    # The CLI is the host's shell: its turns and tool calls answer an admin.
+    admin = current_admin.set(True)
     try:
         return await command
     finally:
+        current_admin.reset(admin)
         await get_cache().aclose()
 
 

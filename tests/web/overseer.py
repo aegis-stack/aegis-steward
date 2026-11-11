@@ -4,6 +4,7 @@ holding exactly the components a test hands in."""
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
@@ -122,9 +123,5 @@ def sign_in(
     # dependency (an owner's own rows) as much as the optional one.
     app.dependency_overrides[get_optional_user] = lambda: user
     # The app's gate reads the session itself, ahead of any route.
-    monkeypatch.setattr(request_gate, "signed_in", _signed_in)
+    monkeypatch.setattr(request_gate, "signed_in", AsyncMock(return_value=user))
     return user
-
-
-async def _signed_in(_conn: object) -> bool:
-    return True

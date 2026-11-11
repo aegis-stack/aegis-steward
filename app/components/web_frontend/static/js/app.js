@@ -406,6 +406,33 @@ document.body.addEventListener('htmx:afterSwap', (event) => {
     if (drawer && !drawer.open) drawer.show();
   }
 });
+// A map marked ``data-fit-whole`` (partials/chat/cards/path.html) shows
+// whole where it is: a map is HTML laid out at its own size, so it is
+// zoomed down to its holder's width, and in the open dialog to the height
+// the dialog's body shows too, never up. Those within what a swap settled
+// are fitted (not every card on every stream's swap), all of them again on
+// a resize, once a frame.
+const fitWhole = (within = document) => {
+  const body = document.getElementById('dialog-body');
+  for (const whole of within.querySelectorAll('[data-fit-whole]')) {
+    whole.style.zoom = 1;
+    if (!whole.clientWidth) continue; // not shown
+    // Its full width: a map wider than its holder scrolls in its own frame
+    // (_overview_map.html), which hides that overflow from ``whole``.
+    const hidden = Math.max(0, ...[...whole.querySelectorAll('[data-map]')].map(({ parentElement: frame }) => frame.scrollWidth - frame.clientWidth));
+    // In the dialog, the height its body shows (layout.html caps it, and it
+    // scrolls past that), less what else it holds (the card's header).
+    const room = body?.contains(whole) ? body.clientHeight - (body.scrollHeight - whole.offsetHeight) : Infinity;
+    whole.style.zoom = Math.min(1, whole.clientWidth / (whole.scrollWidth + hidden), room / whole.scrollHeight);
+  }
+};
+document.body.addEventListener('htmx:afterSettle', (event) => fitWhole(event.detail.elt));
+let refit = 0;
+window.addEventListener('resize', () => {
+  cancelAnimationFrame(refit);
+  refit = requestAnimationFrame(() => fitWhole());
+});
+fitWhole();
 // A dialog's address opened directly arrives here as ?dialog=<its path>
 // (rendering.dialog): open it over the page, and drop the param so a
 // reload does not open it again. Same-origin paths only.

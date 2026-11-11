@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from app.services.finance.domains import imports_job
     from app.services.finance.domains.detection import queries as detection_queries
     from app.services.finance.domains.detection.analyst import (
+        FINANCE_TOOL_GRANTS,
         load_finance_agent_fixtures,
         memory_module_definitions,
     )

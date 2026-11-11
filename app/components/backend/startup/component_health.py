@@ -11,8 +11,12 @@ registry - which name maps to which check, gated by what the project
 actually ships.
 """
 
+import asyncio
+
+from app.components.backend import background
 from app.core.constants import ComponentName
 from app.core.log import logger
+from app.core.ontology import system
 from app.services.system.health import register_health_check
 
 from .health_backend import backend_component_health
@@ -116,3 +120,9 @@ async def startup_hook() -> None:
     logger.info("Documents service health check registered")
 
     logger.info("Service health detection complete")
+
+    # The app's model of itself, built now in the background: it is whole
+    # only once the checks above are registered, and reading the code takes
+    # seconds the first page drawing it (a path card, Overseer's map) would
+    # otherwise wait on, every start and every hot reload.
+    background.start("system_model", asyncio.to_thread(system.current))

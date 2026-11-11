@@ -48,3 +48,15 @@ def test_no_template_draws_a_sprite_icon_itself() -> None:
     ]
     # The landing navbar is template scaffolding nothing renders.
     assert pasted in ([], ["components/landing/navbar.html"])
+
+
+def test_every_icon_a_template_names_is_in_the_sprite() -> None:
+    """A name with no symbol draws nothing, silently: the replay player's
+    step and play buttons were empty boxes (2026-11-10)."""
+    held = set(re.findall(r'<symbol id="i-([\w-]+)"', ICONS.read_text()))
+    named = {
+        (str(path.relative_to(WEB)), name)
+        for path in WEB.rglob("*.html")
+        for name in re.findall(r'(?:\bicon\(|glyph=)"([\w-]+)"', path.read_text())
+    }
+    assert sorted(n for n in named if n[1] not in held) == []

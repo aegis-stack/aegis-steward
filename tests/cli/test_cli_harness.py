@@ -76,3 +76,13 @@ def test_ctrl_c_in_an_async_command_exits_without_a_traceback(
     with pytest.raises(SystemExit) as exited:
         cli_main.main()
     assert exited.value.code == 1
+
+
+def test_a_command_runs_as_an_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI is the host's shell (``caller_is_admin``): its turns and
+    tool calls answer in full, sign-in on or off."""
+    from app.core.config import settings
+    from app.services.shared.deps import caller_is_admin
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+    assert asyncio.run(cli_main.run_command(caller_is_admin())) is True

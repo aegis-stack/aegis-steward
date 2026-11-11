@@ -16,25 +16,33 @@ from sqlmodel import Session, SQLModel, col, select
 def missing_rows(
     session: Session,
     model: type[SQLModel],
-    key: str,
+    key: str | tuple[str, ...],
     rows: Sequence[dict[str, Any]],
     *where: ColumnElement[bool],
 ) -> list[dict[str, Any]]:
-    """The rows whose ``key`` value is not yet in ``model``'s table.
+    """The rows whose ``key`` value is not yet in ``model``'s table, each
+    key once. A key of several columns (a link row's pair) is matched whole.
 
     ``where`` narrows what counts as present (system import profiles share
     names with user-owned ones, so only ownerless rows count).
     """
-    column = col(getattr(model, key))
-    wanted = [row[key] for row in rows]
-    present = set(session.exec(select(column).where(column.in_(wanted), *where)).all())
-    return [row for row in rows if row[key] not in present]
+    keys = (key,) if isinstance(key, str) else key
+    columns = [col(getattr(model, name)) for name in keys]
+    wanted: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        wanted.setdefault(tuple(row[name] for name in keys), row)
+    narrowed = [
+        column.in_({values[i] for values in wanted}) for i, column in enumerate(columns)
+    ]
+    found = session.exec(select(*columns).where(*narrowed, *where)).all()
+    present = {tuple(row) if len(keys) > 1 else (row,) for row in found}
+    return [row for values, row in wanted.items() if values not in present]
 
 
 def seed_rows(
     session: Session,
     model: type[SQLModel],
-    key: str,
+    key: str | tuple[str, ...],
     rows: Sequence[dict[str, Any]],
     *where: ColumnElement[bool],
 ) -> int:

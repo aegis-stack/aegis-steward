@@ -6,13 +6,10 @@ from typing import Any
 from sqlmodel import Session, col, select
 
 from app.core.log import logger
-from app.core.seed import missing_rows, seed_rows
-from app.core.tools import load_tools
+from app.core.seed import missing_rows
 from app.services.ai.service import (
     Agent,
     AgentPromptChange,
-    AgentTool,
-    Tool,
     seed_agent,
 )
 from app.services.finance.domains.detection.analyst.prompts import (
@@ -38,10 +35,6 @@ from app.services.finance.domains.detection.analyst.shared import (
     FINANCE_VOICE_AGENT_SLUG,
     SNAPSHOT_MODULE_SLUG,
 )
-
-# Every service's tools registered, so a bare seeding process gets their
-# ``tool`` rows and the grants below resolve.
-load_tools()
 
 SNAPSHOT_TOKEN_ESTIMATE = 1_200
 
@@ -279,6 +272,9 @@ FINANCE_CHAT_TOOL_NAMES = (
     "read_page",
 )
 
+# The agents' tool grants, (slug, tool names), applied with every other agent's.
+FINANCE_TOOL_GRANTS = ((FINANCE_CHAT_AGENT_SLUG, FINANCE_CHAT_TOOL_NAMES),)
+
 
 def finance_chat_agent_definition() -> dict[str, Any]:
     """The seed row for the conversational finance assistant.
@@ -406,37 +402,16 @@ def _let_go_of_seeded_catalog(session: Session) -> int:
     return trimmed
 
 
-def _attach_chat_tools(session: Session) -> int:
-    """Link the chat agent to the finance tool rows (see ``app.core.seed``)."""
-    agent = session.exec(
-        select(Agent).where(Agent.slug == FINANCE_CHAT_AGENT_SLUG)
-    ).first()
-    if agent is None or agent.id is None:
-        return 0
-    tools = session.exec(
-        select(Tool).where(col(Tool.name).in_(FINANCE_CHAT_TOOL_NAMES))
-    ).all()
-    for name in sorted(set(FINANCE_CHAT_TOOL_NAMES) - {t.name for t in tools}):
-        logger.warning(f"Finance chat tool row missing, skipping: {name}")
-    return seed_rows(
-        session,
-        AgentTool,
-        "tool_id",
-        [{"agent_id": agent.id, "tool_id": tool.id} for tool in tools],
-        col(AgentTool.agent_id) == agent.id,
-    )
-
-
 def load_finance_agent_fixtures(session: Session) -> dict[str, int]:
-    """Seed the finance agents (see ``app.core.seed``). Tool and
-    memory-module grants are additive by name, so one a definition gained
-    since an agent was seeded still reaches it."""
+    """Seed the finance agents (see ``app.core.seed``). Memory-module grants
+    are additive by name, so one a definition gained since an agent was
+    seeded still reaches it; tools are granted from ``FINANCE_TOOL_GRANTS``
+    with every other agent's (``load_agent_registry_fixtures``)."""
     definitions = finance_agent_definitions()
     counts = {
         "finance_agents": 0,
         "finance_module_links": 0,
         "finance_prompt_trims": 0,
-        "finance_tool_links": 0,
     }
     missing = missing_rows(session, Agent, "slug", definitions)
     for definition in missing:
@@ -452,11 +427,4 @@ def load_finance_agent_fixtures(session: Session) -> dict[str, int]:
 
     if any(counts.values()):
         session.commit()
-
-    counts["finance_tool_links"] = _attach_chat_tools(session)
-    if counts["finance_tool_links"]:
-        session.commit()
-        logger.info(
-            f"Attached {counts['finance_tool_links']} tool(s) to the chat agent"
-        )
     return counts
