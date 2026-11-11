@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.time import today
 from app.services.ai.domains.llm.llm_service import get_current_config
 from app.services.ai.domains.llm.provider_management import usable_providers
+from app.services.ai.models import AIProvider
 
 from .overseer_ai_common import (
     PARTIALS,
@@ -189,8 +190,11 @@ async def model_context(model_id: str) -> dict[str, Any] | None:
     return {
         "info": info,
         "current": current.model == info.model_id,
-        # Only a chat model can be the model the app answers with.
-        "use_url": f"{PARTIALS}/models/use" if info.mode == "chat" else None,
+        # Only a chat model a provider here can call can be the model the
+        # app answers with; the switch refuses the rest.
+        "use_url": f"{PARTIALS}/models/use"
+        if info.mode == "chat" and AIProvider.from_name(info.vendor)
+        else None,
         "facts": [
             ("Description", info.description or None),
             ("Vendor", label(info.vendor)),

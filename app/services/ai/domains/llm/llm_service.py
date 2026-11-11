@@ -276,7 +276,17 @@ async def set_active_model(model_id: str, force: bool = False) -> SetModelResult
             provider_updated = True
 
     # A model whose provider cannot be called is refused: stored, it would
-    # fail every answer after it until someone found the row.
+    # fail every answer after it until someone found the row. A vendor that
+    # maps to no provider has nothing to call it with at all; its name would
+    # go to whichever provider was active before.
+    if vendor_name and not provider_value and not force:
+        return SetModelResult(
+            success=False,
+            model_id=model_id,
+            vendor=vendor_name,
+            provider_updated=False,
+            message=f"No provider this app can call serves {vendor_name}'s models.",
+        )
     if (
         provider_value
         and not force
