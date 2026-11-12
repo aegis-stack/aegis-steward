@@ -26,10 +26,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime
+from collections.abc import Sequence
 import hashlib
 import time
-from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -37,22 +36,23 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.log import logger
 from app.core.time import utcnow
 from app.services.finance.adapters.importers import queries
+from app.services.finance.adapters.importers.balances import settle_balances
 from app.services.finance.adapters.importers.base import (
     CATEGORY_KEPT_NOTE,
     IGNORED_REASONS,
+    TABLE_EXTENSIONS,
     ImportPlan,  # noqa: F401 — re-export; declare.py and the service facade say imports.ImportPlan
     ImportResult,
     ParsedTransaction,
     PlannedRow,
+    StatementBalance,
     UnsupportedFileTypeError,  # noqa: F401 — re-export; the API router catches imports.UnsupportedFileTypeError
     _extension,
-    _is_posted,
     _parse_by_extension,
     assign_import_hashes,
     infer_account_kind,  # noqa: F401 — re-export; the account-kind tests read it here
 )
 from app.services.finance.adapters.importers.plan import plan_transactions
-from app.services.finance.constants import PROVIDER_LABELS, sync_source
 from app.services.finance.domains.ledger import changelog, two_feeds
 from app.services.finance.models import (
     FinanceImportBatch,
@@ -60,73 +60,9 @@ from app.services.finance.models import (
     FinanceImportProfile,
     FinanceTransactionTag,
 )
-from app.services.finance.utils import current_date, row_payee_key
+from app.services.finance.utils import row_payee_key
 from app.services.shared.queries import stored_owner
 from app.services.system.jobs import SetLabel, unwatched
-
-# What a source is CALLED where a person reads it. The stored value is
-# the machine's word (``snaptrade_sync``, ``csv``), constrained by the
-# batch table itself; this is the answer to "where did this come from",
-# which is the question actually being asked.
-SOURCE_LABELS: dict[str, str] = {
-    **{sync_source(key): label for key, label in PROVIDER_LABELS.items()},
-    "csv": "CSV",
-    "ofx": "OFX",
-    "qfx": "QFX",
-    "qif": "QIF",
-    "manual": "By hand",
-}
-
-
-def run_title(batch: Any) -> str:
-    """What to call one run: where it came from, and the file if it had
-    one. Beside ``run_summary`` because a list of runs and a single run
-    must not name the same row two ways."""
-    source = getattr(batch, "source_type", "") or ""
-    named = SOURCE_LABELS.get(source, source)
-    file_name = getattr(batch, "file_name", None)
-    return f"{named} · {file_name}" if file_name else named
-
-
-# What a run is counted in, in the order a reader wants it. The counts a
-# FILE has live on the batch; the ones only a provider has (holdings,
-# trades) ride in ``detail`` - which is the whole reason ``detail`` is a
-# JSON column and not five more.
-RUN_COUNTS: tuple[tuple[str, str], ...] = (
-    ("rows_inserted", "new"),
-    ("rows_updated", "updated"),
-    ("holdings", "holdings"),
-    ("trades", "trades"),
-    ("rows_duplicate", "duplicate"),
-    ("rows_error", "failed"),
-)
-
-
-def run_summary(batch: Any) -> str:
-    """What one run actually brought, in its own terms.
-
-    A file counts rows; a brokerage counts holdings and trades. Reading
-    "0 transactions" off a sync that restated ten positions is how a
-    working import gets reported as broken, so each source answers in the
-    units it deals in.
-
-    Here, not in a page: the Activity list, a run dialog and the CLI must
-    not each word the same five numbers their own way.
-    """
-    detail = getattr(batch, "detail", None) or {}
-    said = [
-        f"{count} {word}"
-        for attr, word in RUN_COUNTS
-        for count in [getattr(batch, attr, None) or detail.get(attr) or 0]
-        if count
-    ]
-    if said:
-        return " · ".join(said)
-    # A run that brought nothing is the most interesting kind, so it says
-    # so rather than rendering an empty cell; a failed one says why (#532).
-    if getattr(batch, "status", "") == "committed":
-        return "nothing"
-    return (getattr(batch, "error", None) or "-").splitlines()[0]
 
 
 async def _prior_batch(
@@ -178,6 +114,7 @@ async def ingest_transactions(
     import_profile_id: int | None = None,
     auto_create_accounts: bool = False,
     on_label: SetLabel | None = None,
+    stated: Sequence[StatementBalance] = (),
 ) -> ImportResult:
     """Ingest parsed transactions under a reversible, deduped import batch.
 
@@ -217,6 +154,7 @@ async def ingest_transactions(
         status="processing",
         rows_total=len(parsed),
         started_at=utcnow(),
+        detail={changelog.CHANGE_BATCH: changelog.current_batch()},
     )
     try:
         async with db.begin_nested():
@@ -561,35 +499,18 @@ async def ingest_transactions(
         )
 
     await two_feeds.pair_imported(db, plan.rows, created_id_by_row)
-    # If the file carried a running balance (e.g. a Quicken register's Balance
-    # column), set the target account's ``current_balance`` from the latest
-    # row — so net worth reflects the import without a separate valuation.
-    if default_account_id is not None:
-        # Posted rows only: a scheduled row's running balance is a
-        # PROJECTED figure, and taking it as the account's real balance
-        # would book money that has not moved.
-        today = current_date()
-        balanced = [
-            (txn.date, i, txn.running_balance)
-            for i, txn in enumerate(parsed)
-            if _is_posted(txn, today) and txn.running_balance is not None
-        ]
-        if balanced:
-            balanced.sort(key=lambda item: (item[0], item[1]))
-            ending_date, _, ending_balance = balanced[-1]
-            account = await queries.account_ref(db, default_account_id)
-            if account is not None:
-                account.current_balance = ending_balance
-                account.balance_as_of = datetime(
-                    ending_date.year, ending_date.month, ending_date.day
-                )
-                db.add(account)
+    balances = await settle_balances(
+        db,
+        parsed=parsed,
+        stated=stated,
+        route={r.txn.account_key: a for r in plan.rows if (a := _actual_account(r))},
+        account_id=default_account_id,
+    )
 
     batch.rows_inserted = inserted
     batch.rows_updated = updated
-    # No rows_skipped column on the batch: the skipped rows are recorded
-    # individually with parsed_status="skipped" and a reason, so the count
-    # stays queryable without a migration.
+    # No rows_skipped column: skipped rows are recorded one by one with a
+    # reason, so the count stays queryable without a migration.
     batch.rows_duplicate = duplicate
     batch.rows_error = error
     batch.status = "committed"
@@ -652,6 +573,7 @@ async def ingest_transactions(
         rows_error=error,
         rows_skipped=skipped,
         rows_ignored=ignored,
+        balances=balances,
     )
 
 
@@ -747,11 +669,10 @@ async def import_file(
     """Dispatch by file extension and ingest.
 
     ``.ofx``/``.qfx`` -> OFX (account resolvable from the file); ``.qif`` needs
-    an explicit ``account_id``; ``.csv`` needs one unless the detected profile
-    routes rows by an account column. Unknown extensions raise
-    ``UnsupportedFileTypeError`` (HTTP 415).
+    an explicit ``account_id``; ``.csv``/``.xlsx`` need one unless the layout
+    routes rows by an account column. Others raise ``UnsupportedFileTypeError``.
     """
-    if _extension(file_name) == "csv":
+    if _extension(file_name) in TABLE_EXTENSIONS:
         # Single-account layouts still require account_id; import_csv enforces
         # it after detecting the profile (a multi-account layout self-routes).
         return await import_csv(
@@ -762,7 +683,7 @@ async def import_file(
             account_id=account_id,
             on_label=on_label,
         )
-    source_type, parsed = await asyncio.to_thread(
+    source_type, parsed, stated = await asyncio.to_thread(
         _parse_by_extension, file_name, file_bytes
     )
     if source_type == "qif" and account_id is None:
@@ -776,6 +697,7 @@ async def import_file(
         parsed=parsed,
         default_account_id=account_id,
         on_label=on_label,
+        stated=stated,
     )
 
 

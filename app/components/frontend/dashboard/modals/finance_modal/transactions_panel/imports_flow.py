@@ -29,6 +29,7 @@ from app.components.frontend.dashboard.modals.finance_modal.transactions_panel.i
     ImportTargetMixin,
 )
 from app.core.constants import dashboard_upload_dir
+from app.services.finance.service import UPLOADS
 
 
 async def _settled_upload(
@@ -96,7 +97,7 @@ class ImportsFlowMixin(ImportTargetMixin):
             self._file_picker.pick_files(
                 dialog_title="Import transactions",
                 allow_multiple=False,
-                allowed_extensions=["ofx", "qfx", "qif", "csv"],
+                allowed_extensions=list(UPLOADS),
             )
 
     def _on_import_picked(self, event: ft.FilePickerResultEvent) -> None:

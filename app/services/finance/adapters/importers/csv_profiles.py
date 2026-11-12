@@ -13,6 +13,7 @@ import csv
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import io
+import re
 from typing import TYPE_CHECKING
 
 from app.services.finance.adapters.importers.base import ParsedTransaction
@@ -41,17 +42,64 @@ class UnknownCsvLayoutError(ValueError):
         )
 
 
+class AmbiguousDatesError(UnknownCsvLayoutError):
+    """A known layout whose dates read more than one way (``03/04``: March
+    or April?): which style the file uses is asked, not guessed."""
+
+    def __init__(
+        self, header: list[str], profile: FinanceImportProfile, formats: list[str]
+    ) -> None:
+        super().__init__(header, [profile.name])
+        self.profile = profile
+        self.formats = formats
+        self.args = (f"The dates in this {profile.name} file read more than one way.",)
+
+
+# An .xlsx is a zip; a CSV never starts this way.
+_XLSX_MAGIC = b"PK\x03\x04"
+# How a sheet's typed date cell is written out: what no CSV writes.
+_SHEET_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+
 def _read_rows(data: bytes) -> list[list[str]]:
+    if data.startswith(_XLSX_MAGIC):
+        return _sheet_rows(data)
     text = data.decode("utf-8-sig", errors="replace")
     return list(csv.reader(io.StringIO(text)))
 
 
+def _cell(value: object) -> str:
+    if value is None:
+        return ""
+    return value.isoformat() if isinstance(value, datetime) else str(value)
+
+
+def _sheet_rows(data: bytes) -> list[list[str]]:
+    """An Excel file's first sheet as the CSV it would have been (#618),
+    a typed date written ISO, which ``_parse_date`` reads in any layout.
+    ponytail: reread per call (detect, then parse); cache if sheets grow."""
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        rows = [
+            [_cell(value) for value in row]
+            for row in book.worksheets[0].iter_rows(values_only=True)
+        ]
+    finally:
+        book.close()
+    # A sheet pads every row to its widest; a CSV row ends where it ends.
+    for row in rows:
+        while row and row[-1] == "":
+            row.pop()
+    return rows
+
+
 def header_preview(data: bytes) -> list[str]:
-    """First non-empty row — for a helpful 'unknown layout' error message."""
-    for row in _read_rows(data):
-        if any(cell.strip() for cell in row):
-            return [cell.strip() for cell in row]
-    return []
+    """The likeliest header of an unknown layout: the widest of the first
+    rows, so a title or preamble line before it is passed over."""
+    rows = [[cell.strip() for cell in row] for row in _read_rows(data)[:20]]
+    return max(rows, key=lambda row: sum(1 for cell in row if cell), default=[])
 
 
 def _row_matches(row: list[str], profile: FinanceImportProfile) -> bool:
@@ -126,7 +174,9 @@ def detect_profile(
 def _parse_amount_cents(raw: str) -> int:
     """Parse a money cell to signed cents. ``$``/thousands stripped;
     ``(45.00)`` (accounting negative) -> -4500. Always exact via Decimal."""
-    cleaned = raw.strip().replace("$", "").replace(",", "")
+    # Whatever currency marks it (``$``, ``RM``, ``€``) and thousands
+    # separators go; the digits, the point and the sign stay.
+    cleaned = re.sub(r"[^\d.()-]", "", raw)
     if not cleaned:
         return 0
     negative = cleaned.startswith("(") and cleaned.endswith(")")
@@ -154,7 +204,37 @@ def _row_amount(get: Callable[[str], str | None], profile: FinanceImportProfile)
 
 
 def _parse_date(raw: str, date_format: str) -> date:
-    return datetime.strptime(raw.strip(), date_format).date()
+    raw = raw.strip()
+    try:
+        return datetime.strptime(raw, date_format).date()
+    except ValueError:
+        if _SHEET_DATE.fullmatch(raw):
+            return datetime.fromisoformat(raw).date()
+        raise
+
+
+def _reads(cells: list[str], date_format: str) -> list[date] | None:
+    try:
+        return [_parse_date(cell, date_format) for cell in cells]
+    except ValueError:
+        return None
+
+
+def _date_format(
+    cells: list[str], profile: FinanceImportProfile, header: list[str]
+) -> tuple[str, dict[str, date]]:
+    """The style this file writes dates in, and the dates it already read.
+    A layout may name several, ``|``-separated (YNAB writes the user's own
+    setting): the one every date reads with. Two that read the file
+    differently are asked about."""
+    formats = (profile.date_format or "").split("|")
+    if len(formats) == 1:
+        return formats[0], {}
+    fits = {f: read for f in formats if (read := _reads(cells, f)) is not None}
+    if len({tuple(read) for read in fits.values()}) > 1:
+        raise AmbiguousDatesError(header, profile, list(fits))
+    chosen = next(iter(fits), formats[0])
+    return chosen, dict(zip(cells, fits.get(chosen, []), strict=False))
 
 
 def parse_csv(
@@ -172,10 +252,14 @@ def parse_csv(
     index_of = {name: i for i, name in enumerate(header)}
     mapping = profile.column_mapping  # csv column -> canonical field
 
+    body = [row for row in rows[header_index + 1 :] if any(c.strip() for c in row)]
+    date_column = next((c for c, f in mapping.items() if f == "date"), None)
+    at = index_of.get(date_column or "")
+    cells = [row[at] for row in body if at is not None and at < len(row) and row[at]]
+    date_format, read = _date_format(cells, profile, header)
+
     parsed: list[ParsedTransaction] = []
-    for row in rows[header_index + 1 :]:
-        if not any(cell.strip() for cell in row):
-            continue
+    for row in body:
 
         def get(canonical: str, _row: list[str] = row) -> str | None:
             for csv_column, canon in mapping.items():
@@ -211,7 +295,7 @@ def parse_csv(
         parsed.append(
             ParsedTransaction(
                 is_scheduled=bool(scheduled_raw and scheduled_raw.strip()),
-                date=_parse_date(date_raw, profile.date_format),
+                date=read.get(date_raw) or _parse_date(date_raw, date_format),
                 amount=cents,
                 source="csv",
                 name=get("name"),

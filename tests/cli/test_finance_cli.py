@@ -401,3 +401,29 @@ class TestRecomputePayeeAliases:
             result = invoke(["finance", "recompute-payee-aliases"])
         assert result.exit_code == 0
         assert "more than one payee" not in result.output
+
+
+class TestImport:
+    def test_a_folder_goes_in_as_one_import_of_its_files(self, tmp_path: Any) -> None:
+        """#618: a folder is packed the way the dialog packs it."""
+        from app.services.finance.adapters.importers.base import ImportResult
+        from app.services.finance.service import FinanceService, files_in
+
+        (tmp_path / "a.qif").write_bytes(b"1")
+        (tmp_path / "b.csv").write_bytes(b"2")
+        _session, cm = _fake_session_cm()
+        mock_import = AsyncMock(
+            return_value=[ImportResult(batch_id=7, rows_inserted=3)]
+        )
+        with (
+            patch("app.core.db.get_async_session", new=cm),
+            patch.object(FinanceService, "import_files", new=mock_import),
+        ):
+            result = invoke(["finance", "import", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        sent = mock_import.await_args.kwargs
+        assert files_in(sent["file_bytes"], sent["file_name"])[0] == [
+            ("a.qif", b"1"),
+            ("b.csv", b"2"),
+        ]
+        assert "Inserted  │ 3" in result.output

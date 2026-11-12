@@ -27,7 +27,7 @@ from decimal import Decimal
 import gzip
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from sqlalchemy import Table, bindparam, delete, insert, inspect, select, update
 from sqlmodel import SQLModel
@@ -160,16 +160,21 @@ async def export_finance(session: AsyncSession, path: Path) -> dict[str, int]:
     return counts
 
 
-def read_header(path: Path) -> dict[str, Any]:
+def read_header(path: Path | BinaryIO) -> dict[str, Any]:
     """The archive's first line, so a restore can refuse a file that is
-    not one of ours before it deletes anything."""
-    with gzip.open(path, "rt", encoding="utf-8") as archive:
-        header = json.loads(archive.readline() or "{}")
+    not one of ours before it deletes anything, and a download can refuse
+    to hand out anything else (#623)."""
+    name = path.name if isinstance(path, Path) else "This file"
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as archive:
+            header = json.loads(archive.readline() or "{}")
+    except (OSError, ValueError):  # not gzip, or not JSON
+        header = {}
     if header.get("format") != FORMAT:
-        raise ValueError(f"{path.name} is not an {FORMAT} archive.")
+        raise ValueError(f"{name} is not an {FORMAT} archive.")
     if header.get("version") != VERSION:
         raise ValueError(
-            f"{path.name} is version {header.get('version')}; this reads {VERSION}."
+            f"{name} is version {header.get('version')}; this reads {VERSION}."
         )
     return header
 

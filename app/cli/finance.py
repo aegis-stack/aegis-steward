@@ -416,13 +416,15 @@ def _print_counts(title: str, counts: dict[str, int], path: Any = None) -> None:
 
 @app.command("import")
 async def import_file(
-    path: str = typer.Argument(..., help="Path to an OFX/QFX/QIF/CSV file."),
+    path: str = typer.Argument(
+        ..., help="An OFX/QFX/QIF/CSV/Excel file, a .zip, or a folder of them."
+    ),
     account_id: int | None = typer.Option(
         None, "--account-id", "-a", help="Target account (required for QIF/CSV)."
     ),
     owner_user_id: int | None = OWNER_OPT,
 ) -> None:
-    """Import a bank / credit-card / Quicken file into an account."""
+    """Import bank / credit-card / Quicken files into an account."""
     await _import_file(path, account_id, owner_user_id)
 
 
@@ -434,16 +436,21 @@ async def _import_file(
     from rich.table import Table
 
     from app.core.db import get_async_session
-    from app.services.finance.adapters.importers import imports
+    from app.services.finance.service import FinanceService, pack
 
     file_path = Path(path)
-    data = file_path.read_bytes()
+    # A folder travels as the .zip the import dialog would have made (#618).
+    if file_path.is_dir():
+        found = sorted(f for f in file_path.rglob("*") if f.is_file())
+        name = f"{file_path.name}.zip"
+        data = pack([(str(f.relative_to(file_path)), f.read_bytes()) for f in found])
+    else:
+        name, data = file_path.name, file_path.read_bytes()
     async with get_async_session() as session:
         try:
-            result = await imports.import_file(
-                session,
+            results = await FinanceService(session).import_files(
                 owner_user_id=owner_user_id,
-                file_name=file_path.name,
+                file_name=name,
                 file_bytes=data,
                 account_id=account_id,
             )
@@ -452,17 +459,13 @@ async def _import_file(
             console.print(f"[red]Import failed:[/] {exc}")
             raise typer.Exit(code=1) from exc
 
-    table = Table(title=f"Imported {file_path.name}")
-    table.add_column("Result")
-    table.add_column("Count", justify="right")
-    table.add_row("Total rows", str(result.rows_total))
-    table.add_row("Inserted", str(result.rows_inserted))
-    table.add_row("Updated", str(result.rows_updated))
-    table.add_row("Duplicate", str(result.rows_duplicate))
-    table.add_row("Skipped (scheduled)", str(result.rows_skipped))
-    table.add_row("Errors", str(result.rows_error))
-    table.add_row("Batch ID", str(result.batch_id))
-    console.print(table)
+    for result in results:
+        table = Table(
+            "Result", "Count", title=f"Imported {name} (batch {result.batch_id})"
+        )
+        for field in ("total", "inserted", "updated", "duplicate", "skipped", "error"):
+            table.add_row(field.capitalize(), str(getattr(result, f"rows_{field}")))
+        console.print(table)
 
 
 _INVESTMENT_PROFILES = ("optum",)

@@ -580,18 +580,6 @@
     },
     {
       "kind": "repeated_statement",
-      "label": "SELECT ... FROM finance_account WHERE finance_account.name = :name_1 AND finance_account.deleted_at IS NOT NULL AND finance_account.owner_user_id = :owner_user_id_1",
-      "file": "app/services/finance/adapters/importers/queries.py",
-      "function": "removed_account_exists"
-    },
-    {
-      "kind": "repeated_statement",
-      "label": "SELECT ... FROM finance_account WHERE finance_account.name = :name_1 AND finance_account.deleted_at IS NOT NULL AND finance_account.owner_user_id IS NULL",
-      "file": "app/services/finance/adapters/importers/queries.py",
-      "function": "removed_account_exists"
-    },
-    {
-      "kind": "repeated_statement",
       "label": "SELECT ... FROM finance_account WHERE finance_account.name = :name_1 AND finance_account.deleted_at IS NULL AND finance_account.owner_user_id = :owner_user_id_1",
       "file": "app/services/finance/adapters/importers/queries.py",
       "function": "live_account_id_by_name"

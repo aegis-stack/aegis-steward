@@ -15,6 +15,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.services.finance.adapters.importers import imports
 from app.services.finance.adapters.importers.base import ParsedTransaction
 from app.services.finance.adapters.importers.imports import (
+    TABLE_EXTENSIONS,
     _csv_profiles,
     _detect_csv,
     _extension,
@@ -82,7 +83,7 @@ async def preview_file(
             identical_batch_id=prior.id,
         )
 
-    if _extension(file_name) == "csv":
+    if _extension(file_name) in TABLE_EXTENSIONS:
         from app.services.finance.adapters.importers import csv_profiles
 
         profiles = await _csv_profiles(db)
@@ -108,7 +109,7 @@ async def preview_file(
             auto_create_accounts=multi_account,
         )
     else:
-        source_type, parsed = await asyncio.to_thread(
+        source_type, parsed, _ = await asyncio.to_thread(
             _parse_by_extension, file_name, file_bytes
         )
         layout = source_type.upper()
@@ -212,6 +213,7 @@ async def preview_payload(db: AsyncSession, plan: ImportPlan) -> ImportPreviewRe
             )
         )
 
+    asked = {q.key for q in plan.account_questions}
     return ImportPreviewResponse(
         file_name=plan.file_name,
         rows_total=plan.rows_total,
@@ -232,10 +234,15 @@ async def preview_payload(db: AsyncSession, plan: ImportPlan) -> ImportPreviewRe
             if row.status == "skipped" and row.reason in imports.IGNORED_REASONS
         ),
         removed_accounts=plan.removed_accounts,
+        accounts_total=len({r.account_id for r in plan.rows if r.account_id}),
+        date_start=min((t.date for t in plan.parsed), default=None),
+        date_end=max((t.date for t in plan.parsed), default=None),
         insert_date_start=min(insert_dates, default=None),
         insert_date_end=max(insert_dates, default=None),
         inserts_by_account=inserts_by_account,
-        new_accounts=sorted(plan.new_accounts),
+        new_accounts=sorted(set(plan.new_accounts) - asked),
+        account_questions=plan.account_questions,
+        account_choices=plan.account_choices,
         new_categories=sorted(set(plan.new_category_hints)),
         edits=edits,
         category_kept_count=kept,

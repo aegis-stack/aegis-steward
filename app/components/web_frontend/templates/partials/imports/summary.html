@@ -1,4 +1,4 @@
-{% from "components/macros/imports.html" import count_cells, count_dots, job_done %}
+{% from "components/macros/imports.html" import balance_checks, count_cells, count_dots, export_opener, job_done, undo_opener %}
 <section id="import-summary" class="space-y-4">
   <h3 class="text-sm font-semibold text-aegis-text">Import complete</h3>
   {# The review's layout in the past tense: the same five numbers, the
@@ -7,5 +7,13 @@
   {{ count_cells(result, [("Added", "Now in your ledger"), ("Updated", "Changed in place"), ("Already had", "Left alone")]) }}
   {{ count_dots(result) }}
   {% endif %}
-  {{ job_done("/accounts") }}
+  {% if result and result.files_total > 1 %}
+  <p class="text-xs text-aegis-muted" data-files>{{ result.files_total }} files, each its own import: undo any one from Settings, Activity.</p>
+  {% endif %}
+  {% if result and result.balances is not none %}{{ balance_checks(result.balances) }}{% endif %}
+  <div class="flex items-center gap-3">
+    {{ job_done("/accounts") }}
+    {% if result and result.undoable %}{{ undo_opener(result.batch_id) }}{% endif %}
+    {{ export_opener() }}
+  </div>
 </section>

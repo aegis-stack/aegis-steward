@@ -140,6 +140,121 @@ CSV_IMPORT_PROFILES = [
         "date_format": "%m/%d/%Y",
         "amount_sign_convention": "outflow_negative",
     },
+    # Other finance apps' transaction exports (#619). None of the four
+    # publishes its header; each is verbatim from real exports (sources in
+    # tests/services/test_import_app_exports.py). Every one names its
+    # account per row, so rows route by it like Quicken All Transactions.
+    {
+        # The first eight columns never changed; Owner, Reviewed, Id and
+        # more were added after them in 2025-2026, which detection allows.
+        "name": "Monarch",
+        "source_format": "csv",
+        "header_signature": [
+            "Date",
+            "Merchant",
+            "Category",
+            "Account",
+            "Original Statement",
+            "Notes",
+            "Amount",
+            "Tags",
+        ],
+        "column_mapping": {
+            "Date": "date",
+            "Merchant": "name",
+            "Category": "category",
+            "Account": "account",
+            "Notes": "memo",
+            "Amount": "amount",
+            "Tags": "tags",
+        },
+        "date_format": "%Y-%m-%d",
+        "amount_sign_convention": "outflow_negative",
+    },
+    {
+        # Dates follow the user's YNAB setting; the file is read in the one
+        # style every date fits, and asked about when two do.
+        "name": "YNAB",
+        "source_format": "csv",
+        "header_signature": [
+            "Account",
+            "Flag",
+            "Date",
+            "Payee",
+            "Category Group/Category",
+            "Category Group",
+            "Category",
+            "Memo",
+            "Outflow",
+            "Inflow",
+            "Cleared",
+        ],
+        "column_mapping": {
+            "Account": "account",
+            "Date": "date",
+            "Payee": "name",
+            "Category": "category",
+            "Memo": "memo",
+            "Outflow": "debit",
+            "Inflow": "credit",
+        },
+        "date_format": "%m/%d/%Y|%d/%m/%Y|%d.%m.%Y|%Y-%m-%d",
+        "amount_sign_convention": "split_debit_credit",
+    },
+    {
+        # Money out is positive, money in negative. A spreadsheet re-save
+        # turns its dates into 7/31/26.
+        "name": "Copilot",
+        "source_format": "csv",
+        "header_signature": [
+            "date",
+            "name",
+            "amount",
+            "status",
+            "category",
+            "parent category",
+            "excluded",
+            "tags",
+            "type",
+            "account",
+            "account mask",
+            "note",
+            "recurring",
+        ],
+        "column_mapping": {
+            "date": "date",
+            "name": "name",
+            "amount": "amount",
+            "category": "category",
+            "tags": "tags",
+            "account": "account",
+            "note": "memo",
+        },
+        "date_format": "%Y-%m-%d|%m/%d/%y",
+        "amount_sign_convention": "outflow_positive",
+    },
+    {
+        "name": "Empower",
+        "source_format": "csv",
+        "header_signature": [
+            "Date",
+            "Account",
+            "Description",
+            "Category",
+            "Tags",
+            "Amount",
+        ],
+        "column_mapping": {
+            "Date": "date",
+            "Account": "account",
+            "Description": "name",
+            "Category": "category",
+            "Tags": "tags",
+            "Amount": "amount",
+        },
+        "date_format": "%Y-%m-%d|%m/%d/%Y",
+        "amount_sign_convention": "outflow_negative",
+    },
 ]
 
 

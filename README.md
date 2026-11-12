@@ -4,7 +4,7 @@
 
 <p align="center"><em>Your money, and the paperwork around it, on a server you own.</em></p>
 
-<p align="center"><img src="docs/images/overview.png" alt="Steward overview: net worth, spending, upcoming bills" width="900"></p>
+<p align="center"><img src="docs/images/overview.webp" alt="Steward overview: net worth, spending, upcoming bills" width="900"></p>
 
 Steward pulls in your accounts, shows where your money is and where it's headed, and keeps the letters, forms and deadlines that come with it in one place. Illiana, its assistant, answers questions about all of it and proposes changes, and nothing changes until you approve. It runs on your own machine or server, and your data stays there.
 
@@ -15,7 +15,7 @@ Built on [Aegis Stack](https://github.com/lbedner/aegis-stack).
 <td width="50%" valign="top">
 
 ### Connect
-**Your accounts.** Link banks through SimpleFIN or Plaid and brokerages through SnapTrade, import OFX, QFX, QIF and CSV statements, or add accounts by hand, including your house and car. On a server, connected accounts sync every six hours.
+**Your accounts.** Link banks through SimpleFIN or Plaid and brokerages through SnapTrade, import statements (OFX, QFX, QIF, CSV, Excel) or another app's export, or add accounts by hand, including your house and car. On a server, connected accounts sync every six hours.
 
 </td>
 <td width="50%" valign="top">
@@ -46,11 +46,13 @@ Built on [Aegis Stack](https://github.com/lbedner/aegis-stack).
 Start with what you already have, then let it keep itself current.
 
 <p align="center">
-  <img src="docs/images/import-preview.png" alt="Reviewing a Quicken import before anything is written" width="440">
-  <img src="docs/images/connect-simplefin.png" alt="Connecting banks through SimpleFIN" width="440">
+  <img src="docs/images/import-preview.webp" alt="Reviewing a Quicken import before anything is written" width="440">
+  <img src="docs/images/connect-simplefin.webp" alt="Connecting banks through SimpleFIN" width="440">
 </p>
 
-**Quicken and statement files.** Export Quicken's All Transactions report as CSV and drop it on Accounts, Import. Steward recognizes the layout, routes each row to its account by name, and creates the accounts it hasn't seen. It also reads OFX, QFX and QIF files, Quicken Mac register exports, and Chase and American Express CSVs. Every import opens a review first: what it adds, what it updates, what you already have, and where the rows land. Nothing is written until you confirm. Re-importing an overlapping file is safe, because rows are matched by provider ID, then by content, then by account, date and amount.
+**Statement files and other apps.** Drop files, a whole folder or a `.zip` on Accounts, Import. Steward reads OFX, QFX, QIF, CSV and Excel, and recognizes Quicken (All Transactions and Mac register), Chase and American Express statements, and exports from Monarch, YNAB, Copilot and Empower, routing each row to its account by name. A layout it has never seen, you map once and it remembers.
+
+**Review, then take it back if you need to.** Every import opens a review first: what it adds, what it updates, what you already have, and where the rows land. An account name it can't place becomes one question with a pick list. Nothing is written until you confirm. Afterwards it checks each account's balance against the file's, and any import can be undone from Settings, Activity. Re-importing an overlapping file is safe, because rows are matched by provider ID, then by content, then by account, date and amount.
 
 **Connections that sync themselves.** On a server, connected accounts sync every six hours, and Settings, Activity lists every import and sync run.
 
@@ -77,25 +79,26 @@ Some money comes with paperwork attached: Medicaid renewals, insurance claims, t
 
 Deadlines show up in Review before they're late. Steward can also read your mail over IMAP, file letters and attachments as documents, and link them to the matters they belong to.
 
-<p align="center"><img src="docs/images/matter-asked.png" alt="A matter's Asked for tab" width="900"></p>
+<p align="center"><img src="docs/images/matter-asked.webp" alt="A matter's Asked for tab" width="900"></p>
 
 ## Nothing changes without you
 
 Every change Illiana proposes, from categorizing a charge to filing a document on a matter, is a card, right in the conversation and in your Review queue. Approve one at a time or a batch at once, veto single rows, or edit a card before it applies. Approval is the only way a change happens.
 
-<p align="center"><img src="docs/images/chat-proposal.png" alt="Illiana proposing a change in chat, waiting for approval" width="700"></p>
+<p align="center"><img src="docs/images/chat-proposal.webp" alt="Illiana proposing a change in chat, waiting for approval" width="700"></p>
 
 ## Your data stays yours
 
 - **Encrypted at rest:** provider tokens, account numbers and saved sign-ins are encrypted with AES-256-GCM. Outside development, Steward won't start without an encryption key.
 - **Locked by default:** password sign-in, rate limits and lockout, no public registration. Every page sits behind sign-in.
 - **What leaves the server:** what you connect, which is your AI provider, your finance providers and your mail server. Besides those, Steward fetches merchant icons from Google's favicon service and refreshes its AI model price list. No analytics, no error tracking, no update checks.
+- **Take it with you:** Export everything, on Settings, Activity, writes the whole ledger (accounts, rules, budgets, history) to one archive, and `finance restore` brings it back on another server.
 - **Backups:** a nightly backup on the server, plus an optional encrypted off-site copy to S3 or DigitalOcean Spaces.
 
 <p align="center">
-  <img src="docs/images/accounts.png" alt="Accounts" width="440">
-  <img src="docs/images/plan.png" alt="Retirement plan" width="440">
-  <img src="docs/images/review.png" alt="Review queue" width="440">
+  <img src="docs/images/accounts.webp" alt="Accounts" width="440">
+  <img src="docs/images/plan.webp" alt="Retirement plan" width="440">
+  <img src="docs/images/review.webp" alt="Review queue" width="440">
 </p>
 
 ## Try it

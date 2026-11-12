@@ -161,7 +161,7 @@ text-aegis-text
 {# The mark provokes exactly one question - "this is new, where did it
    come from?" - so it answers it. A button, not the dot alone: a 6px
    target is not a control, so the hit area is the padding around it. #}
-<button type="button" {{ hx_dialog("/settings/activity/" ~ row.import_batch_id) }}
+<button type="button" {{ hx_dialog(run_path(row.import_batch_id)) }}
         class="absolute left-0 top-1/2 -translate-y-1/2 flex items-center justify-center w-4 h-6"
         aria-label="New. See the run that brought this">{{ dot }}</button>
 {%- else -%}

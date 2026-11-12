@@ -20,6 +20,7 @@ from app.services.documents.domains.reading import receipts
 from app.services.documents.models import DocumentPage
 from app.services.documents.queries import tagged_with
 from app.services.documents.service import DocumentService
+from app.services.finance.adapters.importers.base import ImportResult
 from app.services.finance.constants import transaction_tag
 from app.services.finance.domains.writes.queue import approve, list_changes, reject
 from app.services.finance.models import FinanceInsight
@@ -321,7 +322,11 @@ class TestWhenItLooksAgain:
             monkeypatch.setattr(module, "get_async_session", opens(async_db_session))
         monkeypatch.setattr(connections, "sync_one_connection", _nothing)
         monkeypatch.setattr(connections, "sync_owner_connections", _nothing)
-        monkeypatch.setattr(FinanceService, "import_file", _nothing)
+
+        async def _no_rows(*_a: Any, **_k: Any) -> list[ImportResult]:
+            return [ImportResult()]
+
+        monkeypatch.setattr(FinanceService, "import_files", _no_rows)
 
         if path == "sync":
             await finance_tasks.finance_sync_connection_task({}, 1, None)
@@ -333,7 +338,7 @@ class TestWhenItLooksAgain:
             await jobs.finance_sync_connections_job()
         elif path == "import":
             monkeypatch.setattr(
-                imports_job, "import_result_payload", lambda r: {}, raising=False
+                imports_job, "import_result_payload", lambda r, **_k: {}, raising=False
             )
             await _import(monkeypatch)
         else:
@@ -356,7 +361,7 @@ async def _import(monkeypatch: pytest.MonkeyPatch) -> None:
             return b"Date,Amount\n"
 
     monkeypatch.setattr(storage, "get_storage", lambda: _Store())
-    monkeypatch.setattr(schemas, "import_result_payload", lambda _r: {})
+    monkeypatch.setattr(schemas, "import_result_payload", lambda _r, **_k: {})
     await imports_job.run_import(
         "key", file_name="x.csv", account_id=None, owner_user_id=None, kind="import"
     )

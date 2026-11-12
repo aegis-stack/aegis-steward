@@ -24,6 +24,7 @@ from app.components.web_frontend.routes.finance import (
     connection_placing,
     cover,
     documents,
+    export,
     imports,
     institutions,
     overview,
@@ -75,6 +76,8 @@ router.include_router(budget_envelopes.router)
 router.include_router(review_edit.router)
 router.include_router(review_resolve.router)
 router.include_router(review.router)
+# Before settings: its download path must beat any settings wildcard.
+router.include_router(export.router)
 router.include_router(settings.router)
 router.include_router(settings_comms.router)
 router.include_router(settings_payees.router)

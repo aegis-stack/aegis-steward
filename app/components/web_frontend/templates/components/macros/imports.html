@@ -7,7 +7,8 @@
    review says what will happen, the summary says what did.
 #}
 {% from "components/macros/layout.html" import stats_strip, badge %}
-{% from "components/macros/form.html" import button_classes %}
+{% from "components/macros/form.html" import action, button_classes %}
+{% from "components/macros/accounts.html" import correct_balance %}
 
 {# The three outcomes that CHANGE the ledger, as the house strip. #}
 {% macro count_cells(counts, headings) %}
@@ -62,3 +63,31 @@
         class="{{ button_classes() }}">{{ label }}</button>
 {% endmacro %}
 
+{% macro undo_opener(batch_id) %}
+{#- One opener for Undo, on the done screen and in the run's dialog. -#}
+{{ action("Undo this import", hx_dialog(import_undo_path(batch_id), "data-import-undo")) }}
+{% endmacro %}
+
+{% macro export_opener() %}
+{#- One opener for Export everything: Activity and the done screen. -#}
+{{ action("Export everything", hx_dialog_post(export_path(), "data-export-everything")) }}
+{% endmacro %}
+
+{# The file's balances against the ledger (issue 622): how many agree, and
+   each that does not, with its correction filled in. #}
+{% macro balance_checks(checks) %}
+{%- set off = checks|selectattr("gap")|list %}
+<div class="space-y-1 text-xs" data-balance-checks>
+  {% if not checks %}
+  <p class="text-aegis-muted" data-no-balances>This file states no balances to check the ledger against.</p>
+  {% else %}
+  <p class="text-aegis-text">Balances match on {{ checks|length - off|length }} of {{ checks|length }} account{{ "s" if checks|length != 1 }}.</p>
+  {% for check in off %}
+  <p class="flex items-center gap-3" data-balance-off>
+    <span class="text-error">{{ check.account_name }} is {{ (check.gap|abs)|money }} off on {{ check.as_of|short_date }}.</span>
+    {{ correct_balance(check.account_id, check.as_of, check.printed) }}
+  </p>
+  {% endfor %}
+  {% endif %}
+</div>
+{% endmacro %}

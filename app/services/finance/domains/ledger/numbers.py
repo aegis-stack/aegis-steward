@@ -9,6 +9,7 @@ in a listing, revealed into one row on request.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -19,6 +20,15 @@ from app.core.encryption import decrypt_secret, encrypt_secret
 # sum, so a mistyped routing number is caught before it is filed.
 _ABA_WEIGHTS = (3, 7, 1, 3, 7, 1, 3, 7, 1)
 MASK_DIGITS = 4
+# Apps append an account's last four to its name: "(3639)", "(...2562)",
+# "Ending in 1002".
+ENDS_IN_FOUR = re.compile(r"(\d{4})\D{0,2}$")
+
+
+def last_four(name: str, pattern: re.Pattern[str] = ENDS_IN_FOUR) -> str | None:
+    """The four digits a name ends with, read by ``pattern``."""
+    found = pattern.search(name.strip())
+    return found.group(1) if found else None
 
 
 def _digits(raw: str | None) -> str:

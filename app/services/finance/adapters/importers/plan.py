@@ -19,11 +19,12 @@ from collections import defaultdict
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.finance.adapters.importers import queries
+from app.services.finance.adapters.importers import account_names, queries
 from app.services.finance.adapters.importers.base import (
     _SKIP_DELETED_REASON,
     _SKIP_REMOVED_REASON,
     _SKIP_SCHEDULED_REASON,
+    AccountQuestion,
     ImportPlan,
     ParsedTransaction,
     PlannedRow,
@@ -40,7 +41,7 @@ from app.services.finance.adapters.importers.base import (
 from app.services.finance.constants import FEED_SOURCES
 from app.services.finance.domains.ledger import two_feeds
 from app.services.finance.domains.ledger.queries.two_feeds import FeedRow
-from app.services.finance.models import FinanceTransaction
+from app.services.finance.models import FinanceAccount, FinanceTransaction
 from app.services.finance.utils import current_date
 
 
@@ -102,6 +103,9 @@ async def plan_transactions(
     account_by_key: dict[str | None, int | None] = {}
     new_accounts: dict[str, tuple[str, str]] = {}
     removed_keys: set[str] = set()
+    questions: dict[str, AccountQuestion] = {}
+    live: list[FinanceAccount] | None = None
+    removed: list[FinanceAccount] = []
     placeholder_id = -1
     for txn in postable:
         key = txn.account_key
@@ -118,25 +122,32 @@ async def plan_transactions(
                 default_account_id=None,
             )
             continue
-        existing_id = await queries.live_account_id_by_name(
-            db, name=key, owner_user_id=owner_user_id
-        )
-        if existing_id is not None:
-            account_by_key[key] = existing_id
+        if live is None:
+            owned = await queries.owner_accounts(db, owner_user_id=owner_user_id)
+            live = [a for a in owned if a.deleted_at is None]
+            removed = [a for a in owned if a.deleted_at is not None]
+        if (existing := account_names.known(live, key)) is not None:
+            account_by_key[key] = existing.id
+        # A removed account this name means (its own or one kept for it)
+        # is a standing "no": its rows are ignored rather than the account
+        # resurrected. Re-adding the account (or a rename) opts back in.
+        elif any(account_names.means(a, key) for a in removed):
+            removed_keys.add(key)
+            account_by_key[key] = None
         else:
-            # A soft-deleted account with this name is a standing "no":
-            # the user removed it, so its rows are ignored rather than
-            # the account resurrected. Re-adding the account (or a
-            # rename) opts back in.
-            if await queries.removed_account_exists(
-                db, name=key, owner_user_id=owner_user_id
-            ):
-                removed_keys.add(key)
-                account_by_key[key] = None
-            else:
-                new_accounts[key] = infer_account_kind(key)
-                account_by_key[key] = placeholder_id
-                placeholder_id -= 1
+            new_accounts[key] = infer_account_kind(key)
+            account_by_key[key] = placeholder_id
+            placeholder_id -= 1
+            # Asked before Import, when there is an account it could be.
+            if live:
+                questions[key] = AccountQuestion(
+                    key=key, suggested_id=account_names.suggest(live, key)
+                )
+    for txn in postable:
+        if (question := questions.get(txn.account_key or "")) is not None:
+            question.rows += 1
+            question.date_start = min(question.date_start or txn.date, txn.date)
+            question.date_end = max(question.date_end or txn.date, txn.date)
     touched_account_ids = {
         aid for aid in account_by_key.values() if aid is not None and aid > 0
     }
@@ -478,6 +489,8 @@ async def plan_transactions(
         account_by_key=account_by_key,
         new_accounts=new_accounts,
         removed_accounts=sorted(removed_keys),
+        account_questions=list(questions.values()),
+        account_choices=account_names.choices(live or []) if questions else [],
         new_category_hints=new_category_hints,
         existing_by_id=existing_by_id,
         rows_total=len(parsed),
