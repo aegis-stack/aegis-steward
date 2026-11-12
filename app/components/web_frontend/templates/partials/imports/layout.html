@@ -1,0 +1,42 @@
+{# A CSV layout nobody knew (issue 619): the columns it has, mapped once
+   and kept as a layout, then the review as if it had been known.
+
+   Needs: layout (a LayoutAsk: columns, file_name, and for a known
+   layout whose dates read two ways its picked columns, name, the
+   date_formats that fit and the reason; on a retry also date_format,
+   spending_positive, errors); import_layout (the fields,
+   the date formats, where it posts) from the import route. The file
+   itself rides along from #import-form, as the review's Import does. #}
+{% from "components/macros/form.html" import field, select, text_input, checkbox, button_classes %}
+{% from "components/macros/feedback.html" import error_banner %}
+{% set picked = layout.picked or {} %}
+{#- Only the styles the file fits, when it fits more than one. -#}
+{% set formats = layout.date_formats or import_layout.date_formats %}
+<section id="import-layout" class="space-y-4">
+  <header class="space-y-0.5">
+    <h3 class="text-sm font-semibold text-aegis-text">A layout this app does not know yet</h3>
+    <p class="text-xs text-aegis-muted" data-reason>{{ layout.reason or "Say which column is which, once. Files with these columns are read this way from then on." }}</p>
+  </header>
+  {{ error_banner(layout.errors or []) }}
+  <form id="import-layout-form" class="space-y-3" data-map-columns>
+    {#- A retry opens with the same narrowing and reason; of several
+        files, this one is mapped. -#}
+    <input type="hidden" name="layout_file" value="{{ layout.file_name or '' }}">
+    {% for format in layout.date_formats or [] %}<input type="hidden" name="offered_format" value="{{ format }}">{% endfor %}
+    {% if layout.reason %}<input type="hidden" name="reason" value="{{ layout.reason }}">{% endif %}
+    {% call field("Call this layout") %}{{ text_input("layout_name", layout.name or (layout.file_name or "My file").rsplit(".", 1)[0], required=True, remember=False) }}{% endcall %}
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {% for key, label in import_layout.fields %}
+      {% call field(label) %}{{ select("col_" ~ key, layout.columns|as_options, picked.get(key), blank="Not in this file", block=True) }}{% endcall %}
+      {% endfor %}
+    </div>
+    {% call field("Dates are written like") %}{{ select("date_format", formats|as_options, layout.date_format, blank=None, block=True) }}{% endcall %}
+    {{ checkbox("spending_positive", layout.spending_positive, "Spending is a positive amount", value="1") }}
+    <p class="text-xxs text-aegis-muted">Date and payee are needed, and either an amount or money out and money in. An account column sends each row to its own account.</p>
+  </form>
+  <div class="flex items-center justify-end gap-3">
+    <button type="button" data-dialog-close class="{{ button_classes('default') }}">Cancel</button>
+    <button type="button" hx-post="{{ import_layout.path }}" hx-target="#import-result" hx-include="#import-form, #import-layout-form"
+            hx-encoding="multipart/form-data" class="{{ button_classes() }}" data-save-layout>Save and review</button>
+  </div>
+</section>

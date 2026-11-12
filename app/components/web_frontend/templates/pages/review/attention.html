@@ -3,6 +3,7 @@
 {% from "components/macros/layout.html" import page_header %}
 {% from "components/macros/layout.html" import badge %}
 {% from "components/macros/form.html" import action %}
+{% from "components/macros/accounts.html" import correct_balance %}
 
 {% block title %}Attention - {{ project_name }}{% endblock %}
 
@@ -27,8 +28,7 @@
     {% endfor %}
     {% elif insight.insight_type == "statement_gap" and insight.related_account_id %}
     {#- A statement that disagrees (issue 321): the correction, filled in. -#}
-    {% set fix = "/accounts/" ~ insight.related_account_id ~ "/reconcile?statement_date=" ~ insight.period_end ~ "&statement_balance=" ~ (insight.detected_amount|cents_to_input) %}
-    {{ action("Correct the balance", hx_dialog(fix) ~ " data-correct") }}
+    {{ correct_balance(insight.related_account_id, insight.period_end, insight.detected_amount) }}
     {{ dismiss }}
     {% elif insight.insight_type == "transfer_suggested" and insight.related_transaction_id %}
     {#- A near miss (issue 317): a transfer, or not, answered where it is read. -#}

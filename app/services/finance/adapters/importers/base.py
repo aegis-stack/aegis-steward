@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from app.services.finance.constants import FEED_SOURCES
 from app.services.finance.domains.ledger.queries.two_feeds import pairable
 from app.services.finance.models import FinanceTransaction
+from app.services.finance.schemas.imports import AccountQuestion, BalanceCheck
 from app.services.finance.utils import normalize_payee
 
 
@@ -70,6 +71,15 @@ class ParsedTransaction(BaseModel):
     # Account routing hint (e.g. OFX ACCTID) — resolved against
     # finance_account.provider_account_id, else the explicit account_id param.
     account_key: str | None = None
+
+
+class StatementBalance(NamedTuple):
+    """A balance the file states on ``as_of``, ``amount`` as the register
+    holds it (a debt negative), routed by ``account_key`` like a row."""
+
+    account_key: str | None
+    as_of: date
+    amount: int
 
 
 def compute_import_hash(
@@ -149,10 +159,25 @@ class ImportResult(BaseModel):
     # Rows belonging to an account the user REMOVED - deleting an account
     # is a standing decision, and a re-import must not resurrect it.
     rows_ignored: int = 0
+    # Each balance the file states, against the ledger (#622).
+    balances: list[BalanceCheck] | None = None
 
 
 class UnsupportedFileTypeError(ValueError):
     """Raised for a file extension no importer handles."""
+
+
+# Files read as rows through the CSV layouts: an Excel sheet is one (#618).
+TABLE_EXTENSIONS = ("csv", "xlsx")
+# Every file an import reads, and what an upload may be: a .zip holds
+# several of them (#618).
+READS = ("ofx", "qfx", "qif", *TABLE_EXTENSIONS)
+UPLOADS = (*READS, "zip")
+
+
+def formats_label() -> str:
+    """The formats an import reads, as people name them."""
+    return ", ".join({"xlsx": "Excel"}.get(kind, kind.upper()) for kind in READS)
 
 
 def _extension(file_name: str | None) -> str:
@@ -162,21 +187,24 @@ def _extension(file_name: str | None) -> str:
 
 def _parse_by_extension(
     file_name: str | None, file_bytes: bytes
-) -> tuple[str, list[ParsedTransaction]]:
-    """(source_type, parsed rows) for OFX/QFX/QIF — the id-carrying formats
-    whose parsing needs no DB state. CSV goes through profile detection
-    instead. Unknown extensions raise ``UnsupportedFileTypeError``."""
+) -> tuple[str, list[ParsedTransaction], list[StatementBalance]]:
+    """(source_type, parsed rows, stated balances) for OFX/QFX/QIF — the
+    id-carrying formats whose parsing needs no DB state. CSV goes through
+    profile detection instead. Unknown extensions raise
+    ``UnsupportedFileTypeError``."""
     extension = _extension(file_name)
     if extension in ("ofx", "qfx"):
-        from app.services.finance.adapters.importers.ofx import parse_ofx
+        from app.services.finance.adapters.importers.ofx import parse_statements
 
-        return extension, parse_ofx(file_bytes, source=extension)
+        return extension, *parse_statements(file_bytes, source=extension)
     if extension == "qif":
         from app.services.finance.adapters.importers.qif import parse_qif
 
-        return "qif", parse_qif(file_bytes, source="qif")
+        return "qif", parse_qif(file_bytes, source="qif"), []
     raise UnsupportedFileTypeError(
-        f"Unsupported file type '.{extension}'. Supported: .ofx, .qfx, .qif, .csv."
+        f"Unsupported file type '.{extension}'. Supported: "
+        + ", ".join(f".{kind}" for kind in UPLOADS)
+        + "."
     )
 
 
@@ -364,6 +392,10 @@ class ImportPlan(BaseModel):
     # Account names the file carries that match a REMOVED account - their
     # rows plan as skipped; deleting an account is a standing decision.
     removed_accounts: list[str] = Field(default_factory=list)
+    # Names the ledger does not know, asked before Import (#620).
+    account_questions: list[AccountQuestion] = Field(default_factory=list)
+    # Your live accounts, (id, name), when there is a question to answer.
+    account_choices: list[tuple[int, str]] = Field(default_factory=list)
     rows_total: int = 0
     # Set when the exact file bytes were already imported: nothing to do.
     identical_batch_id: int | None = None

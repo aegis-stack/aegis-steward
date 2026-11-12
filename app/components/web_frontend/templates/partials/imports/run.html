@@ -4,7 +4,7 @@
    strip: a reader comparing "what will happen", "what did happen" and
    "what happened that night" should not have to work out whether three
    screens mean the same thing by the same word. #}
-{% from "components/macros/imports.html" import count_cells, footnote %}
+{% from "components/macros/imports.html" import count_cells, footnote, undo_opener %}
 {% from "components/macros/layout.html" import badge, dialog_title %}
 {% from "components/macros/feedback.html" import error_banner %}
 {% call dialog_title(run.title) %}
@@ -26,3 +26,4 @@
 <div class="mt-5">
 {% if run.note %}{{ footnote(run.note) }}{% endif %}
 </div>
+{% if run.undo %}<div class="mt-4">{{ undo_opener(run.undo) }}</div>{% endif %}

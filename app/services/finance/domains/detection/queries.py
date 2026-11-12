@@ -69,15 +69,16 @@ async def transfer_for_leg(
 
 
 async def offers_holding(db: AsyncSession, leg_ids: list[int]) -> list[FinanceTransfer]:
-    """Near-miss offers (#317) holding any of ``leg_ids``."""
+    """Near-miss offers (#317) holding any of ``leg_ids``, bound once (#621)."""
+    legs = select(FinanceTransaction.id).where(FinanceTransaction.id.in_(leg_ids)).cte()
     return list(
         (
             await db.exec(
                 select(FinanceTransfer).where(
                     FinanceTransfer.status == "suggested",
                     or_(
-                        FinanceTransfer.from_transaction_id.in_(leg_ids),
-                        FinanceTransfer.to_transaction_id.in_(leg_ids),
+                        FinanceTransfer.from_transaction_id.in_(select(legs.c.id)),
+                        FinanceTransfer.to_transaction_id.in_(select(legs.c.id)),
                     ),
                 )
             )

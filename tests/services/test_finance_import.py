@@ -997,6 +997,7 @@ class TestCsvImport:
         assert by_name["CHECKING"].account_type == "checking"
 
     @pytest.mark.asyncio
+    @pytest.mark.queryspy(threshold=3)  # each import plans once
     async def test_multi_account_reimport_dedups_without_duplicate_accounts(
         self, svc: FinanceService, async_db_session: AsyncSession, csv_profiles: None
     ) -> None:
@@ -1026,6 +1027,7 @@ class TestCsvImport:
         assert sum(1 for a in accounts if a.name == "AMEX CARD") == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.queryspy(threshold=3)  # each import plans once
     async def test_unknown_header_twice_is_the_same_error_both_times(
         self, svc: FinanceService, async_db_session: AsyncSession, csv_profiles: None
     ) -> None:
@@ -1078,6 +1080,7 @@ class TestCsvImport:
         assert total == 0  # nothing written on an unknown layout
 
     @pytest.mark.asyncio
+    @pytest.mark.queryspy(threshold=3)  # each import plans once
     async def test_reimport_zero_dupes(
         self, async_db_session: AsyncSession, csv_profiles: None
     ) -> None:
@@ -1398,6 +1401,7 @@ class TestDeletedTransactionStaysDeleted:
     as "new"."""
 
     @pytest.mark.asyncio
+    @pytest.mark.queryspy(threshold=4)  # three imports, each plans once
     async def test_a_deleted_row_replans_as_ignored(
         self, svc: FinanceService, async_db_session: AsyncSession, csv_profiles: None
     ) -> None:
@@ -1479,6 +1483,7 @@ class TestRemovedAccountStaysRemoved:
     re-minted."""
 
     @pytest.mark.asyncio
+    @pytest.mark.queryspy(threshold=3)  # each import plans once
     async def test_rows_for_a_removed_account_are_ignored(
         self, svc: FinanceService, async_db_session: AsyncSession, csv_profiles: None
     ) -> None:
@@ -1588,7 +1593,7 @@ class TestParseRunsOffTheEventLoop:
 
         def fake_parse(file_name: str | None, file_bytes: bytes):
             record.append(threading.current_thread())
-            return "qfx", []
+            return "qfx", [], []
 
         return fake_parse
 

@@ -1,0 +1,4 @@
+{% from "components/macros/layout.html" import confirm %}
+{{ confirm("Undo " ~ title ~ "?",
+           "What it added is removed and what it changed goes back. A row you have edited since stays.",
+           url, label="Undo this import", method="post") }}

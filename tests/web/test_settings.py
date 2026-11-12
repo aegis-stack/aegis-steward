@@ -800,7 +800,7 @@ class TestActivity:
     def test_a_run_says_what_it_brought(
         self, client: TestClient, async_db_session
     ) -> None:
-        from app.services.finance.adapters.importers.imports import run_summary
+        from app.services.finance.adapters.importers.runs import run_summary
 
         class Run:
             status = "committed"
@@ -858,10 +858,31 @@ class TestActivity:
         assert "SimpleFIN did not answer within 120s." in text(row)
         assert "failed" in text(row)
 
+    async def test_a_row_opens_its_run(
+        self, client: TestClient, async_db_session
+    ) -> None:
+        """The row is the way to a run's dialog, and to its Undo (#621)."""
+        from app.core.time import utcnow
+        from app.services.finance.models.imports import FinanceImportBatch
+
+        run = FinanceImportBatch(
+            owner_user_id=1,
+            source_type="qif",
+            status="committed",
+            rows_inserted=3,
+            started_at=utcnow(),
+        )
+        async_db_session.add(run)
+        await async_db_session.commit()
+
+        row = one(client.get("/settings/activity").text, f"#run-{run.id}")
+        door = one(row, "[data-open]")
+        assert door.get("hx-get") == f"/settings/activity/{run.id}"
+
     def test_a_list_row_and_the_run_itself_name_it_the_same_way(self) -> None:
         """A list of runs and a single run must not name the same row two
         ways, so both read ``run_title``."""
-        from app.services.finance.adapters.importers.imports import run_title
+        from app.services.finance.adapters.importers.runs import run_title
 
         class Csv:
             source_type = "csv"

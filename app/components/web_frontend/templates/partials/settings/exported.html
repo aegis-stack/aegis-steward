@@ -1,0 +1,8 @@
+{# Export everything, done: the archive the job parked, as a download. #}
+{% from "components/macros/form.html" import button_classes %}
+<section id="export-done" class="space-y-4">
+  <p class="text-sm text-aegis-text">{{ "{:,}".format(result.rows) }} rows, ready.</p>
+  <p class="text-xs text-aegis-muted">Restore it on any Steward with <code>finance restore</code>. The link works once.</p>
+  <a href="{{ export_path(result.storage_key) }}" data-export-download
+     class="{{ button_classes() }}">Download {{ result.file_name }}</a>
+</section>

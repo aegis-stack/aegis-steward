@@ -193,3 +193,40 @@ class TestLinkedRows:
             )
         ).all()
         assert splits == []
+
+
+@pytest.mark.asyncio
+async def test_a_whole_large_import_can_be_deleted_at_once(
+    svc: FinanceService, async_db_session: AsyncSession
+) -> None:
+    """Undoing an 18,000-row import deletes 18,000 rows in one call. SQLite
+    binds at most 32,766 values a statement, and a list bound twice (the
+    near-miss offers' two legs) broke past half that."""
+    from sqlalchemy import insert
+
+    from app.services.finance.models import FinanceTransaction
+
+    account_id = await _account(svc)
+    template = await svc.create_transaction(
+        account_id=account_id,
+        amount=-100,
+        txn_date=date(2026, 8, 1),
+        owner_user_id=1,
+        name="Row",
+    )
+    row = {
+        k: v
+        for k, v in template.model_dump().items()
+        if k not in ("id", "import_hash", "external_id")
+    }
+    await async_db_session.execute(insert(FinanceTransaction), [row] * 16_500)
+    _, total = await svc.list_transactions(owner_user_id=1, page_size=1)
+    ids = [
+        i
+        for (i,) in (
+            await async_db_session.execute(select(FinanceTransaction.id))  # type: ignore[call-overload]
+        ).all()
+    ]
+    assert len(ids) == total == 16_501
+
+    assert await svc.soft_delete_transactions(ids, owner_user_id=1) == 16_501

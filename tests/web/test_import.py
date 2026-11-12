@@ -6,8 +6,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 import pytest
 
+from app.services.finance.adapters.importers.bundle import pack
+from tests.services.app_exports import CHASE, xlsx, ynab, ynab_row
 from tests.web.conftest import HX, Ledger, follow
-from tests.web.dom import none, one, select, stat, text
+from tests.web.dom import none, one, select, stat, text, triggers
 
 FIXTURES = Path(__file__).parent.parent / "services" / "finance" / "fixtures"
 QIF = (
@@ -35,6 +37,17 @@ def review(client: TestClient, upload: tuple, **data: str) -> str:
     data = {"lane": "statement", **data}
     response = client.post(
         "/accounts/import/preview", files={"file": upload}, data=data
+    )
+    assert response.status_code == 200
+    return follow(client, response.text)[1]
+
+
+def imported(client: TestClient, upload: tuple | list, **data: object) -> str:
+    """The done screen Import ends on: ``upload`` is one file, or a list
+    of ``("file", file)`` pairs for several."""
+    files = upload if isinstance(upload, list) else {"file": upload}
+    response = client.post(
+        "/accounts/import", files=files, data={"lane": "statement", **data}
     )
     assert response.status_code == 200
     return follow(client, response.text)[1]
@@ -144,7 +157,7 @@ class TestDialog:
         """The guard on the fix: hiding must not become removing."""
         panel = review(live_client, QIF, account_id=str(ledger.checking))
         run = one(panel, 'button[hx-post="/accounts/import"]')
-        assert run.get("hx-include") == "#import-form"
+        assert run.get("hx-include") == "#import-form, #import-accounts"
 
 
 class TestReview:
@@ -171,7 +184,7 @@ class TestReview:
         panel = review(live_client, QIF, account_id=str(ledger.checking))
         run = one(panel, 'button[hx-post="/accounts/import"]')
         assert run.get("hx-target") == "#import-result"
-        assert run.get("hx-include") == "#import-form"
+        assert run.get("hx-include") == "#import-form, #import-accounts"
         assert text(run) == "Import 8 changes"  # inserted + updated
         # This button lives OUTSIDE the form, so it inherits nothing from
         # it: without its own encoding htmx sends the file urlencoded and
@@ -186,11 +199,46 @@ class TestReview:
         job_session: None,
     ) -> None:
         """An import that quietly invents an account is the surprise this
-        panel exists to head off, so each one is named, not counted."""
+        panel exists to head off, so each one is named, not counted; with
+        accounts in the ledger, it is asked about instead (#620)."""
         panel = review(live_client, CSV)
-        creates = text(one(panel, "#import-creates"))
-        assert "CHECKING" in creates and "AMEX CARD" in creates
-        assert "Groceries" in creates
+        assert "Groceries" in text(one(panel, "#import-creates"))
+        asked = text(one(panel, "#import-accounts"))
+        assert "CHECKING" in asked and "AMEX CARD" in asked
+
+    def test_the_headline_says_what_the_file_is(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        """Before anything else, what the app thinks the file is (#619)."""
+        panel = review(live_client, CSV)
+        assert text(one(panel, "[data-target]")) == (
+            "Looks like a Quicken All Transactions file"
+        )
+        summary = text(one(panel, "[data-file-summary]"))
+        assert summary == (
+            "5 rows in sample_quicken_all.csv · 2 accounts · Jul 1 to Jul 3, 2026"
+        )
+
+    def test_an_excel_file_is_reviewed_like_its_csv(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        """#618: the first sheet goes through the CSV layouts."""
+        data = xlsx(CHASE, ["03/02/2026", "", "Corner Cafe", "Food", "Sale", -4.75])
+        upload = ("activity.xlsx", data, "application/octet-stream")
+        panel = review(live_client, upload, account_id=str(ledger.card))
+
+        assert text(one(panel, "[data-target]")) == (
+            "Looks like a Chase Credit Card file, into Visa"
+        )
+        assert stat(panel, "To add") == "1"
 
     def test_ranks_where_the_new_rows_land(
         self,
@@ -557,3 +605,345 @@ class TestWhereTheImportRuns:
 
         assert job_id == "local-job"
         assert started["storage_key"] == "store/abc123"
+
+
+class TestUndo:
+    """Undo an import (#621): from the done screen or the run's dialog,
+    a confirm, then the batch taken back."""
+
+    def _imported(self, client: TestClient, ledger: Ledger) -> str:
+        """The done screen's Undo URL, after importing the QIF."""
+        final = imported(client, QIF, account_id=str(ledger.checking))
+        opener = one(final, "#import-summary [data-import-undo]")
+        assert opener.get("hx-target") == "#dialog-body"
+        return opener.get("hx-get") or ""
+
+    def test_the_done_screen_offers_undo_behind_a_confirm(
+        self, live_client: TestClient, ledger: Ledger, job_session: None
+    ) -> None:
+        url = self._imported(live_client, ledger)
+
+        confirm = live_client.get(url, headers=HX).text
+
+        one(confirm, f'button[hx-post="{url}"]')
+
+    def test_undo_takes_the_file_back(
+        self, live_client: TestClient, ledger: Ledger, job_session: None
+    ) -> None:
+        url = self._imported(live_client, ledger)
+
+        done = live_client.post(url, headers=HX)
+
+        assert done.status_code == 200
+        assert "toast" in triggers(done)
+        rows = select(
+            live_client.get(f"/accounts/{ledger.checking}").text, "#register tbody tr"
+        )
+        assert len(rows) == 3  # the eight the file added are gone
+
+    async def test_the_run_dialog_offers_undo_for_a_file_not_a_sync(
+        self, hx: TestClient, async_db_session
+    ) -> None:
+        from app.core.time import utcnow
+        from app.services.finance.models.imports import FinanceImportBatch
+
+        file_run = FinanceImportBatch(
+            owner_user_id=0,
+            source_type="csv",
+            status="committed",
+            rows_inserted=3,
+            started_at=utcnow(),
+        )
+        sync_run = FinanceImportBatch(
+            owner_user_id=0,
+            source_type="simplefin_sync",
+            status="committed",
+            started_at=utcnow(),
+        )
+        async_db_session.add_all([file_run, sync_run])
+        await async_db_session.commit()
+
+        opener = one(
+            hx.get(f"/settings/activity/{file_run.id}").text, "[data-import-undo]"
+        )
+        assert opener.get("hx-get") == f"/accounts/import/{file_run.id}/undo"
+        none(hx.get(f"/settings/activity/{sync_run.id}").text, "[data-import-undo]")
+
+
+class TestBalances:
+    """After an import, the file's balances against the ledger (#622)."""
+
+    def _done(self, client: TestClient, ledger: Ledger, upload: tuple) -> str:
+        return imported(client, upload, account_id=str(ledger.checking))
+
+    def test_a_file_with_no_balances_says_so(
+        self, live_client: TestClient, ledger: Ledger, job_session: None
+    ) -> None:
+        final = self._done(live_client, ledger, QIF)
+
+        one(final, "#import-summary [data-no-balances]")
+        none(final, "#import-summary [data-balance-off]")
+
+    def test_a_balance_that_disagrees_opens_the_correction_filled_in(
+        self, live_client: TestClient, ledger: Ledger, job_session: None
+    ) -> None:
+        qfx = ("c.qfx", (FIXTURES / "sample_chase.qfx").read_bytes(), "text/plain")
+        final = self._done(live_client, ledger, qfx)
+
+        off = one(final, "#import-summary [data-balance-off]")
+        assert "Checking" in text(off)
+        fix = one(final, "#import-summary [data-balance-off] [data-correct]")
+        assert fix.get("hx-get") == (
+            f"/accounts/{ledger.checking}/reconcile"
+            "?statement_date=2026-07-06&statement_balance=5,000.00"
+        )
+
+
+class TestUnknownLayout:
+    """An unknown CSV is mapped once and kept, not refused (#619)."""
+
+    FILE = (
+        "budget.csv",
+        b"When,Who,How much\n2026-03-02,Corner Cafe,-4.75\n",
+        "text/csv",
+    )
+
+    def test_it_says_which_columns_it_saw(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        panel = review(live_client, self.FILE, account_id=str(ledger.checking))
+
+        form = one(panel, "#import-layout [data-map-columns]")
+        options = select(form, 'select[name="col_date"] option')
+        assert [o.get("value") for o in options] == ["", "When", "Who", "How much"]
+
+    def test_mapping_it_once_opens_the_review(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        response = live_client.post(
+            "/accounts/import/layout",
+            files={"file": self.FILE},
+            data={
+                "account_id": str(ledger.checking),
+                "layout_name": "Budget app",
+                "col_date": "When",
+                "col_name": "Who",
+                "col_amount": "How much",
+                "date_format": "%Y-%m-%d",
+            },
+        )
+        _, panel = follow(live_client, response.text)
+
+        assert text(one(panel, "[data-target]")).startswith(
+            "Looks like a Budget app file"
+        )
+
+    def test_a_mapping_that_cannot_read_it_says_why(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+    ) -> None:
+        response = live_client.post(
+            "/accounts/import/layout",
+            files={"file": self.FILE},
+            data={
+                "layout_name": "Budget app",
+                "col_date": "When",
+                "col_name": "Who",
+                "col_amount": "How much",
+                "date_format": "%m/%d/%Y",
+            },
+        )
+        assert response.status_code == 422
+        assert "When column" in text(one(response.text, "#import-layout"))
+        assert (
+            one(response.text, 'select[name="col_date"] option[selected]').get("value")
+            == "When"
+        )
+
+    def test_a_known_layout_whose_dates_read_two_ways_asks_which(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        """03/04: March or April. The YNAB layout is filled in, and only
+        the two styles the file fits are offered."""
+        upload = (
+            "ynab.csv",
+            ynab(ynab_row("03/04/2026", "Cafe", "$4.75", "$0.00")),
+            "text/csv",
+        )
+        panel = review(live_client, upload)
+
+        form = one(panel, "#import-layout [data-map-columns]")
+        assert one(form, 'select[name="col_date"] option[selected]').get("value") == (
+            "Date"
+        )
+        formats = select(form, 'select[name="date_format"] option')
+        assert [o.get("value") for o in formats] == ["%m/%d/%Y", "%d/%m/%Y"]
+        assert "YNAB" in text(one(panel, "#import-layout [data-reason]"))
+
+
+class TestAccountQuestions:
+    """A name the ledger does not know is asked before Import (#620),
+    and the answer routes the rows and is kept for the next file."""
+
+    def _ask(self, client: TestClient) -> dict[str, str]:
+        panel = review(client, CSV)
+        return {
+            one(q, 'input[name="answer_key"]').get("value") or "": q
+            for q in select(panel, "#import-accounts [data-account-question]")
+        }
+
+    def test_each_unknown_name_is_one_question(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        asked = self._ask(live_client)
+
+        assert sorted(asked) == ["AMEX CARD", "CHECKING"]
+        options = select(asked["CHECKING"], 'select[name="answer_account"] option')
+        assert [o.get("value") for o in options] == [
+            "",
+            str(ledger.checking),
+            str(ledger.savings),
+            str(ledger.card),
+        ]
+
+    def test_an_answer_routes_the_rows_and_is_kept(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        imported(
+            live_client,
+            CSV,
+            answer_key=["CHECKING", "AMEX CARD"],
+            answer_account=[str(ledger.checking), ""],
+        )
+
+        rows = select(
+            live_client.get(f"/accounts/{ledger.checking}").text, "#register tbody tr"
+        )
+        assert len(rows) > 3
+        # AMEX CARD is an account now, and CHECKING means Checking.
+        assert self._ask(live_client) == {}
+
+    def test_an_answer_for_an_account_not_yours_is_refused(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+    ) -> None:
+        response = live_client.post(
+            "/accounts/import",
+            files={"file": CSV},
+            data={
+                "lane": "statement",
+                "answer_key": ["CHECKING"],
+                "answer_account": ["99999"],
+            },
+        )
+        assert response.status_code == 422
+
+
+class TestSeveralFiles:
+    """Several files, or a folder, in one review; each its own import
+    (#618)."""
+
+    def _files(self) -> list[tuple[str, tuple]]:
+        sheet = xlsx(CHASE, ["03/02/2026", "", "Corner Cafe", "Food", "Sale", -4.75])
+        return [
+            ("file", QIF),
+            ("file", ("activity.xlsx", sheet, "application/octet-stream")),
+        ]
+
+    def test_the_chooser_takes_several_files_or_a_folder(
+        self, live_client: TestClient
+    ) -> None:
+        page = live_client.get("/accounts/import", headers=HX).text
+        one(page, '#import-form input[type="file"][name="file"][multiple]')
+        one(page, "#import-form input[type=file][webkitdirectory]:not([name])")
+
+    @pytest.mark.queryspy(threshold=3)  # two files, each its own pipeline
+    def test_one_review_adds_them_up(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        response = live_client.post(
+            "/accounts/import/preview",
+            files=self._files(),
+            data={"lane": "statement", "account_id": str(ledger.card)},
+        )
+        _, panel = follow(live_client, response.text)
+
+        assert "rows in 2 files" in text(one(panel, "[data-file-summary]"))
+        assert stat(panel, "To add") == "9"
+
+    @pytest.mark.queryspy(threshold=3)  # two files, each its own pipeline
+    def test_import_brings_in_each(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        final = imported(live_client, self._files(), account_id=str(ledger.card))
+
+        assert stat(final, "Added") == "9"
+        assert "2 files" in text(one(final, "#import-summary [data-files]"))
+
+    @pytest.mark.queryspy(threshold=3)  # two files, each its own pipeline
+    def test_a_csv_to_map_inside_a_zip_is_the_one_mapped(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        name, data, _ = TestUnknownLayout.FILE
+        bundle = pack([("statements/" + name, data), (QIF[0], QIF[1])])
+        upload = ("statements.zip", bundle, "application/zip")
+
+        panel = review(live_client, upload, account_id=str(ledger.checking))
+        one(
+            panel,
+            '#import-layout input[name="layout_file"][value="statements/budget.csv"]',
+        )
+
+        response = live_client.post(
+            "/accounts/import/layout",
+            files={"file": upload},
+            data={
+                "account_id": str(ledger.checking),
+                "layout_file": "statements/budget.csv",
+                "layout_name": "Budget app",
+                "col_date": "When",
+                "col_name": "Who",
+                "col_amount": "How much",
+                "date_format": "%Y-%m-%d",
+            },
+        )
+        _, panel = follow(live_client, response.text)
+
+        assert "rows in 2 files" in text(one(panel, "[data-file-summary]"))
+        assert stat(panel, "To add") == "9"

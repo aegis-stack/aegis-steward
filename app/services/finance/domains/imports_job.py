@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         InvestmentActivity,
     )
     from app.services.finance.schemas import ImportPreviewResponse
+    from app.services.finance.service import FinanceService
 
 # A single-account file reviewed with no target, or a ledger with none:
 # said as the job's error, so the frame puts the file picker back. The
@@ -48,21 +49,33 @@ async def _import(
     owner_user_id: int | None,
     on_label: SetLabel | None,
 ) -> dict[str, Any]:
+    """Each file its own import, in turn (its own batch, its own Undo),
+    committed together: several files land whole or not at all."""
     from app.services.documents.service import waiting
+    from app.services.finance.models import FinanceImportBatch
     from app.services.finance.schemas import import_result_payload
-    from app.services.finance.service import FinanceService
+    from app.services.finance.service import FinanceService, can_undo, merge_results
 
-    result = await FinanceService(session).import_file(
+    results = await FinanceService(session).import_files(
         owner_user_id=owner_user_id,
         file_name=file_name,
         file_bytes=data,
         account_id=account_id,
         on_label=on_label,
     )
-    # A charge a waiting receipt is for may be in the file (#330).
+    if len(results) > 1:
+        done = merge_results(results)
+    else:
+        [result] = results
+        # Read before the commit expires it: the session has the batch.
+        batch = result.batch_id and await session.get(
+            FinanceImportBatch, result.batch_id
+        )
+        done = import_result_payload(result, undoable=can_undo(batch))
+    # A charge a waiting receipt is for may be in the files (#330).
     await waiting.look_again(session, owner_user_id=owner_user_id)
     await session.commit()
-    return import_result_payload(result)
+    return done
 
 
 async def _preview(
@@ -73,19 +86,46 @@ async def _preview(
     owner_user_id: int | None,
     on_label: SetLabel | None,
 ) -> dict[str, Any]:
-    """The dry run: the plan the import would execute, writing nothing."""
-    from app.services.finance.service import FinanceService
+    """The dry run: the plan the import would execute, writing nothing.
+    Several files add up into one review; the first whose CSV layout
+    nobody knows answers alone, with its columns, to map once."""
+    from app.services.finance.service import FinanceService, files_in, merge_reviews
 
     service = FinanceService(session)
-    plan = await service.preview_file(
-        owner_user_id=owner_user_id,
-        file_name=file_name,
-        file_bytes=data,
-        account_id=account_id,
-    )
+    files, skipped = files_in(data, file_name)
+    reviews = []
+    for name, body in files:
+        review = await _review(service, body, name, account_id, owner_user_id)
+        if review.layout_ask is not None:
+            return review.model_dump(mode="json")
+        reviews.append(review)
+    review = reviews[0] if len(reviews) == 1 else merge_reviews(reviews)
+    return capped_review(review.model_copy(update={"files_skipped": skipped}))
+
+
+async def _review(
+    service: FinanceService,
+    data: bytes,
+    file_name: str,
+    account_id: int | None,
+    owner_user_id: int | None,
+) -> ImportPreviewResponse:
+    from app.services.finance.schemas import ImportPreviewResponse
+    from app.services.finance.service import UnknownCsvLayoutError, layout_ask
+
+    try:
+        plan = await service.preview_file(
+            owner_user_id=owner_user_id,
+            file_name=file_name,
+            file_bytes=data,
+            account_id=account_id,
+        )
+    except UnknownCsvLayoutError as unknown:
+        ask = layout_ask(unknown, file_name)
+        return ImportPreviewResponse(file_name=file_name, rows_total=0, layout_ask=ask)
     if plan.needs_account:
         raise ValueError(NEEDS_ACCOUNT)
-    return capped_review(await service.preview_payload(plan))
+    return await service.preview_payload(plan)
 
 
 def capped_review(review: ImportPreviewResponse) -> dict[str, Any]:
@@ -155,6 +195,31 @@ async def _investments(
     return result.model_dump(mode="json")
 
 
+async def _export(
+    session: AsyncSession,
+    data: bytes,
+    file_name: str,
+    account_id: int | None,
+    owner_user_id: int | None,
+    on_label: SetLabel | None,
+) -> dict[str, Any]:
+    """Everything, as the archive ``finance export`` writes (#623), parked
+    in storage for the download. Built here because a ledger's archive
+    takes long enough to stall a web process."""
+    from pathlib import Path
+    import tempfile
+
+    from app.core.storage import get_storage
+    from app.services.finance import portability
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / file_name
+        counts = await portability.export_finance(session, path)
+        archive = await asyncio.to_thread(path.read_bytes)
+    key = await get_storage().put(archive, content_type="application/gzip")
+    return {"storage_key": key, "file_name": file_name, "rows": sum(counts.values())}
+
+
 Work = Callable[
     [AsyncSession, bytes, str, int | None, int | None, SetLabel | None],
     Awaitable[dict[str, Any]],
@@ -165,6 +230,7 @@ class Run(NamedTuple):
     work: Work
     label: str  # what it says while doing it
     frame: str  # the template its finished job renders
+    reads_file: bool = True  # an export reads the ledger: it parks nothing
 
 
 RUNS: dict[str, Run] = {
@@ -175,6 +241,9 @@ RUNS: dict[str, Run] = {
     ),
     "investments": Run(
         _investments, "Importing", "partials/imports/summary_investments.html"
+    ),
+    "export": Run(
+        _export, "Exporting", "partials/settings/exported.html", reads_file=False
     ),
 }
 
@@ -219,8 +288,8 @@ async def run_import(
     """
     from app.core.storage import get_storage
 
-    work = RUNS[kind].work
-    data = await get_storage().get(storage_key)
+    run = RUNS[kind]
+    data = await get_storage().get(storage_key) if run.reads_file else b""
     if data is None:
         raise ValueError("The uploaded file is no longer there.")
     # First line the worker writes for this file. Paired with
@@ -230,7 +299,9 @@ async def run_import(
         "finance.import.started", file_name=file_name, kind=kind, bytes=len(data)
     )
     async with get_async_session() as session:
-        return await work(session, data, file_name, account_id, owner_user_id, on_label)
+        return await run.work(
+            session, data, file_name, account_id, owner_user_id, on_label
+        )
 
 
 def start_import_in_process(
@@ -255,9 +326,8 @@ def start_import_in_process(
             kind=kind,
         )
 
-    return get_job_runner().start(
-        job_name(kind, file_name), work, label=f"Uploading {file_name}..."
-    )
+    first = f"Uploading {file_name}..." if RUNS[kind].reads_file else "Starting..."
+    return get_job_runner().start(job_name(kind, file_name), work, label=first)
 
 
 async def start_import(

@@ -174,7 +174,8 @@ async def import_investments(
     account_id, created = await _brokerage_named(service, name, owner_user_id)
     job_id = await park_import(
         data,
-        file,
+        file.filename,
+        file.content_type,
         account_id=account_id,
         kind="investments",
         owner_user_id=owner_user_id,

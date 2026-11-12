@@ -19,6 +19,7 @@ from app.services.finance.adapters.providers.connections.upserts import (
     ProviderAccount,
     ProviderTransaction,
 )
+from app.services.finance.domains.ledger.numbers import last_four
 
 
 def _day(seconds: Any) -> date:
@@ -42,13 +43,7 @@ def _kind(name: str, balance: int | None) -> tuple[str, str]:
 
 
 # SimpleFIN carries an account's last four in its name, "... (3639)".
-_LAST_FOUR = re.compile(r"\((\d{4})\)\s*$")
-
-
-def last_four(name: str) -> str | None:
-    """The last four a SimpleFIN account's name ends with, if it does."""
-    found = _LAST_FOUR.search(name)
-    return found.group(1) if found else None
+_LAST_FOUR = re.compile(r"\((\d{4})\)$")
 
 
 def simplefin_accounts(payload: dict[str, Any]) -> list[ProviderAccount]:
@@ -65,7 +60,7 @@ def simplefin_accounts(payload: dict[str, Any]) -> list[ProviderAccount]:
             ProviderAccount(
                 provider_account_id=str(account["id"]),
                 name=name,
-                mask=last_four(name),
+                mask=last_four(name, _LAST_FOUR),
                 bank=bank.get("name") or bank.get("org_name"),
                 bank_url=bank.get("org_url") or None,
                 currency=_currency(account.get("currency")),

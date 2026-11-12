@@ -206,3 +206,10 @@
 {% from "components/macros/form.html" import field, pick_or_add %}
 {% call field("Whose money") %}{{ pick_or_add("whose", people, whose, blank="Ours", new_field="new_whose", hint="or name whose it is") }}{% endcall %}
 {% endmacro %}
+
+{# Correct the balance, filled in with what a statement printed: from
+   Attention's statement gap and from an import's balance check. #}
+{% macro correct_balance(account_id, on, printed) %}
+{% from "components/macros/form.html" import action %}
+{{ action("Correct the balance", hx_dialog("/accounts/" ~ account_id ~ "/reconcile?statement_date=" ~ on ~ "&statement_balance=" ~ (printed|cents_to_input), "data-correct")) }}
+{% endmacro %}

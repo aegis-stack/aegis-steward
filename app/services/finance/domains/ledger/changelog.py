@@ -74,7 +74,7 @@ SYNC = "sync"
 # Arrivals are history, not decisions: Undo takes back what you or an
 # assistant did, never a feed that landed after it. An undo or a redo is
 # a move along that history, not an action of its own.
-_NOT_UNDOABLE = {UNDO, REDO, IMPORT, SYNC}
+NOT_UNDOABLE = {UNDO, REDO, IMPORT, SYNC}
 STEPS = {UNDO, REDO}
 # Session key: this flush's changes another action already stands for.
 _QUIET = "finance_changelog_quiet"
@@ -114,6 +114,17 @@ def as_actor(actor: str) -> Callable[[F], F]:
         return run  # type: ignore[return-value]
 
     return wrap
+
+
+# Where an import batch keeps ``current_batch()`` (its ``detail``), so
+# undoing the import can find the edits it made.
+CHANGE_BATCH = "change_batch"
+
+
+def current_batch() -> str | None:
+    """The action now being logged, for a caller that has to find it
+    again later: an import keeps it so the import can be undone."""
+    return _batch.get()
 
 
 def act_as(actor: str) -> None:
@@ -253,7 +264,7 @@ async def last_undoable(db: AsyncSession, owner_user_id: int | None) -> str | No
         FinanceTransactionChangelog.owner_user_id == (owner_user_id or 0),
         FinanceTransactionChangelog.batch_id.is_not(None),  # type: ignore[union-attr]
         FinanceTransactionChangelog.undone_at.is_(None),  # type: ignore[union-attr]
-        FinanceTransactionChangelog.change_source.not_in(_NOT_UNDOABLE),  # type: ignore[attr-defined]
+        FinanceTransactionChangelog.change_source.not_in(NOT_UNDOABLE),  # type: ignore[attr-defined]
         limit=1,
     )
     return rows[0].batch_id if rows else None
@@ -269,6 +280,8 @@ async def last_redoable(db: AsyncSession, owner_user_id: int | None) -> str | No
         db,
         owner,
         undone_at.is_not(None),  # type: ignore[union-attr]
+        # An import's edits are undone only with the import (#621), whole.
+        FinanceTransactionChangelog.change_source.not_in(NOT_UNDOABLE),  # type: ignore[attr-defined]
         limit=1,
         order=undone_at.desc(),  # type: ignore[union-attr]
     )
@@ -278,7 +291,7 @@ async def last_redoable(db: AsyncSession, owner_user_id: int | None) -> str | No
         db,
         owner,
         FinanceTransactionChangelog.changed_at > rows[0].undone_at,
-        FinanceTransactionChangelog.change_source.not_in(_NOT_UNDOABLE),  # type: ignore[attr-defined]
+        FinanceTransactionChangelog.change_source.not_in(NOT_UNDOABLE),  # type: ignore[attr-defined]
         limit=1,
     )
     return None if since else rows[0].batch_id
@@ -298,13 +311,23 @@ async def redo(db: AsyncSession, owner_user_id: int | None) -> tuple[int, int]:
     return await _step(db, batch, back=False) if batch else (0, 0)
 
 
-async def _step(db: AsyncSession, batch: str, *, back: bool) -> tuple[int, int]:
+async def step_back(db: AsyncSession, batch: str, *, only: set[int]) -> tuple[int, int]:
+    """One named action taken back on ``only`` these transactions: an
+    import's edits to rows it found, not the rows it added."""
+    return await _step(db, batch, back=True, only=only)
+
+
+async def _step(
+    db: AsyncSession, batch: str, *, back: bool, only: set[int] | None = None
+) -> tuple[int, int]:
     """Move one action's fields from one side of it to the other: back to
     each ``old_value`` (undo) or forward to each ``new_value`` (redo),
     only where a field still holds the side it is moved from."""
     rows = await queries.changes_where(
         db, FinanceTransactionChangelog.batch_id == batch
     )
+    if only is not None:
+        rows = [row for row in rows if row.transaction_id in only]
     txns = await queries.transactions_by_ids(db, list({r.transaction_id for r in rows}))
     tags = {(t.transaction_id, t.tag_id): t for t in await queries.tags_on(db, txns)}
     moved = left = 0

@@ -25,8 +25,9 @@
 <div id="import-chooser" x-show="!busy">
 {{ dialog_title("Import a file") }}
 <form id="import-form" hx-encoding="multipart/form-data" class="space-y-4">
-  {% call field("File") %}
-  {{ file_input("file", accept=".ofx,.qfx,.qif,.csv,.xlsx", required=True) }}
+  {% call field("Files") %}
+  {{ file_input("file", accept=accept, required=True, multiple=True, folder=True) }}
+  <p class="mt-1 text-xxs text-aegis-muted">{{ formats }}, or a whole folder: several files are one review.</p>
   {% endcall %}
   {% call field("Kind") %}
   <div class="mt-1 space-y-1">
@@ -36,7 +37,7 @@
   </div>
   {% endcall %}
   {% call field("Into account") %}{{ select("account_id", accounts, account_id, blank="Let the file decide (OFX)") }}{% endcall %}
-  <p class="text-xxs text-aegis-muted">QIF and CSV files carry no account, so pick one for those.</p>
+  <p class="text-xxs text-aegis-muted">QIF, CSV and Excel files carry no account, so pick one for those.</p>
   {# One button. Import opens the review (what this file would do); the
      review's own button commits it, so nothing is ever written straight
      from this form. #}

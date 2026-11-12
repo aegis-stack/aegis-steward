@@ -19,6 +19,43 @@ if TYPE_CHECKING:
     )
 
 
+class AccountQuestion(BaseModel):
+    """An account name the ledger does not know (#620), asked before
+    Import; see ``importers/account_names``."""
+
+    key: str
+    suggested_id: int | None = None
+    rows: int = 0
+    date_start: date | None = None
+    date_end: date | None = None
+
+
+class BalanceCheck(BaseModel):
+    """A balance the file states, against the ledger on its date (#622)."""
+
+    account_id: int
+    account_name: str
+    as_of: date
+    # As a statement prints it (a debt as what is owed): what Correct the
+    # balance is filled in with.
+    printed: int
+    gap: int  # file minus ledger; 0 when they agree
+
+
+class LayoutAsk(BaseModel):
+    """What the map-once form opens with (#619): the file's columns, and
+    for a known layout whose dates read two ways, its mapping filled in,
+    the styles that fit, and why it asks."""
+
+    columns: list[str]
+    file_name: str | None = None
+    picked: dict[str, str] = Field(default_factory=dict)
+    name: str | None = None
+    # Format -> example, only the styles that fit.
+    date_formats: dict[str, str] = Field(default_factory=dict)
+    reason: str | None = None
+
+
 class ImportResultResponse(BaseModel):
     """Summary returned right after an import run."""
 
@@ -32,9 +69,16 @@ class ImportResultResponse(BaseModel):
     rows_skipped: int = 0
     # Rows for accounts the user removed - never written, never resurrected.
     rows_ignored: int = 0
+    # None when nothing was checked (an identical re-upload); [] when the
+    # file states no balance.
+    balances: list[BalanceCheck] | None = None
+    # Several files imported at once (#618), each its own run.
+    files_total: int = 1
+    # The one Undo rule (#621), so the done screen offers what the route takes.
+    undoable: bool = False
 
 
-def import_result_payload(result: Any) -> dict[str, Any]:
+def import_result_payload(result: Any, *, undoable: bool = False) -> dict[str, Any]:
     """An ``ImportResult`` as the dict both contracts share.
 
     Here rather than in the API router it used to live in: the worker
@@ -51,7 +95,9 @@ def import_result_payload(result: Any) -> dict[str, Any]:
         rows_error=result.rows_error,
         rows_skipped=result.rows_skipped,
         rows_ignored=result.rows_ignored,
-    ).model_dump()
+        balances=result.balances,
+        undoable=undoable,
+    ).model_dump(mode="json")
 
 
 class ImportPreviewEdit(BaseModel):
@@ -83,6 +129,9 @@ class ImportPreviewResponse(BaseModel):
     # A single-account layout previewed with no target account: the client
     # asks which account the statement belongs to, then previews again.
     needs_account: bool = False
+    # A CSV layout to map once (#619): an unknown one, or a known one
+    # whose dates read two ways.
+    layout_ask: LayoutAsk | None = None
     layout: str | None = None
     account_name: str | None = None
     rows_inserted: int = 0
@@ -92,6 +141,10 @@ class ImportPreviewResponse(BaseModel):
     rows_skipped: int = 0
     # Rows for accounts the user removed - never written, never resurrected.
     rows_ignored: int = 0
+    # The whole file: how many accounts and what span it covers (#619).
+    accounts_total: int = 0
+    date_start: date | None = None
+    date_end: date | None = None
     insert_date_start: date | None = None
     insert_date_end: date | None = None
     # Account display name -> how many new transactions land there.
@@ -99,6 +152,12 @@ class ImportPreviewResponse(BaseModel):
     # Accounts / categories the commit would create.
     new_accounts: list[str] = Field(default_factory=list)
     removed_accounts: list[str] = Field(default_factory=list)
+    # Files a folder held that this app does not read (#618).
+    files_skipped: list[str] = Field(default_factory=list)
+    # Names the ledger does not know, each asked before Import (#620),
+    # and your accounts, (id, name), an answer can pick.
+    account_questions: list[AccountQuestion] = Field(default_factory=list)
+    account_choices: list[tuple[int, str]] = Field(default_factory=list)
     new_categories: list[str] = Field(default_factory=list)
     edits: list[ImportPreviewEdit] = Field(default_factory=list)
     category_kept_count: int = 0

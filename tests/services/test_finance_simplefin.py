@@ -930,7 +930,7 @@ class TestWhatTheReviewFound:
     def test_the_activity_page_names_a_simplefin_run(self) -> None:
         from types import SimpleNamespace
 
-        from app.services.finance.adapters.importers.imports import run_title
+        from app.services.finance.adapters.importers.runs import run_title
 
         assert run_title(SimpleNamespace(source_type="simplefin_sync")) == "SimpleFIN"
 

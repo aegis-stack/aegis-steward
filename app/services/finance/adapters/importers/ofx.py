@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import io
 
-from app.services.finance.adapters.importers.base import ParsedTransaction
+from app.services.finance.adapters.importers.base import (
+    ParsedTransaction,
+    StatementBalance,
+)
 from app.services.finance.utils import to_cents
 
 
@@ -21,6 +24,13 @@ def parse_ofx(data: bytes, *, source: str = "ofx") -> list[ParsedTransaction]:
     ``source`` is stored on each transaction (``"qfx"`` for Quicken downloads,
     ``"ofx"`` otherwise) and is part of the LANE-1 dedup key.
     """
+    return parse_statements(data, source=source)[0]
+
+
+def parse_statements(
+    data: bytes, *, source: str = "ofx"
+) -> tuple[list[ParsedTransaction], list[StatementBalance]]:
+    """``parse_ofx``'s rows, and each statement's ledger balance (#622)."""
     from ofxtools.Parser import OFXTree
 
     tree = OFXTree()
@@ -28,9 +38,19 @@ def parse_ofx(data: bytes, *, source: str = "ofx") -> list[ParsedTransaction]:
     ofx = tree.convert()
 
     parsed: list[ParsedTransaction] = []
+    balances: list[StatementBalance] = []
     for statement in ofx.statements:
         account = getattr(statement, "account", None)
         account_key = getattr(account, "acctid", None) if account is not None else None
+        key = str(account_key) if account_key else None
+        # ponytail: BALAMT is taken as signed like TRNAMT (a card's owed
+        # balance negative, as Chase and most banks send it); a bank that
+        # sends it positive reads as a gap, which Correct the balance shows.
+        ledger = getattr(statement, "ledgerbal", None)
+        if ledger is not None and ledger.balamt is not None:
+            balances.append(
+                StatementBalance(key, ledger.dtasof.date(), to_cents(ledger.balamt))
+            )
         for txn in statement.transactions:
             cents = to_cents(txn.trnamt)
             fitid = getattr(txn, "fitid", None)
@@ -49,7 +69,7 @@ def parse_ofx(data: bytes, *, source: str = "ofx") -> list[ParsedTransaction]:
                     original_description=payee,
                     memo=getattr(txn, "memo", None),
                     check_number=str(check_number) if check_number else None,
-                    account_key=str(account_key) if account_key else None,
+                    account_key=key,
                 )
             )
-    return parsed
+    return parsed, balances

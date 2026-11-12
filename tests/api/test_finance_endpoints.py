@@ -636,6 +636,42 @@ async def test_upload_reupload_short_circuits(
 
 
 @pytest.mark.asyncio
+@pytest.mark.queryspy(threshold=3)  # two files, each its own pipeline
+async def test_upload_several_files_is_one_job(
+    authenticated_client: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+    job_session: None,
+) -> None:
+    """#618: the API takes several files like the dialog does."""
+    account_id = await _checking_account(async_db_session, acting_owner_user_id)
+    response = authenticated_client.post(
+        "/api/v1/finance/import",
+        files=[
+            ("file", ("a.qif", (_FIXTURES / "sample_quicken.qif").read_bytes())),
+            ("file", ("b.qfx", (_FIXTURES / "sample_chase.qfx").read_bytes())),
+        ],
+        params={"account_id": account_id},
+    )
+    body = _job_result(authenticated_client, response)
+    assert (body["rows_inserted"], body["files_total"]) == (14, 2)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_for_an_account_not_yours_is_refused(
+    authenticated_client: TestClient,
+    acting_owner_user_id: int | None,
+) -> None:
+    """#620: the API answers account questions the dialog's way."""
+    response = authenticated_client.post(
+        "/api/v1/finance/import",
+        files={"file": ("a.csv", b"x", "text/csv")},
+        data={"answer_key": ["CHECKING"], "answer_account": ["99999"]},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_upload_unknown_extension_fails_the_job(
     authenticated_client: TestClient,
     async_db_session: AsyncSession,

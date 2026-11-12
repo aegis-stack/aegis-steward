@@ -160,11 +160,11 @@ def hx_into(url: str, target: str, extra: str = "") -> Markup:
     )
 
 
-def hx_dialog_post(url: str) -> Markup:
-    """The attributes for a dialog's own form: post to ``url`` and swap
-    the answer back into the dialog, which is how a 422 re-renders the
-    form with its errors (pattern 1 inside pattern 4)."""
-    return Markup(f'hx-post="{escape(url)}" hx-target="#dialog-body"')
+def hx_dialog_post(url: str, extra: str = "") -> Markup:
+    """The attributes for a dialog's own form: post to ``url`` and swap the
+    answer back into the dialog, which is how a 422 re-renders the form
+    with its errors (pattern 1 inside pattern 4); ``extra`` rides along."""
+    return Markup(f'hx-post="{escape(url)}" hx-target="#dialog-body" {extra}')
 
 
 def hx_filter(url: str, target: str) -> Markup:

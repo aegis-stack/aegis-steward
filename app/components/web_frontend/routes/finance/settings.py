@@ -383,9 +383,17 @@ async def categories(
 
 # --- activity ---------------------------------------------------------------
 
+
+def run_path(run_id: int | None) -> str:
+    """A run's dialog: from its Activity row and a register row's mark."""
+    return f"{SECTION.path}/activity/{run_id}"
+
+
+templates.env.globals["run_path"] = run_path
+
 RUN_COLUMNS = [
     {"key": "when", "label": "When"},
-    {"key": "source", "label": "From"},
+    {"key": "source", "label": "From", "kind": "open"},
     {"key": "brought", "label": "Brought"},
     {"key": "state", "label": "", "kind": "status"},
 ]
@@ -397,17 +405,16 @@ async def activity(
     service: FinanceService = Depends(get_finance_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> Response:
-    """Every run that brought data in, newest first.
-
-    One list for files and provider syncs alike, because they answer the
-    same question and ``finance_import_batch`` has always held both.
-    Until this page the tally was computed and dropped: a connection
-    could say "synced today" and nothing could say what it pulled.
-    """
+    """Every run that brought data in, newest first (see the template)."""
     from sqlmodel import select
 
     from app.components.web_frontend.filters import freshness
-    from app.services.finance.service import FinanceImportBatch, run_summary, run_title
+    from app.services.finance.service import (
+        FinanceImportBatch,
+        run_state,
+        run_summary,
+        run_title,
+    )
 
     runs = (
         await service.db.exec(
@@ -426,12 +433,9 @@ async def activity(
                 {
                     "id": run.id,
                     "when": freshness(run.started_at, "sync")["label"],
-                    "source": run_title(run),
+                    "source": {"label": run_title(run), "url": run_path(run.id)},
                     "brought": run_summary(run),
-                    "state": {
-                        "label": run.status,
-                        "tone": "ok" if run.status == "committed" else "error",
-                    },
+                    "state": run_state(run),
                 }
                 for run in runs
             ],
@@ -448,14 +452,15 @@ async def run_detail(
     service: FinanceService = Depends(get_finance_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> Response:
-    """One run: what it was, and what it brought.
-
-    Opened from the mark on a row, which is the question that mark
-    provokes - "this is new, where did it come from?" - so the answer is
-    one click from the row rather than a page away.
-    """
+    """One run: what it was, and what it brought (opened via ``run_path``)."""
     from app.components.web_frontend.filters import freshness
-    from app.services.finance.service import FinanceImportBatch, run_summary, run_title
+    from app.services.finance.service import (
+        FinanceImportBatch,
+        can_undo,
+        run_state,
+        run_summary,
+        run_title,
+    )
 
     run = await service.db.get(FinanceImportBatch, run_id)
     or_404(run)
@@ -471,7 +476,7 @@ async def run_detail(
             "title": run_title(run),
             "when": freshness(run.started_at, "sync")["label"],
             "took": took,
-            "status": run.status,
+            "status": run_state(run)["label"],
             "counts": run,
             "extras": [
                 f"{detail[key]} {key}"
@@ -479,6 +484,7 @@ async def run_detail(
                 if detail.get(key)
             ],
             "note": "" if run.status == "failed" else f"It brought {run_summary(run)}.",
+            "undo": run.id if can_undo(run) else None,
         },
         errors=[run.error] if run.error else [],
     )
