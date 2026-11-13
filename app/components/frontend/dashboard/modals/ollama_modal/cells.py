@@ -37,7 +37,7 @@ def model_cell(text: str, *, numeric: bool = False) -> ft.Text:
     return cls(
         text,
         size=Theme.Typography.BODY,
-        color=Theme.Colors.TEXT_SECONDARY,
+        color=ft.Colors.ON_SURFACE_VARIANT,
         **CELL_ELLIPSIS_KWARGS,
     )
 
@@ -56,7 +56,7 @@ def capability_cell(present: bool) -> ft.Text:
     return SecondaryText(
         "Yes" if present else "No",
         size=Theme.Typography.BODY,
-        color=Theme.Colors.TEXT_PRIMARY if present else Theme.Colors.TEXT_SECONDARY,
+        color=ft.Colors.ON_SURFACE if present else ft.Colors.ON_SURFACE_VARIANT,
         **CELL_ELLIPSIS_KWARGS,
     )
 

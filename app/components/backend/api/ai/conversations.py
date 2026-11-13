@@ -114,3 +114,21 @@ async def get_conversation(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get conversation: {e}")
+
+
+@router.get("/cards/{card_id}")
+async def get_card(card_id: str, user_id: str = "api-user") -> dict[str, Any]:
+    """A card she drew in a reply (``draw_card``), as its kind and the
+    payload that kind keeps: the Overseer chat draws it from this. Gone,
+    of an unknown kind, or another user's: 404."""
+    from app.components.backend.api.ai.router import ai_service
+    from app.services.ai.service import cards
+
+    found = await cards.kept_card(card_id)
+    conversation = (
+        await ai_service.get_conversation(found[0].conversation_id) if found else None
+    )
+    if found is None or conversation is None or conversation.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Card not found")
+    row, kind, kept = found
+    return {"id": row.id, "kind": kind.name, "card": kept.model_dump()}

@@ -8,6 +8,7 @@ from app.components.frontend.controls import (
     PrimaryText,
     SecondaryText,
 )
+from app.components.frontend.theme import AegisTheme as Theme
 from app.services.system.models import ComponentStatus
 
 from .status import create_health_tag
@@ -35,9 +36,9 @@ def create_metric_container(label: str, value: str) -> ft.Container:
             horizontal_alignment=ft.CrossAxisAlignment.START,
         ),
         padding=ft.padding.all(16),
-        bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.GREY),
+        bgcolor=Theme.Colors.SURFACE_3,
         border_radius=8,
-        border=ft.border.all(1, ft.Colors.with_opacity(0.15, ft.Colors.GREY)),
+        border=ft.border.all(1, ft.Colors.OUTLINE),
         height=80,
         expand=True,
     )
@@ -107,7 +108,9 @@ def create_responsive_3_section_layout(
                 content=left_content,
                 width=200,  # Fixed width - honors TechBadge width
             ),
-            ft.VerticalDivider(width=1, color=ft.Colors.OUTLINE_VARIANT),
+            ft.VerticalDivider(
+                width=1,
+            ),
             # Middle: Metrics (PRIORITY - gets most space and protection)
             ft.Container(
                 content=middle_content,
@@ -115,7 +118,9 @@ def create_responsive_3_section_layout(
                 padding=ft.padding.all(16),
                 width=300,  # Minimum width to keep metrics functional
             ),
-            ft.VerticalDivider(width=1, color=ft.Colors.OUTLINE_VARIANT),
+            ft.VerticalDivider(
+                width=1,
+            ),
             # Right: Details (flexible, shrinks most aggressively)
             ft.Container(
                 content=right_content,

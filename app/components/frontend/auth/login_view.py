@@ -36,7 +36,7 @@ from app.components.frontend.core.routes import (
     REGISTER_ROUTE,
 )
 from app.components.frontend.state.session_state import get_session_state
-from app.components.frontend.styles import PulseColors
+from app.components.frontend.theme import AegisTheme as Theme
 from app.core.config import settings
 from app.core.log import logger
 
@@ -53,7 +53,7 @@ class LoginView(BaseView):
             page=page,
             route=route,
             padding=0,
-            bgcolor=PulseColors.BG,
+            bgcolor=ft.Colors.SURFACE,
             spacing=0,
         )
 
@@ -77,7 +77,7 @@ class LoginView(BaseView):
         )
         self._error = ft.Text(
             value="",
-            color="#E94E77",
+            color=Theme.Colors.ERROR,
             size=12,
             visible=False,
         )
@@ -90,8 +90,10 @@ class LoginView(BaseView):
         # ---- form column ----
         form_block = ft.Column(
             controls=[
-                DisplayText("Welcome back", color=PulseColors.TEXT),
-                SecondaryText("Sign in to your dashboard.", color=PulseColors.MUTED),
+                DisplayText("Welcome back", color=ft.Colors.ON_SURFACE),
+                SecondaryText(
+                    "Sign in to your dashboard.", color=ft.Colors.ON_SURFACE_VARIANT
+                ),
                 ft.Container(height=16),
                 self._email,
                 self._password,
@@ -111,14 +113,14 @@ class LoginView(BaseView):
                 controls=[
                     SecondaryText(
                         "New here?",
-                        color=PulseColors.MUTED,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
                         size=12,
                     ),
                     ft.TextButton(
                         text="Create an account",
                         on_click=self._goto_register,
                         style=ft.ButtonStyle(
-                            color=PulseColors.TEAL,
+                            color=Theme.Colors.PRIMARY,
                             padding=ft.padding.all(0),
                             text_style=ft.TextStyle(size=12),
                         ),

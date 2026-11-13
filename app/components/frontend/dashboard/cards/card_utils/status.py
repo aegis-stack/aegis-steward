@@ -5,17 +5,18 @@ import flet as ft
 from app.components.frontend.controls import (
     StatusTag,
 )
+from app.components.frontend.theme import SERIES
 from app.components.frontend.theme import AegisTheme as Theme
 from app.services.system.models import ComponentStatus, ComponentStatusType
 
 PROVIDER_COLORS = {
-    "groq": ft.Colors.PURPLE,
-    "openai": ft.Colors.GREEN,
-    "anthropic": ft.Colors.ORANGE,
-    "google": ft.Colors.BLUE,
-    "mistral": ft.Colors.INDIGO,
-    "cohere": ft.Colors.TEAL,
-    "gemini": ft.Colors.BLUE,
+    "groq": SERIES[1],
+    "openai": SERIES[5],
+    "anthropic": SERIES[6],
+    "google": SERIES[3],
+    "mistral": SERIES[9],
+    "cohere": SERIES[0],
+    "gemini": SERIES[3],
 }
 
 

@@ -4,7 +4,7 @@ it, both from one projection call. The account filter narrows both."""
 
 from fastapi.testclient import TestClient
 
-from app.components.web_frontend.filters import short_date
+from app.core.time import short_date
 from app.services.finance.utils import current_date
 from tests.web.conftest import Ledger, Streams
 from tests.web.dom import chart_data, none, one, select, stat, table_rows, text

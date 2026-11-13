@@ -23,7 +23,6 @@ from app.components.backend.api.ai.router import ai_service, sync_active_model
 from app.components.backend.api.llm.routes import (
     vendor_icon_urls,
 )
-from app.components.web_frontend.chat_markers import components
 from app.components.web_frontend.filters import assistant
 from app.components.web_frontend.nav import section
 from app.components.web_frontend.rendering import (
@@ -54,6 +53,7 @@ from app.services.ai.service import (
     is_local_model,
     lift_pastes,
 )
+from app.services.ai.service.markers import components
 from app.services.ai.service.trace import BATCH_MARKER, CHANGE_MARKER
 from app.services.finance.service import STANDALONE_USER_ID
 

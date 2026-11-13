@@ -75,7 +75,7 @@ def compact_budget_row(line: dict[str, Any]) -> ft.Control:
         if status == "critical"
         else Theme.Colors.WARNING
         if status == "warn"
-        else Theme.Colors.TEXT_SECONDARY
+        else ft.Colors.ON_SURFACE_VARIANT
     )
     return ft.Column(
         [

@@ -13,6 +13,7 @@ RUN npm install --no-audit --no-fund
 # The config, entry stylesheet, and every source Tailwind scans for class
 # usage. A class that lives outside these paths is not emitted.
 COPY tailwind.config.js ./
+COPY app/core/palette.json ./app/core/palette.json
 COPY app/components/web_frontend/static/input.css \
      ./app/components/web_frontend/static/input.css
 COPY app/components/web_frontend/templates \

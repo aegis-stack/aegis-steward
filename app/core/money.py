@@ -49,6 +49,17 @@ def with_dollars(value: Any) -> Any:
     return out
 
 
+def dollars(cents: int | None) -> float:
+    """Minor units as dollars, for a chart's SCALE.
+
+    Charts are drawn in dollars. Cents on the axis drew a $711,200 house
+    at seventy million, and the mistake is invisible until a chart has a
+    figure somebody knows by heart - so the conversion has one home
+    rather than a ``/ 100`` in every series that gets written.
+    """
+    return (cents or 0) / 100
+
+
 def plain_dollars(cents: int) -> str:
     """Cents as a bare dollar figure, "20.00": what a CSV or a regex
     reads, where ``format_money`` is what a person reads."""

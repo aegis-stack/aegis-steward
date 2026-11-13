@@ -15,7 +15,6 @@ import pytest
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.components.web_frontend.chat_markers import components
 from app.services.ai.domains.chat import user_memory
 from app.services.ai.domains.chat.memory_tools import (
     forget_memory,
@@ -24,6 +23,7 @@ from app.services.ai.domains.chat.memory_tools import (
     update_memory,
 )
 from app.services.ai.domains.chat.user_memory import memory_user, save_user_fact
+from app.services.ai.service.markers import components
 from app.services.finance import ai_write_tools
 from app.services.finance.domains import writes
 from app.services.finance.models import FinancePendingChange

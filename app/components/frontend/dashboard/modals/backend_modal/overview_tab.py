@@ -12,6 +12,7 @@ from app.components.frontend.controls import (
     H3Text,
     SecondaryText,
 )
+from app.components.frontend.theme import SERIES
 from app.components.frontend.theme import AegisTheme as Theme
 from app.services.system import ui_backend
 from app.services.system.models import ComponentStatus
@@ -49,7 +50,7 @@ class OverviewTab(ft.Container):
             MetricCard(
                 value=str(total_routes),
                 label="Total Routes",
-                color=ft.Colors.BLUE,
+                color=SERIES[3],
             ),
             *(
                 [
@@ -65,12 +66,12 @@ class OverviewTab(ft.Container):
             MetricCard(
                 value=str(total_middleware),
                 label="Middleware",
-                color=ft.Colors.PURPLE,
+                color=SERIES[1],
             ),
             MetricCard(
                 value=str(security_count),
                 label="Security Layers",
-                color=ft.Colors.AMBER,
+                color=Theme.Colors.WARNING,
             ),
         ]
 
@@ -80,7 +81,7 @@ class OverviewTab(ft.Container):
                 MetricCard(
                     value=str(deprecated_count),
                     label="Deprecated",
-                    color=ft.Colors.ORANGE,
+                    color=SERIES[6],
                 )
             )
 

@@ -25,6 +25,7 @@ from app.components.frontend.controls.buttons import PulseButton
 from app.components.frontend.controls.chat.display_rows import (
     _display_rows,
 )
+from app.components.frontend.controls.chat.drawn_card import DrawnCard, FetchCard
 from app.components.frontend.controls.text import LabelText, SecondaryText
 from app.components.frontend.theme import TONE_COLORS
 from app.components.frontend.theme import AegisTheme as Theme
@@ -33,7 +34,8 @@ from app.core.chat_transcript import (
     card_outcome,
     proposer_line,
 )
-from app.services.ai.service import markers_of
+from app.services.ai.service import MARKER, markers_of
+from app.services.ai.service.markers import components
 from app.services.ai.service.trace import CARD_TOOLS
 
 # on_action(change_id, "approve" | "reject") -> the updated change dict
@@ -397,8 +399,11 @@ def components_from_trace(
     on_action: ChangeAction,
     on_batch_action: BatchAction | None = None,
     fetch_items: Callable[[str], Awaitable[list[dict[str, Any]] | None]] | None = None,
+    fetch_card: FetchCard | None = None,
+    on_card_drawn: Callable[[], None] | None = None,
 ) -> list[ft.Control]:
-    """Cards for the trace's propose results and pending listings.
+    """Cards for the trace's propose results and pending listings, then
+    the card she drew (one per answer).
 
     The tool trail is the transport: a ``propose`` (or ``propose_many``)
     call's result IS the pending-change data, and a ``pending`` listing
@@ -418,6 +423,12 @@ def components_from_trace(
             )
             if card is not None:
                 cards.append(card)
+    if fetch_card is not None:
+        cards += [
+            DrawnCard(str(m["id"]), fetch_card, on_card_drawn)
+            for m in components(trace)
+            if m["kind"] == MARKER
+        ]
     return cards
 
 

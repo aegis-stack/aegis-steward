@@ -10,7 +10,6 @@ quietly: 200, never 404, because a transcript is a record.
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import ValidationError
 from starlette.responses import Response
 
 from app.components.web_frontend import overseer_replay
@@ -30,17 +29,13 @@ MISSING = "partials/chat/card_missing.html"
 
 @router.get(CARDS + "/{card_id}", include_in_schema=False)
 async def card(request: Request, card_id: str, size: str = "") -> Response:
-    row = await cards.stored_card(card_id)
-    kind = cards.lookup(row.kind) if row else None
-    if row is None or kind is None:
+    found = await cards.kept_card(card_id)
+    if found is None:
         return render(request, MISSING)
+    row, kind, kept = found
     try:
         await owned(row.conversation_id)
-        # Read through the shape the kind keeps: its defaults fill in, and
-        # a payload an old version stored in another shape is missing, not
-        # a template error.
-        kept = kind.stored.model_validate(row.payload)
-    except (HTTPException, ValidationError):
+    except HTTPException:
         return render(request, MISSING)
     context = {
         "card": kept.model_dump(),

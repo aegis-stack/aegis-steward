@@ -116,7 +116,7 @@ class ExpandableTableRow(ft.Container):
     def _on_hover(self, e: ft.ControlEvent) -> None:
         """Handle hover state change."""
         if e.data == "true":
-            e.control.bgcolor = ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)
+            e.control.bgcolor = Theme.Colors.SURFACE_3
         else:
             e.control.bgcolor = ft.Colors.SURFACE
         if e.control.page:  # Guard: only update if control is on page

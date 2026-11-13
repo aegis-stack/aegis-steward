@@ -61,7 +61,7 @@ class WorkerLifecycleTab(ft.Container):
                 vertical=8,
             ),
             border_color=ft.Colors.OUTLINE,
-            focused_border_color=Theme.Colors.ACCENT,
+            focused_border_color=Theme.Colors.PRIMARY,
         )
 
         header = ft.Row(
@@ -156,7 +156,7 @@ class WorkerLifecycleTab(ft.Container):
                     section="Job Processing",
                     details=js_details,
                     badge="Hook",
-                    badge_color=ft.Colors.TEAL,
+                    badge_color=Theme.Colors.PRIMARY,
                     inspector=self.inspector,
                 )
             )
@@ -182,7 +182,7 @@ class WorkerLifecycleTab(ft.Container):
                     section="Job Processing",
                     details=func_details,
                     badge="Task",
-                    badge_color=ft.Colors.BLUE,
+                    badge_color=Theme.Colors.INFO,
                     inspector=self.inspector,
                 )
             )
@@ -201,7 +201,7 @@ class WorkerLifecycleTab(ft.Container):
                     section="Job Processing",
                     details=je_details,
                     badge="Hook",
-                    badge_color=ft.Colors.TEAL,
+                    badge_color=Theme.Colors.PRIMARY,
                     inspector=self.inspector,
                 )
             )

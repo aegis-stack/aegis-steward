@@ -54,7 +54,7 @@ POLICY = "; ".join(
     )
 )
 # Pages that are not ours to police: Flet boots from inline script and
-# wasm (and paste_capture splices in more); FastAPI's API docs inline
+# wasm (and dashboard_scripts splices in more); FastAPI's API docs inline
 # theirs and load from a CDN. ponytail: unpoliced; give each its own
 # policy if they ever face the internet.
 UNPOLICED = ("/dashboard", "/docs", "/redoc")

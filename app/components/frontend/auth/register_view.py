@@ -37,7 +37,7 @@ from app.components.frontend.core.routes import (
     LOGIN_ROUTE,
 )
 from app.components.frontend.state.session_state import get_session_state
-from app.components.frontend.styles import PulseColors
+from app.components.frontend.theme import AegisTheme as Theme
 from app.core.log import logger
 
 _PROJECT_NAME = "aegis-steward"
@@ -53,7 +53,7 @@ class RegisterView(BaseView):
             page=page,
             route=route,
             padding=0,
-            bgcolor=PulseColors.BG,
+            bgcolor=ft.Colors.SURFACE,
             spacing=0,
         )
 
@@ -91,7 +91,7 @@ class RegisterView(BaseView):
         )
         self._error = ft.Text(
             value="",
-            color="#E94E77",
+            color=Theme.Colors.ERROR,
             size=12,
             visible=False,
         )
@@ -104,10 +104,10 @@ class RegisterView(BaseView):
         # ---- form column ----
         form_block = ft.Column(
             controls=[
-                DisplayText("Create your account", color=PulseColors.TEXT),
+                DisplayText("Create your account", color=ft.Colors.ON_SURFACE),
                 SecondaryText(
                     "Get started in a few seconds.",
-                    color=PulseColors.MUTED,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
                 ),
                 ft.Container(height=16),
                 self._full_name,
@@ -127,14 +127,14 @@ class RegisterView(BaseView):
             controls=[
                 SecondaryText(
                     "Already have an account?",
-                    color=PulseColors.MUTED,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
                     size=12,
                 ),
                 ft.TextButton(
                     text="Sign in",
                     on_click=self._goto_login,
                     style=ft.ButtonStyle(
-                        color=PulseColors.TEAL,
+                        color=Theme.Colors.PRIMARY,
                         padding=ft.padding.all(0),
                         text_style=ft.TextStyle(size=12),
                     ),

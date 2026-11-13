@@ -57,7 +57,7 @@ class FormSecretField(ft.Container):
         # Create visibility toggle button
         self._toggle_button = ft.IconButton(
             icon=ft.Icons.VISIBILITY_OFF,
-            icon_color=Theme.Colors.TEXT_SECONDARY,
+            icon_color=ft.Colors.ON_SURFACE_VARIANT,
             icon_size=18,
             tooltip="Show/hide value",
             on_click=self._toggle_visibility,
