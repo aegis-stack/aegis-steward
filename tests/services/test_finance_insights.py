@@ -279,7 +279,9 @@ class TestRecurringDetection:
             await _txn(svc, account.id, -1549, day, "NETFLIX")
         await _txn(svc, account.id, -1799, _MONTH_STARTS[6], "NETFLIX")
 
-        detected = await detect_recurring(async_db_session, owner_user_id=1)
+        detected = await detect_recurring(
+            async_db_session, owner_user_id=1, today=_TODAY
+        )
         assert detected.detected == 1
         stream = (await async_db_session.exec(select(FinanceRecurringStream))).one()
         assert stream.frequency == "monthly"
@@ -315,7 +317,7 @@ class TestRecurringDetection:
         for day in _MONTH_STARTS[:6]:
             await _txn(svc, account.id, -1549, day, "NETFLIX")
         await _txn(svc, account.id, -1799, _MONTH_STARTS[6], "NETFLIX")
-        await detect_recurring(async_db_session, owner_user_id=1)
+        await detect_recurring(async_db_session, owner_user_id=1, today=_TODAY)
         stream = (await async_db_session.exec(select(FinanceRecurringStream))).one()
 
         await svc.mute_recurring(stream.id, owner_user_id=1)
@@ -336,7 +338,7 @@ class TestRecurringDetection:
             (date(2026, 5, 20), -500),
         ]:
             await _txn(svc, account.id, amt, day, "RANDOM SHOP")
-        result = await detect_recurring(async_db_session, owner_user_id=1)
+        result = await detect_recurring(async_db_session, owner_user_id=1, today=_TODAY)
         assert result.detected == 0
 
 
