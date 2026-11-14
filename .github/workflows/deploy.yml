@@ -54,4 +54,6 @@ jobs:
         ROLLING: ${{ github.event_name != 'workflow_dispatch' || inputs.rolling }}
       run: |
         flags=; if [ "$ROLLING" = true ]; then flags=--rolling; fi
-        uvx --from git+https://github.com/lbedner/aegis-stack@${{ steps.aegis.outputs.ref }} aegis deploy $flags
+        # The release's tarball, not git+https: a git install is a clone,
+        # and GitHub counts it as one of aegis-stack's.
+        uvx --from https://github.com/lbedner/aegis-stack/archive/refs/tags/${{ steps.aegis.outputs.ref }}.tar.gz aegis deploy $flags
