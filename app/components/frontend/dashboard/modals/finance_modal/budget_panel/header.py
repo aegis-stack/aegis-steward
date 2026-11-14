@@ -23,7 +23,7 @@ from app.services.finance.schemas import (
 from app.services.finance.service import strip
 
 # The colour a strip cell's or a pager chip's tone wears here.
-_TONES = {"ok": Theme.Colors.ACCENT, "error": Theme.Colors.ERROR}
+_TONES = {"ok": Theme.Colors.PRIMARY, "error": Theme.Colors.ERROR}
 
 
 class BudgetHeaderMixin(BudgetPanelState):
@@ -125,7 +125,7 @@ class BudgetHeaderMixin(BudgetPanelState):
         months = [BudgetMonthOutlook.model_validate(e) for e in self._outlook]
         for i, chip in enumerate(strip.pager_chips(months)):
             label = chip.label
-            color = _TONES.get(chip.tone, Theme.Colors.TEXT_SECONDARY)
+            color = _TONES.get(chip.tone, ft.Colors.ON_SURFACE_VARIANT)
             selected = i == self._outlook_index
             chips.append(
                 ft.Container(
@@ -139,7 +139,7 @@ class BudgetHeaderMixin(BudgetPanelState):
                     border_radius=Theme.Components.BUTTON_RADIUS,
                     border=ft.border.all(
                         1,
-                        Theme.Colors.ACCENT if selected else Theme.Colors.BORDER_SUBTLE,
+                        Theme.Colors.PRIMARY if selected else ft.Colors.OUTLINE,
                     ),
                     on_click=lambda _e, i=i: _jump(i),
                     ink=True,
@@ -183,7 +183,7 @@ class BudgetHeaderMixin(BudgetPanelState):
                     value,
                     size=22,
                     weight=Theme.Typography.WEIGHT_BOLD,
-                    color=color or Theme.Colors.TEXT_PRIMARY,
+                    color=color or ft.Colors.ON_SURFACE,
                 ),
                 SecondaryText(caption, size=Theme.Typography.BODY_SMALL),
             ],

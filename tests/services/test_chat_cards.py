@@ -124,7 +124,7 @@ class TestTheTrail:
 
 class TestTheMessage:
     def test_a_drawn_card_is_one_of_the_messages_components(self) -> None:
-        from app.components.web_frontend.chat_markers import components
+        from app.services.ai.service.markers import components
 
         trace = [
             {"tool": "run_code", "component": [{"kind": "chat_card", "id": "abc"}]},
@@ -142,7 +142,7 @@ class TestTheMessage:
         """One card per answer: she drew a pie, saw a finance charge had
         slipped past her filter, and drew it again - and both showed
         (2026-09-26). The last one she drew is the answer's card."""
-        from app.components.web_frontend.chat_markers import components
+        from app.services.ai.service.markers import components
 
         trace = [
             {"tool": "run_code", "component": [{"kind": "chat_card", "id": "first"}]},

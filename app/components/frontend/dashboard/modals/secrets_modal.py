@@ -266,9 +266,13 @@ class SecretsDetailDialog(BaseDetailPopup):
             subtitle_text=get_component_subtitle(ComponentName.SECRETS, metadata),
             sections=[
                 overview,
-                ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
+                ft.Divider(
+                    height=1,
+                ),
                 ft.Container(SecretsSection(page, writable), padding=Theme.Spacing.MD),
-                ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
+                ft.Divider(
+                    height=1,
+                ),
                 ft.Container(
                     ft.Column(
                         [

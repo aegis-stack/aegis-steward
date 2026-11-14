@@ -11,7 +11,8 @@ from statistics import median_low
 from typing import Any
 
 from app.core.formatting import counted, format_date_range
-from app.core.money import format_money
+from app.core.money import dollars, format_money
+from app.core.time import short_date
 from app.core.time import today as utc_today
 
 # Re-exported: the routes and templates here have always said
@@ -36,47 +37,11 @@ def money(
     return format_money(cents, currency, whole, signed)
 
 
-def dollars(cents: int | None) -> float:
-    """Minor units as dollars, for a chart's SCALE.
-
-    Charts are drawn in dollars. Cents on the axis drew a $711,200 house
-    at seventy million, and the mistake is invisible until a chart has a
-    figure somebody knows by heart - so the conversion has one home
-    rather than a ``/ 100`` in every series that gets written.
-    """
-    return (cents or 0) / 100
-
-
 def usd(dollars: float | None) -> str:
     """Dollars as a usage cost reads: to the cent, or to the hundredth of a
     cent below one (a transcription costs $0.0045, not $0.00)."""
     value = dollars or 0.0
     return f"${value:,.2f}" if value == 0 or value >= 0.01 else f"${value:.4f}"
-
-
-def short_date(value: date | datetime | str | None, today: date | None = None) -> str:
-    """``Jul 15`` this year, ``Jul 15, 2025`` otherwise; a ``YYYY-MM`` month
-    is ``Jul`` / ``Jul 2025``. Blank stays blank."""
-    if not value:
-        return ""
-    if isinstance(value, str) and len(value) == 7:
-        try:
-            month = datetime.strptime(value, "%Y-%m").date()
-        except ValueError:
-            return value
-        this_year = month.year == (today or utc_today()).year
-        return f"{month:%b}" if this_year else f"{month:%b %Y}"
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value)
-        except ValueError:
-            return value
-    if isinstance(value, datetime):
-        value = value.date()
-    label = f"{value:%b} {value.day}"
-    if value.year == (today or utc_today()).year:
-        return label
-    return f"{label}, {value.year}"
 
 
 def date_range(start: date | str | None, end: date | str | None) -> str:

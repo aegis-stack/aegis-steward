@@ -108,7 +108,7 @@ class ConfigurationSection(ft.Container):
                     ),
                     ft.Container(
                         content=LabelText(
-                            f"{framework} {version}", color=Theme.Colors.BADGE_TEXT
+                            f"{framework} {version}", color=ft.Colors.ON_PRIMARY
                         ),
                         padding=ft.padding.symmetric(
                             horizontal=Theme.Spacing.SM, vertical=Theme.Spacing.XS
@@ -310,7 +310,9 @@ class StatisticsSection(ft.Container):
                 stat_row("Component Status", status.value.upper()),
                 stat_row("Health Message", message),
                 stat_row("Response Time", f"{response_time:.2f}ms"),
-                ft.Divider(height=20, color=ft.Colors.OUTLINE_VARIANT),
+                ft.Divider(
+                    height=20,
+                ),
                 stat_row("Backend Integration", backend_dep),
             ],
             spacing=Theme.Spacing.XS,
@@ -343,9 +345,13 @@ class FrontendDetailDialog(BaseDetailPopup):
         sections = [
             OverviewSection(metadata),
             ConfigurationSection(metadata),
-            ft.Divider(height=20, color=ft.Colors.OUTLINE_VARIANT),
+            ft.Divider(
+                height=20,
+            ),
             CapabilitiesSection(metadata),
-            ft.Divider(height=20, color=ft.Colors.OUTLINE_VARIANT),
+            ft.Divider(
+                height=20,
+            ),
             StatisticsSection(component_data, page),
         ]
 

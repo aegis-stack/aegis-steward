@@ -24,8 +24,8 @@ from fastapi.responses import HTMLResponse  # noqa: E402
 
 from app.components.backend.hooks import backend_hooks  # noqa: E402
 from app.components.backend.main import create_backend_app  # noqa: E402
-from app.components.backend.middleware.paste_capture import (  # noqa: E402
-    PasteCaptureMiddleware,
+from app.components.backend.middleware.dashboard_scripts import (  # noqa: E402
+    DashboardScriptsMiddleware,
 )
 from app.components.backend.security.operator_auth import require_operator  # noqa: E402
 from app.components.backend.security.trusted_proxies import (  # noqa: E402
@@ -154,14 +154,11 @@ def create_integrated_app() -> FastAPI:
         max_upload_size=settings.IMPORT_MAX_BYTES,
         secret_key=settings.SECRET_KEY,
     )
-    # Mount Flet at /dashboard to avoid intercepting FastAPI routes like /health
-
-    app.mount("/dashboard", flet_app)
-    # Splice the paste-capture script into the dashboard page: pasted
-    # images post to /api/v1/pastebox, where consumer surfaces (chat's
-    # attachment bar) drain them. Flet has no clipboard-image API of its
-    # own, so this is caught in the browser.
-    app.add_middleware(PasteCaptureMiddleware)
+    # Mount Flet at /dashboard to avoid intercepting FastAPI routes like
+    # /health, wrapped so its page carries our browser-side scripts: paste
+    # capture (pasted images post to /api/v1/pastebox, Flet has no
+    # clipboard-image API) and the light/dark mode bridge to htmx's choice.
+    app.mount("/dashboard", DashboardScriptsMiddleware(flet_app))
     # Last added, so outermost: every middleware and route below it reads the
     # client the trusted proxy named.
     app.add_middleware(TrustedProxyMiddleware)

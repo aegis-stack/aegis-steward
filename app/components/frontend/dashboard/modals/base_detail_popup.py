@@ -35,7 +35,7 @@ class BaseDetailPopup(BasePopup):
             def __init__(self, component_data: ComponentStatus, page: ft.Page):
                 sections = [
                     MyOverviewSection(component_data.metadata),
-                    ft.Divider(height=20, color=ft.Colors.OUTLINE_VARIANT),
+                    ft.Divider(height=20,),
                     MyStatsSection(component_data),
                 ]
 
@@ -90,7 +90,9 @@ class BaseDetailPopup(BasePopup):
                     tab = ft.Column([section(key)], scroll=ft.ScrollMode.AUTO)
                     sections[0].tabs.append(ft.Tab(text=title, content=tab))
                 else:
-                    divider = ft.Divider(height=20, color=ft.Colors.OUTLINE_VARIANT)
+                    divider = ft.Divider(
+                        height=20,
+                    )
                     sections = [*sections, divider, section(key)]
 
         # Build sections container - scrollable or direct based on parameter
@@ -156,12 +158,7 @@ class BaseDetailPopup(BasePopup):
             border=ft.border.all(1, ft.Colors.OUTLINE),
             border_radius=Theme.Components.CARD_RADIUS,
             bgcolor=ft.Colors.SURFACE,
-            shadow=ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=20,
-                color=ft.Colors.with_opacity(0.3, ft.Colors.BLACK),
-                offset=ft.Offset(0, 4),
-            ),
+            shadow=Theme.Components.POPUP_SHADOW,
         )
 
     def _create_title(self) -> ft.Control:

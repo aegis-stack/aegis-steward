@@ -253,6 +253,20 @@ async def stored_card(card_id: str) -> ChatCard | None:
         return await session.get(ChatCard, card_id)
 
 
+async def kept_card(card_id: str) -> tuple[ChatCard, CardKind, BaseModel] | None:
+    """A drawn card read through the shape its kind keeps (its defaults
+    filled in), or None: gone, of a kind no longer drawn, or stored in a
+    shape an old version wrote. The caller checks whose it is."""
+    row = await stored_card(card_id)
+    kind = lookup(row.kind) if row else None
+    if row is None or kind is None:
+        return None
+    try:
+        return row, kind, kind.stored.model_validate(row.payload)
+    except ValidationError:
+        return None
+
+
 # --- the turn ----------------------------------------------------------------
 
 _staged: ContextVar[list[dict[str, Any]] | None] = ContextVar(

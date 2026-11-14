@@ -216,3 +216,28 @@ class TestTheCards:
         response = request.getfixturevalue(path_client).get(f"{CARDS}/nope")
         assert response.status_code == 200
         one(response.text, "[data-card-missing]")
+
+
+class TestOverTheApi:
+    """The Overseer chat is API-only: it draws a card from its kind and
+    the payload that kind keeps (#630)."""
+
+    def test_a_card_is_its_kind_and_kept_payload(
+        self, client: TestClient, drawn: dict[str, str]
+    ) -> None:
+        response = client.get(
+            f"/api/v1/ai/cards/{drawn['bar']}", params={"user_id": STANDALONE_USER_ID}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["kind"] == "bar"
+        assert body["card"]["unit"] == "money"  # the kept shape's default
+        assert [r["label"] for r in body["card"]["rows"]][0] == "ShopRite"
+
+    @pytest.mark.parametrize("user_id", [STANDALONE_USER_ID, "someone-else"])
+    def test_gone_or_not_theirs_is_absent(
+        self, client: TestClient, drawn: dict[str, str], user_id: str
+    ) -> None:
+        card = "nope" if user_id == STANDALONE_USER_ID else drawn["bar"]
+        response = client.get(f"/api/v1/ai/cards/{card}", params={"user_id": user_id})
+        assert response.status_code == 404

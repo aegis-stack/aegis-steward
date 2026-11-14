@@ -30,7 +30,7 @@ class DataTableHeader(ft.Container):
         self.padding = ft.padding.symmetric(
             horizontal=Theme.Spacing.MD, vertical=padding + 2
         )
-        self.bgcolor = ft.Colors.with_opacity(0.05, ft.Colors.ON_SURFACE)
+        self.bgcolor = Theme.Colors.SURFACE_2
         self.border = (
             ft.border.only(bottom=ft.BorderSide(1, ft.Colors.OUTLINE))
             if show_border
@@ -136,7 +136,7 @@ class DataTableRow(ft.Container):
         """
         hovered = e.data == "true"
         if hovered:
-            e.control.bgcolor = ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)
+            e.control.bgcolor = Theme.Colors.SURFACE_3
         else:
             e.control.bgcolor = self._default_bgcolor
         for control in self._hover_revealed:
