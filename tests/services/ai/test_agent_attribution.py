@@ -101,16 +101,6 @@ def harness(
     """AIService with provider, contexts, and recorder faked out."""
     service = AIService(mock_ai_settings)
 
-    async def no_health(self: AIService) -> tuple[None, None]:
-        return (None, None)
-
-    monkeypatch.setattr(AIService, "_build_health_context", no_health)
-
-    async def no_usage(self: AIService) -> None:
-        return None
-
-    monkeypatch.setattr(AIService, "_build_usage_context", no_usage)
-
     async def no_catalog(self: AIService) -> None:
         return None
 
@@ -276,15 +266,6 @@ async def _catalog_block(self: AIService) -> str:
     return "CATALOG-BLOCK"
 
 
-async def _fake_usage(self: AIService) -> _FakeUsageContext:
-    return _FakeUsageContext()
-
-
-class _FakeUsageContext:
-    def format_for_prompt(self, compact: bool = False) -> str:
-        return "USAGE-BLOCK"
-
-
 class TestOpsContextScoping:
     """The usage/model-catalog self-awareness blocks belong to the default
     ops assistant; a custom agent (a finance analyst, say) pays their
@@ -295,26 +276,44 @@ class TestOpsContextScoping:
     ) -> None:
         service, _recorder, captured, monkeypatch = harness
         monkeypatch.setattr(AIService, "_build_catalog_context", _catalog_block)
-        monkeypatch.setattr(AIService, "_build_usage_context", _fake_usage)
         _stub_resolve(monkeypatch, _custom_config())
 
         await service.chat("hello")
 
         assert "CATALOG-BLOCK" not in captured["system_prompt"]
-        assert "USAGE-BLOCK" not in captured["system_prompt"]
 
-    async def test_default_agent_keeps_usage_and_catalog(
+    async def test_default_agent_keeps_the_catalog(
         self, harness: tuple[AIService, MagicMock, dict[str, Any], pytest.MonkeyPatch]
     ) -> None:
         service, _recorder, captured, monkeypatch = harness
         monkeypatch.setattr(AIService, "_build_catalog_context", _catalog_block)
-        monkeypatch.setattr(AIService, "_build_usage_context", _fake_usage)
         _stub_resolve(monkeypatch, default_agent_config())
 
         await service.chat("hello")
 
         assert "CATALOG-BLOCK" in captured["system_prompt"]
-        assert "USAGE-BLOCK" in captured["system_prompt"]
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # two turns, one lookup each
+    @pytest.mark.parametrize("config", [default_agent_config(), _custom_config()])
+    async def test_nothing_that_moves_each_turn_is_in_the_prompt(
+        self,
+        harness: tuple[AIService, MagicMock, dict[str, Any], pytest.MonkeyPatch],
+        config: AgentConfig,
+    ) -> None:
+        """The system prompt leads every request, so a number that moves
+        each turn (CPU, a request count) makes a local engine re-read the
+        whole prompt, tools and history included, every message. Health
+        and usage are the ``health`` tool's and the usage report's."""
+        service, _recorder, captured, monkeypatch = harness
+        _stub_resolve(monkeypatch, config)
+
+        await service.chat("hello")
+        first = captured["system_prompt"]
+        await service.chat("hello again")
+
+        assert captured["system_prompt"] == first
+        assert "System Status" not in first
+        assert "My Activity" not in first
 
 
 class TestHistoryBudget:

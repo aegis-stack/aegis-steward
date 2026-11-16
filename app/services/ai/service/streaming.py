@@ -210,18 +210,14 @@ class StreamingMixin(ChatMixin):
             streaming_conv = StreamingConversation(conversation=conversation)
             streaming_conv.reset_stream()
 
-            # Build health context (always included, refreshed per message)
-            health_context, health_warning = await self._build_health_context()
-
-            # Usage and model-catalog self-awareness belong to the
-            # default ops assistant; custom agents (a finance analyst,
-            # say) would pay their token cost every turn without ever
-            # using them.
+            # No live health or usage here: the system prompt leads every
+            # request, and a number that moves each turn (CPU, a request
+            # count) makes a local engine re-read the whole prompt, tools
+            # and history, every message. The ``health`` tool reads them.
+            # The model catalog belongs to the default ops assistant;
+            # custom agents would pay its tokens without using it.
             is_default_agent = (
                 agent_config is None or agent_config.slug == DEFAULT_AGENT_SLUG
-            )
-            usage_context = (
-                await self._build_usage_context() if is_default_agent else None
             )
             catalog_context = (
                 await self._build_catalog_context() if is_default_agent else None
@@ -253,9 +249,6 @@ class StreamingMixin(ChatMixin):
             # Prepare agent and conversation context
             agent, conversation_context = await self._prepare_agent_and_context(
                 conversation,
-                health_context=health_context,
-                health_warning=health_warning,
-                usage_context=usage_context,
                 catalog_context=catalog_context,
                 agent_config=agent_config,
                 memory_context=memory_context,

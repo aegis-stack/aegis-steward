@@ -8,9 +8,7 @@ contexts + the agent row into something the framework can run.
 
 from typing import Any
 
-from app.core.log import logger
 from app.services.ai.domains.chat.agent_loader import AgentConfig, agent_capabilities
-from app.services.ai.domains.chat.health_context import HealthContext
 from app.services.ai.domains.chat.prompts import (
     DEFAULT_SYSTEM_PROMPT,
     build_system_prompt,
@@ -23,7 +21,6 @@ from app.services.ai.domains.chat.self_context import (
 )
 from app.services.ai.domains.chat.summary import summary_of
 from app.services.ai.domains.chat.tools import resolve_tools
-from app.services.ai.domains.chat.usage_context import UsageContext
 from app.services.ai.domains.llm.providers import get_agent
 from app.services.ai.models import Conversation, MessageRole
 from app.services.ai.service.contexts import ContextsMixin
@@ -72,9 +69,6 @@ class PromptMixin(ContextsMixin):
     async def _prepare_agent_and_context(
         self,
         conversation: Conversation,
-        health_context: HealthContext | None = None,
-        health_warning: str | None = None,
-        usage_context: UsageContext | None = None,
         catalog_context: str | None = None,
         agent_config: AgentConfig | None = None,
         memory_context: str | None = None,
@@ -89,9 +83,6 @@ class PromptMixin(ContextsMixin):
         Args:
             conversation: The conversation to prepare context from
 
-            health_context: Optional health context to inject into system prompt
-            health_warning: Optional warning if server is down
-            usage_context: Optional usage context for self-awareness
             catalog_context: Optional LLM catalog context for model awareness
             agent_config: Resolved agent definition; supplies sampling
                 parameters, an optional model pin, and an optional persona
@@ -112,32 +103,13 @@ class PromptMixin(ContextsMixin):
         # Get fresh config for current model/provider
         config = self.config.for_agent(agent_config)
 
-        # Use compact mode for Ollama (smaller context for better instruction following)
-        is_compact = config.provider.value == "ollama"
-        logger.debug(f"Compact mode: {is_compact} (provider={config.provider.value})")
-
-        formatted_health = None
-        if health_context:
-            formatted_health = health_context.format_for_prompt(compact=is_compact)
-            logger.debug(f"Health context for prompt:\n{formatted_health}")
-
-        formatted_usage = None
-        if usage_context:
-            formatted_usage = usage_context.format_for_prompt(compact=is_compact)
-
         system_prompt_override = build_system_prompt(
-            health_context=formatted_health,
-            usage_context=formatted_usage,
             catalog_context=catalog_context,
             current_model=config.model,
             current_provider=config.provider.value,
             persona=self._agent_persona(agent_config),
             memory_context=memory_context,
         )
-
-        # Add server-down warning if applicable
-        if health_warning:
-            system_prompt_override += f"\n\n**NOTICE**: {health_warning}"
 
         # The agent row's memory modules (e.g. the finance snapshot): the
         # same briefing the chat_kit runtime injects via its provider.
@@ -178,9 +150,7 @@ class PromptMixin(ContextsMixin):
                 b
                 for b in (
                     Block("persona", len(self._agent_persona(agent_config) or "")),
-                    Block("system status", len(formatted_health or "")),
                     Block("saved memory", len(memory_context or "")),
-                    Block("usage", len(formatted_usage or "")),
                     Block("model catalog", len(catalog_context or "")),
                     Block("briefings", len(agent_modules_context or "")),
                 )
