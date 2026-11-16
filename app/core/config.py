@@ -478,10 +478,9 @@ class Settings(
     COHERE_API_KEY: str | None = None
 
     # Ollama settings (local LLM inference)
-
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"  # Host mode default
-
     OLLAMA_BASE_URL_LOCAL: str | None = None  # Manual override for local CLI usage
+    LLAMACPP_BASE_URL: str | None = None  # set: chat goes to this llama-server
     # Host publish port chosen by `make serve` (loaded from .env.ports).
     # None = use the container port. See `_localhost_url`.
     OLLAMA_HOST_PORT: int | None = None
