@@ -177,9 +177,18 @@ def _ollama_model(config: AIServiceConfig, settings: Any) -> Any:
     ``AsyncOpenAI``, ``OpenAIChatModel`` and ``OpenAIProvider`` are read off
     this module (not imported locally) so tests can patch them here.
     """
+    # ponytail: trial switch to llama-server for chat only; the engine
+    # interface (#2065, #2066) replaces it. isinstance, not truthiness:
+    # an unset attribute on a test's MagicMock settings is truthy.
+    llamacpp = getattr(settings, "LLAMACPP_BASE_URL", None)
+    base_url = (
+        llamacpp
+        if isinstance(llamacpp, str) and llamacpp
+        else settings.ollama_base_url_effective
+    )
     openai_client = AsyncOpenAI(
         api_key="ollama",  # Ollama needs no auth; the client demands something
-        base_url=f"{settings.ollama_base_url_effective}/v1",
+        base_url=f"{base_url}/v1",
         # A retry would queue behind the abandoned request, still reading
         # the same prompt, and start reading it again after.
         max_retries=0,
