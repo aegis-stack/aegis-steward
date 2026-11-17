@@ -524,11 +524,11 @@ class TestALetterheadNobodyHasMetYet:
 
 async def _contacts_offered(db: AsyncSession) -> list[Any]:
     """The contact.create cards waiting in the queue."""
-    from app.services.finance.domains.writes.queue import list_changes
+    from app.services.change_queue import list_changes
 
     return [
         change
-        for change in await list_changes(db, status="pending")
+        for change in await list_changes(db, status="pending", owner_user_id=None)
         if change.change_type == "contact.create"
     ]
 
@@ -834,10 +834,10 @@ class TestWhoHoldsTheAccount:
 
 async def _banks_offered(db: AsyncSession) -> list[Any]:
     """The account.institution cards waiting in the queue."""
-    from app.services.finance.domains.writes.queue import list_changes
+    from app.services.change_queue import list_changes
 
     return [
         change
-        for change in await list_changes(db, status="pending")
+        for change in await list_changes(db, status="pending", owner_user_id=None)
         if change.change_type == "account.institution"
     ]

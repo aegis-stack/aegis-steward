@@ -65,6 +65,9 @@ def already_applied(inspector: Any, signature: tuple[str, ...]) -> bool:
         kind = signature[0]
         if kind == "table":
             return _bare(signature[1]) in set(inspector.get_table_names())
+        if kind == "no_table":
+            tables = set(inspector.get_table_names())
+            return _bare(signature[1]) not in tables and _bare(signature[2]) in tables
         if kind in ("column", "no_column", "foreign_key"):
             table = _bare(signature[1])
             if table not in set(inspector.get_table_names()):
@@ -78,6 +81,17 @@ def already_applied(inspector: Any, signature: tuple[str, ...]) -> bool:
                 for column in key.get("constrained_columns", [])
             }
             return signature[2] in covered
+        if kind == "row":
+            # A data-only revision (finance_auth_link's user 0): no schema
+            # object proves it ran, only the row it inserts. A missing
+            # table raises, which reads as not applied below.
+            from sqlalchemy import text
+
+            query = (
+                f'SELECT 1 FROM "{_bare(signature[1])}" WHERE {signature[2]} LIMIT 1'
+            )
+            with inspector.bind.connect() as conn:
+                return conn.execute(text(query)).first() is not None
         if kind == "check":
             table = _bare(signature[1])
             if table not in set(inspector.get_table_names()):

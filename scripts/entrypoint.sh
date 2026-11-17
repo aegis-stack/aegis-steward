@@ -76,25 +76,25 @@ elif [ "$run_command" = "worker" ]; then
         }
         printf '%s\n' "$out" | tail -n 1
     }
+    # Reload on code changes in dev (APP_ENV=dev, or WORKER_WATCH=true
+    # anywhere), unless WORKER_WATCH=false: a worker whose jobs outlive any
+    # edit (the meeting bot, in a call) must not restart under them.
+    worker_watch() {
+        [ "$WORKER_WATCH" = "true" ] || { [ "$APP_ENV" = "dev" ] && [ "$WORKER_WATCH" != "false" ]; }
+    }
     # Worker component using arq
     queue_type="${1:-system}"  # Default to system queue if not specified
     shift
 
-
-    # Development mode auto-reload (APP_ENV from .env or WORKER_WATCH override).
-    #
-    # NOT arq's own watch flag: that closes the worker and calls async_run()
-    # again in the same process, with the same already-imported modules.
-    # It prints "files changed, reloading arq worker..." and runs the old
-    # code. watchfiles restarts the process, as the scheduler branch does,
-    # so a job runs the code on disk.
-    #
-    # Both branches run the same entrypoint, which owns its event loop.
-    # arq's CLI does not, and on Python 3.14 that is a RuntimeError -
-    # dev never saw it because the watch flag ran the worker inside
-    # asyncio.run, and nothing else ran the other branch.
-    if { [ "$APP_ENV" = "dev" ] || [ "$WORKER_WATCH" = "true" ]; } \
-        && "${RUN[@]}" python -c "import watchfiles" 2>/dev/null; then
+    # Not arq's own CLI: it calls asyncio.get_event_loop() with no
+    # running loop, a RuntimeError on Python 3.14. Its watch flag hid
+    # that by running the worker inside
+    # asyncio.run - so the dev branch worked, this non-dev branch was
+    # dead, and the "reload" re-ran the worker in the same process
+    # without re-importing anything. Both branches run one entrypoint
+    # that owns its loop; dev restarts the process under watchfiles, as
+    # the scheduler branch does.
+    if worker_watch && "${RUN[@]}" python -c "import watchfiles" 2>/dev/null; then
         echo "Starting ${queue_type} worker with auto-reload..."
         exec "${RUN[@]}" watchfiles --filter python \
             "python -m app.entrypoints.worker ${queue_type}" /code/app

@@ -1,0 +1,34 @@
+"""What the AI service holds, as figures (``app.core.aggregates``): its
+spend by vendor, by action and by voice or text, from the same query as
+the spend its node in the ontology carries (that one over its own
+windows: today, the last 7 days, all time); and how its conversations
+were scored, never what a verdict said."""
+
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core import ranges
+from app.core.aggregates import Aggregate
+from app.services.ai.service import SentimentMix, sentiment_mix, spend_since
+from app.services.system.node_now import UsageWindow
+
+
+async def spend(session: AsyncSession, days: int | None) -> UsageWindow:
+    (window,) = await spend_since({ranges.label(days): ranges.start(days)}, session)
+    return window
+
+
+async def sentiment(session: AsyncSession, days: int | None) -> SentimentMix:
+    return await sentiment_mix(session, ranges.start(days))
+
+
+AGGREGATES = (
+    Aggregate(
+        "spend", "Model spend, requests and tokens by vendor, action and mode", spend
+    ),
+    Aggregate(
+        "sentiment",
+        "Scored conversations by the user's sentiment and the assistant's"
+        " performance, and their average score",
+        sentiment,
+    ),
+)

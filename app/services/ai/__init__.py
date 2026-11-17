@@ -1,11 +1,20 @@
 """
-AI service module.
+AI service: chat agents, their tools and the models they run on.
 
 
-Provides AI chatbot functionality with configurable AI framework.
+Provides AI chatbot functionality with configurable AI framework,
+including Speech-to-Text (STT) capabilities for voice interactions.
 
 Imports nothing itself: loading one AI module (its jobs, say) must not
 load the voice domain with it.
 """
+
+import os
+
+# Google's speech, voice-library and live models are only on its v1beta
+# API, and google-genai 3 builds every client for v1, where they are not
+# found. Set before any client is built; a version set in the environment
+# still wins.
+os.environ.setdefault("GOOGLE_GENAI_API_VERSION", "v1beta")
 
 __all__: list[str] = []

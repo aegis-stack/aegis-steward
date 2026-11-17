@@ -1,53 +1,10 @@
 {% extends layout %}
-{% from "components/macros/feedback.html" import empty_state %}
 {% from "components/macros/layout.html" import page_header %}
-{% from "components/macros/layout.html" import badge %}
-{% from "components/macros/form.html" import control %}
-{% from "components/macros/changes.html" import display, verbs, edit_url, edit_button %}
 
 {% block title %}{{ section.label }} - {{ project_name }}{% endblock %}
 
 {% block app_content %}
 {{ page_header(section.label) }}
 {% include "components/sub_nav.html" %}
-<div id="approvals">
-{% if singles or batches %}
-<ul class="grid gap-4 sm:grid-cols-2">
-  {% for change in singles %}
-  <li id="change-{{ change.id }}" class="raised p-4 flex flex-col gap-3">
-    <div class="flex items-center justify-between gap-3">
-      <h3 class="text-sm font-semibold text-aegis-text">{{ change.title }}</h3>
-      {% if change.proposed_by_agent %}{{ badge(change.proposed_by_agent|assistant, "ok") }}{% endif %}
-    </div>
-    {{ display(change) }}
-    {{ verbs("/review/changes/" ~ change.id ~ "/approve", "/review/changes/" ~ change.id ~ "/reject", "#change-" ~ change.id, edit_url=edit_url(change) or none) }}
-  </li>
-  {% endfor %}
-  {% for batch in batches %}
-  <li id="batch-{{ batch.batch_id }}" class="raised p-4 flex flex-col gap-3 sm:col-span-2">
-    <div class="flex items-center justify-between gap-3">
-      <h3 class="text-sm font-semibold text-aegis-text">{{ batch.title }} <span class="text-aegis-muted font-normal">× {{ batch["items"]|length }}</span></h3>
-      {% if batch["items"][0].proposed_by_agent %}{{ badge(batch["items"][0].proposed_by_agent|assistant, "ok") }}{% endif %}
-    </div>
-    <ul class="divide-y divide-aegis-border/60">
-      {% for change in batch["items"] %}
-      <li class="flex items-start gap-3 py-2">
-        <label class="inline-flex items-center gap-1 text-xxs text-aegis-muted mt-0.5" title="Leave this one out">
-          <input type="checkbox" name="exclude_ids" value="{{ change.id }}" class="{{ control('checkbox') }}"> skip
-        </label>
-        <div class="flex-1 min-w-0">{{ display(change) }}</div>
-        {#- One row of a batch put right before the batch is approved:
-            a misread payee on one check of fourteen (issue 420). -#}
-        {% if edit_url(change) %}<div class="text-xs">{{ edit_button(edit_url(change)) }}</div>{% endif %}
-      </li>
-      {% endfor %}
-    </ul>
-    {{ verbs("/review/changes/batch/" ~ batch.batch_id ~ "/approve", "/review/changes/batch/" ~ batch.batch_id ~ "/reject", "#batch-" ~ batch.batch_id, include="#batch-" ~ batch.batch_id) }}
-  </li>
-  {% endfor %}
-</ul>
-{% else %}
-{{ empty_state("Nothing waiting", "Changes proposed in chat land here for a yes or no.") }}
-{% endif %}
-</div>
+<div id="approvals">{% include "partials/changes/review.html" %}</div>
 {% endblock %}

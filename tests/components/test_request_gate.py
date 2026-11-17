@@ -180,6 +180,34 @@ def test_a_same_origin_write_gets_through(
     assert response.status_code == 303
 
 
+@pytest.mark.parametrize(
+    ("headers", "status"),
+    [
+        # The dashboard's own client: its process, speaking for the page
+        # the browser opened (``frontend.core.changes.dashboard_client``).
+        ({"origin": "http://steward.example:8080"}, 303),
+        # A browser on the box says where it came from; that still counts.
+        ({"origin": "https://evil.example", "sec-fetch-site": "cross-site"}, 403),
+    ],
+)
+def test_the_dashboards_own_client_signs_in(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+    status: int,
+) -> None:
+    """It calls the API at loopback with the page's ``Origin``, a host the
+    loopback address is never asked as: refused, nobody could sign in."""
+    monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+    client = TestClient(app, follow_redirects=False, client=("127.0.0.1", 50000))
+    response = client.post(
+        "/login",
+        headers=headers,
+        data={"email": "a@example.com", "password": "wrong-password"},
+    )
+    assert response.status_code == status
+
+
 def test_a_cross_site_read_is_untouched(signed_out: TestClient) -> None:
     response = signed_out.get("/login", headers={"sec-fetch-site": "cross-site"})
     assert response.status_code == 200

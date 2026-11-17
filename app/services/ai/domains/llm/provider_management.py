@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 from app.core import secrets
 from app.core.config import settings
 from app.core.secrets import Secret, probe
+from app.services.ai.domains.llm.config import api_key_env
 from app.services.ai.models import PROVIDERS, AIProvider, ProviderCapabilities
 from app.services.ai.models.provider_names import KEYLESS_PROVIDERS, provider_label
 
@@ -64,20 +65,6 @@ def _in_use(provider: AIProvider) -> bool:
     )
 
 
-# The keys the providers read, for the Secrets page (``app.core.secrets``).
-# Derived from the registry, so a provider added there is declared with it.
-SECRETS = tuple(
-    Secret(
-        spec.env_var,
-        owner="AI",
-        label=f"{provider_label(provider)} API key",
-        needed=partial(_in_use, provider),
-        verify=partial(_check_key, provider) if provider in KEY_CHECKS else None,
-    )
-    for provider, spec in PROVIDERS.items()
-    if spec.env_var in type(settings).model_fields
-)
-
 # Provider to pydantic-ai-slim extras mapping
 # Note: mistral, cohere, ollama, public, and pollinations use the
 # OpenAI-compatible API
@@ -94,6 +81,13 @@ PROVIDER_MODULE_CHECKS: dict[str, str] = {
     p.value: spec.module for p, spec in PROVIDERS.items()
 }
 
+# What proves it on LangChain, where the provider has a client of its own.
+PROVIDER_LANGCHAIN_MODULES: dict[str, str] = {
+    p.value: spec.langchain_module
+    for p, spec in PROVIDERS.items()
+    if spec.langchain_module
+}
+
 # Where a person goes to get a key. Absent for the keyless endpoints and
 # for a local server, which is what "paid provider" means here.
 PROVIDER_API_KEY_URLS: dict[str, str] = {
@@ -104,23 +98,36 @@ PROVIDER_API_KEY_URLS: dict[str, str] = {
 def get_env_var_name(provider: str) -> str:
     """Get the environment variable name for a provider's API key.
 
+    The provider registry names the variable, and ``api_key_env`` is the one
+    place that reads it. Re-deriving it from the slug gets OpenRouter wrong
+    (its key is ``OPEN_ROUTER_API_KEY``), so the settings surface reports the
+    key missing while the model works.
+
     Args:
         provider: Provider name (e.g., "openai", "google")
 
     Returns:
         Environment variable name (e.g., "OPENAI_API_KEY", "GOOGLE_API_KEY")
     """
-    resolved = AIProvider.from_name(provider)
-    if resolved is not None:
-        return PROVIDERS[resolved].env_var
-    return f"{provider.upper()}_API_KEY"
+    try:
+        return api_key_env(AIProvider(provider.lower()))
+    except ValueError:
+        # Not a registered provider — the slug convention is all there is.
+        return f"{provider.upper()}_API_KEY"
+
+
+def _importable(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
 
 
 def check_provider_dependency_installed(provider: str) -> bool:
-    """Check if the required pydantic-ai extra is installed for a provider.
+    """Check if the required dependency is installed for a provider.
 
-    Uses importlib to check if the provider's model module can be found,
-    indicating the required dependency is installed.
+    Uses importlib to check if the provider's SDK module, or its own
+    LangChain client, can be found.
 
     Args:
         provider: Provider name to check
@@ -128,15 +135,25 @@ def check_provider_dependency_installed(provider: str) -> bool:
     Returns:
         True if the provider's dependency is installed, False otherwise
     """
-    module_name = PROVIDER_MODULE_CHECKS.get(provider.lower())
-    if not module_name:
-        return False
+    name = provider.lower()
+    modules = PROVIDER_MODULE_CHECKS.get(name), PROVIDER_LANGCHAIN_MODULES.get(name)
+    return any(_importable(module) for module in modules if module)
 
-    try:
-        spec = importlib.util.find_spec(module_name)
-        return spec is not None
-    except ModuleNotFoundError, ValueError:
-        return False
+
+# The keys the providers read, for the Secrets page (``app.core.secrets``).
+# Derived from the registry, so a provider added there is declared with it.
+SECRETS = tuple(
+    Secret(
+        spec.env_var,
+        owner="AI",
+        label=f"{provider_label(provider)} API key",
+        needed=partial(_in_use, provider),
+        offered=partial(check_provider_dependency_installed, provider.value),
+        verify=partial(_check_key, provider) if provider in KEY_CHECKS else None,
+    )
+    for provider, spec in PROVIDERS.items()
+    if spec.env_var in type(settings).model_fields
+)
 
 
 def get_missing_dependency(provider: str) -> str | None:

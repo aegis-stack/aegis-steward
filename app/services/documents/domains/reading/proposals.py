@@ -149,8 +149,8 @@ async def _propose_demands(
     nothing, then write. The database is held for the first and the
     last, and the lock with it.
     """
+    from app.services.change_queue import propose
     from app.services.documents.domains.reading.letters import checked
-    from app.services.finance.service import propose
     from app.services.matters.matters import MatterService
     from app.services.matters.requests import RequestService
 
@@ -207,9 +207,9 @@ async def _propose_metadata(
     ``None`` when there is nothing to say: no findings, nothing the
     document does not already record, or a card still awaiting an answer.
     """
+    from app.services.change_queue import propose
     from app.services.documents.domains.reading import banks
     from app.services.documents.service import DocumentService
-    from app.services.finance.service import propose
 
     document = await DocumentService(db).get(document_id)
     if document is None or await already_asked(db, METADATA, document_id):
@@ -373,7 +373,7 @@ async def _propose_contact(
     already. A letterhead read off a page and taken as an organization
     is how a second address book starts.
     """
-    from app.services.finance.service import propose
+    from app.services.change_queue import propose
 
     if await already_asked(db, CONTACT, document_id):
         return None

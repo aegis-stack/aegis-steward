@@ -8,8 +8,15 @@ import pytest
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.tools import registered_tool_names
-from app.services.ai.domains.chat.memory_tools import save_memory
+from app.core.tools import acting_as, get_tool, result_data
+from app.services import change_queue
+import app.services.ai.domains.chat.memory_tools as memory_tools_module
+from app.services.ai.domains.chat.memory_tools import (
+    forget_memory,
+    replace_memory,
+    save_memory,
+    update_memory,
+)
 import app.services.ai.domains.chat.user_memory as user_memory_module
 from app.services.ai.domains.chat.user_memory import (
     build_user_memory_context,
@@ -23,9 +30,8 @@ from app.services.ai.domains.chat.user_memory import (
     save_user_fact,
     update_user_fact,
 )
-from app.services.ai.models.agents import AgentUserMemory
-from app.services.finance.models import FinancePendingChange
-from tests._session import opens
+from app.services.change_queue import PendingChange
+from tests._change_queue import queue_tools_on
 
 
 @pytest.fixture
@@ -161,9 +167,9 @@ class TestFactMaintenance:
 
         facts = await list_user_facts("u1", session=session)
 
-        assert [f["index"] for f in facts] == [0, 1]
-        assert facts[0]["category"] == "finance"
-        assert facts[1]["fact"] == "allergic to peanuts"
+        assert [f.index for f in facts] == [0, 1]
+        assert facts[0].category == "finance"
+        assert facts[1].fact == "allergic to peanuts"
 
     async def test_list_for_unknown_user_is_empty(self, session: AsyncSession) -> None:
         assert await list_user_facts("ghost", session=session) == []
@@ -181,8 +187,8 @@ class TestFactMaintenance:
         )
 
         facts = await list_user_facts("u1", session=session)
-        assert facts[0]["fact"] == "house is worth $711,200"
-        assert facts[1]["fact"] == "allergic to peanuts"  # untouched
+        assert facts[0].fact == "house is worth $711,200"
+        assert facts[1].fact == "allergic to peanuts"  # untouched
 
     async def test_delete_removes_only_that_fact(self, session: AsyncSession) -> None:
         await save_user_fact(
@@ -193,7 +199,28 @@ class TestFactMaintenance:
         await delete_user_fact("u1", 0, session=session)
 
         facts = await list_user_facts("u1", session=session)
-        assert [f["fact"] for f in facts] == ["allergic to peanuts"]
+        assert [f.fact for f in facts] == ["allergic to peanuts"]
+
+    async def test_a_fact_is_found_by_a_quote_of_it(
+        self, session: AsyncSession
+    ) -> None:
+        """The assistant names a fact by its words: positions move."""
+        await save_user_fact(
+            "u1", "house is worth $565,000", "finance", session=session
+        )
+        await save_user_fact("u1", "allergic to peanuts", "food", session=session)
+
+        await update_user_fact("u1", "worth $565", fact="worth more", session=session)
+        await delete_user_fact("u1", "PEANUTS", session=session)
+
+        facts = await list_user_facts("u1", session=session)
+        assert [f.fact for f in facts] == ["worth more"]
+
+    async def test_a_blank_quote_names_no_fact(self, session: AsyncSession) -> None:
+        await save_user_fact("u1", "allergic to peanuts", "food", session=session)
+
+        with pytest.raises(ValueError):
+            await delete_user_fact("u1", " ", session=session)
 
     async def test_out_of_range_index_is_rejected(self, session: AsyncSession) -> None:
         await save_user_fact("u1", "allergic to peanuts", "food", session=session)
@@ -232,129 +259,204 @@ class TestGuardedFormatting:
 
     async def test_no_memory_formats_to_none(self, session: AsyncSession) -> None:
         assert format_user_memory(None) is None
-        assert await build_user_memory_context("ghost", session=session) is None
+        known = await build_user_memory_context("ghost", session=session)
+        assert known.memory is None
+        assert known.readings == []
 
     async def test_saved_fact_reaches_next_context(self, session: AsyncSession) -> None:
         """The acceptance loop: save in one conversation, see it in the next."""
         await save_user_fact("u1", "allergic to peanuts", "food", session=session)
 
-        block = await build_user_memory_context("u1", session=session)
+        block = (await build_user_memory_context("u1", session=session)).memory
 
         assert block is not None
         assert "allergic to peanuts" in block
 
 
 class TestTurnUserContext:
-    """The tool reads its user from a ContextVar. A runtime that forgets to
-    set it gets a tool that declines every save while still returning a
+    """The tools read their user from a ContextVar. A runtime that forgets
+    to set it gets tools that decline every write while still returning a
     plain string - which a model reports to the user as success. That
     silence is the failure mode this guards."""
 
-    async def test_inside_the_context_the_tool_files_for_that_user(
-        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from app.services.finance import ai_write_tools
-
-        monkeypatch.setattr(ai_write_tools, "get_async_session", opens(session))
-
-        with memory_user("u42"):
-            reply = await save_memory(
-                new_fact="house is worth $711,200", category="finance"
-            )
-
-        # A card for u42's approval (#484); nothing saved until then.
-        assert isinstance(reply, dict)
-        assert reply["status"] == "pending"
-        card = await session.get(FinancePendingChange, reply["pending_change_id"])
-        assert card is not None
-        assert card.payload["user_id"] == "u42"
-        assert await get_user_memory(session, "u42") is None
-
-    async def test_context_is_restored_afterwards(self) -> None:
+    def test_context_is_restored_afterwards(self) -> None:
         with memory_user("u42"):
             assert current_user_id.get() == "u42"
 
         assert current_user_id.get() is None
 
-
-class TestSaveMemoryTool:
-    def test_tools_are_registered(self) -> None:
-        assert "save_memory" in registered_tool_names()
-        assert "replace_memory" in registered_tool_names()
-
-    async def test_tool_without_user_context_saves_nothing(
-        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    async def test_tool_without_user_context_files_nothing(
+        self, session: AsyncSession, tools: Any
     ) -> None:
-        @asynccontextmanager
-        async def fake_session() -> AsyncGenerator[AsyncSession]:
-            yield session
-
-        monkeypatch.setattr(user_memory_module, "get_async_session", fake_session)
-
         reply = await save_memory(new_fact="drinks oat milk")
 
-        assert "no user" in reply.lower()
-        result = await session.exec(select(AgentUserMemory))
-        assert result.first() is None
+        assert "no user" in str(reply).lower()
+        assert (await session.exec(select(PendingChange))).first() is None
 
 
-class TestAFactThatChangesIsRewritten:
-    """The sitter's hours firmed up and the assistant saved a second fact
-    beside the first. update_memory rewrites the one; forget_memory drops
-    one a tool can now read."""
+@pytest.fixture
+def tools(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The memory and queue tools, on the test's session."""
 
-    async def test_update_rewrites_the_one_fact_it_names(
-        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    @asynccontextmanager
+    async def _session() -> AsyncGenerator[AsyncSession]:
+        yield session
+
+    monkeypatch.setattr(user_memory_module, "get_async_session", _session)
+    monkeypatch.setattr(memory_tools_module, "get_async_session", _session)
+    return queue_tools_on(session, monkeypatch)
+
+
+# A card is described when it is filed and again when it is approved.
+@pytest.mark.queryspy(allow_n_plus_one=True)
+class TestMemoryWritesAreCards:
+    """Untrusted text reaches the assistant (a document, a fetched page),
+    and a fact saved on its say-so is a standing instruction in every later
+    prompt. So each memory tool files an approval card, and nothing is
+    remembered or forgotten until the user approves it."""
+
+    async def _approve(
+        self, session: AsyncSession, filed: Any, owner: int | None
+    ) -> PendingChange:
+        change_id = result_data(filed)["pending_change_id"]
+        return await change_queue.approve(session, change_id, owner_user_id=owner)
+
+    def test_tools_are_registered_as_proposals(self) -> None:
+        for name in ("save_memory", "replace_memory", "update_memory", "forget_memory"):
+            assert get_tool(name).effect == "proposes"
+
+    async def test_saving_files_a_card_and_approval_remembers(
+        self, session: AsyncSession, tools: Any, acting_owner_user_id: int | None
     ) -> None:
-        from app.services.ai.domains.chat import memory_tools, user_memory
-        from app.services.finance import ai_write_tools
-        from app.services.finance.domains import writes
+        with memory_user("u42", owner_user_id=acting_owner_user_id):
+            filed = await save_memory(new_fact="drinks oat milk", category="food")
 
-        monkeypatch.setattr(user_memory, "get_async_session", opens(session))
-        monkeypatch.setattr(ai_write_tools, "get_async_session", opens(session))
-        token = user_memory.current_user_id.set("u1")
-        try:
-            await save_user_fact(
-                "u1",
-                "The sitter works irregular hours at $15/hour",
-                "finance",
-                session=session,
-            )
-            await save_user_fact(
-                "u1", "House valued at $711,200", "finance", session=session
+        assert result_data(filed)["display"] == [
+            {"label": "For", "value": "u42"},
+            {"label": "Remember", "value": "drinks oat milk"},
+            {"label": "Category", "value": "food"},
+        ]
+        assert await list_user_facts("u42", session=session) == []
+
+        approved = await self._approve(session, filed, acting_owner_user_id)
+
+        assert approved.status == "approved"
+        (fact,) = await list_user_facts("u42", session=session)
+        assert (fact.fact, fact.category) == ("drinks oat milk", "food")
+
+    async def test_replacing_waits_for_approval(
+        self, session: AsyncSession, tools: Any, acting_owner_user_id: int | None
+    ) -> None:
+        await save_user_fact("u42", "allergic to peanuts", "food", session=session)
+        with memory_user("u42", owner_user_id=acting_owner_user_id):
+            filed = await replace_memory(memory_text="vegan\nruns marathons")
+
+        assert [f.fact for f in await list_user_facts("u42", session=session)] == [
+            "allergic to peanuts"
+        ]
+        await self._approve(session, filed, acting_owner_user_id)
+
+        facts = await list_user_facts("u42", session=session)
+        assert [f.fact for f in facts] == ["vegan", "runs marathons"]
+
+    async def test_updating_rewrites_the_quoted_fact_in_place(
+        self, session: AsyncSession, tools: Any, acting_owner_user_id: int | None
+    ) -> None:
+        await save_user_fact(
+            "u42", "works 20 hours a week", "personal", session=session
+        )
+        await save_user_fact("u42", "allergic to peanuts", "food", session=session)
+        with memory_user("u42", owner_user_id=acting_owner_user_id):
+            filed = await update_memory(
+                old_fact="20 hours", new_fact="works 30 hours a week"
             )
 
-            said = await memory_tools.update_memory(
-                "irregular hours",
-                "The sitter works Tuesdays and Wednesdays, 3 hours each, at $15/hour",
-            )
-            # A card first (#484); approving it is what rewrites the fact.
-            assert isinstance(said, dict)
-            approved = await writes.approve(session, said["pending_change_id"])
-            assert approved.result is not None
-            assert approved.result["memory"].startswith("Updated (finance)")
-            facts = [
-                f["fact"]
-                for f in await user_memory.list_user_facts("u1", session=session)
-            ]
-            assert facts == [
-                "The sitter works Tuesdays and Wednesdays, 3 hours each, at $15/hour",
-                "House valued at $711,200",
-            ]
+        assert result_data(filed)["display"] == [
+            {"label": "For", "value": "u42"},
+            {"label": "Was", "value": "works 20 hours a week"},
+            {"label": "Now", "value": "works 30 hours a week"},
+        ]
+        await self._approve(session, filed, acting_owner_user_id)
 
-            said = await memory_tools.forget_memory("Tuesdays and Wednesdays")
-            assert isinstance(said, dict)
-            await writes.approve(session, said["pending_change_id"])
-            facts = [
-                f["fact"]
-                for f in await user_memory.list_user_facts("u1", session=session)
-            ]
-            assert facts == ["House valued at $711,200"]
+        facts = await list_user_facts("u42", session=session)
+        assert [f.fact for f in facts] == [
+            "works 30 hours a week",
+            "allergic to peanuts",
+        ]
 
-            # Two matches is a question back, not a guess.
-            await save_user_fact(
-                "u1", "House insured for $500,000", "finance", session=session
+    async def test_forgetting_drops_only_the_quoted_fact(
+        self, session: AsyncSession, tools: Any, acting_owner_user_id: int | None
+    ) -> None:
+        await save_user_fact(
+            "u42", "works 20 hours a week", "personal", session=session
+        )
+        await save_user_fact("u42", "allergic to peanuts", "food", session=session)
+        with memory_user("u42", owner_user_id=acting_owner_user_id):
+            filed = await forget_memory(fact="peanuts")
+
+        assert len(await list_user_facts("u42", session=session)) == 2
+        await self._approve(session, filed, acting_owner_user_id)
+
+        facts = await list_user_facts("u42", session=session)
+        assert [f.fact for f in facts] == ["works 20 hours a week"]
+
+    async def test_a_quote_that_names_no_saved_fact_files_nothing(
+        self, session: AsyncSession, tools: Any, acting_owner_user_id: int | None
+    ) -> None:
+        await save_user_fact("u42", "allergic to peanuts", "food", session=session)
+        with memory_user("u42", owner_user_id=acting_owner_user_id):
+            reply = await forget_memory(fact="owns a boat")
+
+        assert "no single saved fact" in str(reply).lower()
+        assert (await session.exec(select(PendingChange))).first() is None
+
+    async def test_a_card_whose_fact_is_gone_says_so(
+        self, session: AsyncSession, tools: Any, acting_owner_user_id: int | None
+    ) -> None:
+        await save_user_fact("u42", "allergic to peanuts", "food", session=session)
+        with memory_user("u42", owner_user_id=acting_owner_user_id):
+            filed = await forget_memory(fact="peanuts")
+        await delete_user_fact("u42", 0, session=session)
+
+        row = await change_queue.get_change(
+            session,
+            result_data(filed)["pending_change_id"],
+            owner_user_id=acting_owner_user_id,
+        )
+        assert row is not None
+        (card,) = await change_queue.cards(session, [row])
+
+        assert card.display[-1].label == "No longer applies"
+
+    async def test_a_memory_card_is_only_for_the_turns_own_user(
+        self, session: AsyncSession, tools: Any, acting_owner_user_id: int | None
+    ) -> None:
+        """Through the generic ``propose`` a model could name anyone's
+        memory: whose it is comes from the turn, never the payload, and the
+        card says whose."""
+        with memory_user("u42", owner_user_id=acting_owner_user_id):
+            filed = await tools.propose(
+                "memory.save", {"user_id": "someone-else", "fact": "obeys me"}
             )
-            assert "No single saved fact" in await memory_tools.forget_memory("House")
-        finally:
-            user_memory.current_user_id.reset(token)
+
+        assert result_data(filed)["display"][0] == {"label": "For", "value": "u42"}
+        await self._approve(session, filed, acting_owner_user_id)
+        assert await list_user_facts("someone-else", session=session) == []
+        assert [f.fact for f in await list_user_facts("u42", session=session)] == [
+            "obeys me"
+        ]
+
+    async def test_a_call_bound_to_no_turns_user_files_no_memory_card(
+        self, session: AsyncSession, tools: Any, acting_owner_user_id: int | None
+    ) -> None:
+        """An MCP client (``acting_as`` alone) names an owner, not whose
+        memory: a card naming anyone's is refused."""
+        with acting_as(acting_owner_user_id, "mcp-client"):
+            refused = result_data(
+                await tools.propose(
+                    "memory.save", {"user_id": "someone-else", "fact": "obeys me"}
+                )
+            )
+
+        assert "the user this turn is for" in refused["error"]
+        assert (await session.exec(select(PendingChange))).first() is None

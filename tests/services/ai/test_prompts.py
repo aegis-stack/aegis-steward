@@ -1,6 +1,9 @@
 """Tests for system prompt assembly (persona override)."""
 
-from app.services.ai.domains.chat.prompts import build_system_prompt
+from app.services.ai.domains.chat.prompts import (
+    DEFAULT_SYSTEM_PROMPT,
+    build_system_prompt,
+)
 
 
 class TestPersonaOverride:
@@ -9,34 +12,37 @@ class TestPersonaOverride:
 
         assert prompt.startswith("I'm Illiana.")
 
-    def test_the_builtin_persona_reads_the_app_through_its_tools(self) -> None:
-        """Not a stack list from memory, nor a claim it cannot see the code:
-        she reads the app with her tools and draws what she finds."""
-        prompt = build_system_prompt()
-
-        assert "ontology tool" in prompt
-        assert "I draw it as a card" in prompt
-        assert "Flet" not in prompt
-        assert "don't have codebase access" not in prompt
-
     def test_persona_replaces_builtin_block(self) -> None:
         prompt = build_system_prompt(persona="You are Custom.")
 
         assert prompt.startswith("You are Custom.")
         assert "I'm Illiana" not in prompt
 
-    def test_persona_keeps_dynamic_context_sections(self) -> None:
-        """A custom persona still gets the live-data sections appended."""
+    def test_persona_keeps_the_sections_after_it(self) -> None:
+        """A custom persona still gets the sections appended after it."""
         prompt = build_system_prompt(
             persona="You are Custom.",
-            health_context="ALL COMPONENTS HEALTHY",
-            usage_context="42 requests today",
+            memory_context="<user_memory>\n- [food] vegan\n</user_memory>",
         )
 
         assert prompt.startswith("You are Custom.")
-        assert "## System Status" in prompt
-        assert "ALL COMPONENTS HEALTHY" in prompt
-        assert "## My Activity" in prompt
+        assert "- [food] vegan" in prompt
+
+
+class TestThePersonaIsTheRow:
+    """The seeded row holds the whole persona, editable like any other:
+    it held a marker the code swapped for a built-in one, so the row said
+    one thing and she ran on another (2026-10-16)."""
+
+    def test_the_seeded_persona_is_the_prompt_she_runs_on(self) -> None:
+        assert build_system_prompt() == build_system_prompt(
+            persona=DEFAULT_SYSTEM_PROMPT
+        )
+
+    def test_an_edited_persona_still_knows_its_model(self) -> None:
+        prompt = build_system_prompt(persona="You are Custom.", current_model="gpt-x")
+
+        assert "gpt-x" in prompt
 
 
 class TestMemoryContext:
@@ -53,12 +59,3 @@ class TestMemoryContext:
         prompt = build_system_prompt()
 
         assert "## Saved User Memory" not in prompt
-
-    def test_catalog_context_renders_as_body_under_heading(self) -> None:
-        """The catalog payload is body text, never part of the heading line."""
-        catalog = "- gpt-x: fast\n- gpt-y: smart"
-        prompt = build_system_prompt(catalog_context=catalog)
-
-        assert catalog in prompt
-        first_line = next(line for line in prompt.splitlines() if "gpt-x" in line)
-        assert not first_line.startswith("#")

@@ -1,0 +1,102 @@
+"""The propose/approve queue: any service's writes as pending changes.
+
+Primitives, not policy. This package ships the table, the queue
+(propose, revise, approve, reject, withdraw, expire) and the change-type registry; what
+a model may propose stays in the service that owns the mutation. A
+service joins by registering its types at import:
+
+    from app.services.change_queue import ChangeExecutor, register
+
+    register(ChangeExecutor(change_type="post.reschedule", ...))
+
+An executor that is never imported does not exist to the queue, the
+same rule the tool registry lives by - so every service's
+``change_types`` module is imported on the queue's first read of its
+registry (``load_change_types``), and every process that touches the
+queue knows them. A project registers its
+own types in its own service's ``change_types.py``, never in this file.
+"""
+
+from app.services.change_queue.follow_ups import after_commit, approving, on_landed
+from app.services.change_queue.models import PendingChange
+from app.services.change_queue.queries import (
+    batch_rows,
+    count_changes,
+    get_change,
+    list_changes,
+)
+from app.services.change_queue.queue import (
+    approve,
+    approve_row,
+    approve_rows,
+    card,
+    cards,
+    describe_change,
+    describe_changes,
+    expire_naming,
+    outcome_of,
+    propose,
+    propose_many,
+    reject,
+    reject_row,
+    reject_rows,
+    withdraw,
+    withdraw_batch,
+)
+from app.services.change_queue.registry import (
+    ChangeExecutor,
+    change_type_contracts,
+    editable_fields,
+    executor_for,
+    known_executor,
+    register,
+    registered_change_types,
+)
+from app.services.change_queue.revisions import (
+    current_payload,
+    revise,
+    revise_row,
+)
+from app.services.change_queue.schemas import ChangeDisplayRow
+
+# Shared code, not a service (``ownership``).
+PART_OF = "shared"
+
+
+__all__ = [
+    "ChangeDisplayRow",
+    "ChangeExecutor",
+    "PendingChange",
+    "after_commit",
+    "approve",
+    "approve_row",
+    "approve_rows",
+    "approving",
+    "card",
+    "cards",
+    "batch_rows",
+    "change_type_contracts",
+    "describe_change",
+    "describe_changes",
+    "editable_fields",
+    "executor_for",
+    "known_executor",
+    "expire_naming",
+    "count_changes",
+    "current_payload",
+    "get_change",
+    "list_changes",
+    "on_landed",
+    "outcome_of",
+    "propose",
+    "propose_many",
+    "register",
+    "registered_change_types",
+    "reject",
+    "reject_row",
+    "reject_rows",
+    "revise",
+    "revise_row",
+    "withdraw",
+    "withdraw_batch",
+]

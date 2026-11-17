@@ -12,6 +12,7 @@ import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.components.web_frontend.routes.finance.usage import USAGE
+from app.services.ai.domains.spend.recording import REALTIME_ACTION
 from app.services.ai.models.llm import LLMUsage
 from tests.web.dom import none, one, select, text
 
@@ -30,7 +31,7 @@ async def spent(async_db_session: AsyncSession) -> None:
                 timestamp=now,
             ),
             LLMUsage(
-                action="live",
+                action=REALTIME_ACTION,
                 model_id="gpt-live-1",
                 input_tokens=0,
                 output_tokens=0,
@@ -56,7 +57,7 @@ class TestTheUsagePage:
             for cell in select(page, "#usage-kinds > div")
         }
         assert kinds["Live calls"] == "$0.50"
-        assert kinds["Chat and agents"] == "$0.02"
+        assert kinds["Model calls"] == "$0.02"
 
     def test_a_fragment_has_no_shell(self, hx: TestClient, spent: None) -> None:
         none(hx.get(USAGE).text, "html")

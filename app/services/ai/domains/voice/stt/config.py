@@ -5,9 +5,11 @@ Configuration management for STT providers and settings.
 Follows the same pattern as AIServiceConfig for consistency.
 """
 
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from app.core import secrets
 
 from ..models import (
     DEFAULT_STT_MODEL,
@@ -15,6 +17,7 @@ from ..models import (
     DEFAULT_STT_PROVIDER,
     STT_KEYS,
     STTProvider,
+    not_installed,
 )
 
 
@@ -31,14 +34,8 @@ class STTConfig(BaseModel):
     language: str | None = None  # None = auto-detect
     device: str | None = None  # For local providers: cpu, cuda, mps
 
-    # Provider-specific defaults
-    DEFAULT_MODELS: dict[STTProvider, str] = Field(
-        default_factory=lambda: dict(DEFAULT_STT_MODELS),
-        exclude=True,
-    )
-
     @classmethod
-    def from_settings(cls, settings: Any) -> STTConfig:
+    def from_settings(cls, settings: Any) -> Self:
         """Create configuration from main application settings."""
         provider_str = getattr(settings, "STT_PROVIDER", DEFAULT_STT_PROVIDER.value)
 
@@ -58,17 +55,18 @@ class STTConfig(BaseModel):
         """Get the model to use, falling back to provider default."""
         if self.model:
             return self.model
-        return self.DEFAULT_MODELS.get(self.provider, DEFAULT_STT_MODEL)
+        return DEFAULT_STT_MODELS.get(self.provider, DEFAULT_STT_MODEL)
 
-    def get_api_key(self, settings: Any) -> str | None:
-        """Get API key for the current provider."""
+    async def get_api_key(self, settings: Any) -> str | None:
+        """Get API key for the current provider, read now (``.env``, then the
+        secrets store)."""
         key_name = STT_KEYS.get(self.provider)
         if key_name:
-            return getattr(settings, key_name, None)
+            return await secrets.get(key_name, source=settings)
 
         return None  # Local providers don't need API keys
 
-    def validation_errors(self, settings: Any) -> list[str]:
+    async def validation_errors(self, settings: Any) -> list[str]:
         """
         Validate STT configuration and return list of issues.
 
@@ -79,12 +77,14 @@ class STTConfig(BaseModel):
 
         # Check API key for cloud providers
         if key_name := STT_KEYS.get(self.provider):
-            api_key = self.get_api_key(settings)
+            api_key = await self.get_api_key(settings)
             if not api_key:
                 errors.append(
                     f"Missing API key for {self.provider.value}. "
                     f"Set {key_name} environment variable."
                 )
+        if refused := not_installed(self.provider):
+            errors.append(refused)
 
         # Validate language code format if provided
         if self.language and len(self.language) != 2:
@@ -95,9 +95,9 @@ class STTConfig(BaseModel):
 
         return errors
 
-    def is_available(self, settings: Any) -> bool:
+    async def is_available(self, settings: Any) -> bool:
         """Check if the configured provider is available."""
-        return len(self.validation_errors(settings)) == 0
+        return not await self.validation_errors(settings)
 
 
 def get_stt_config(settings: Any) -> STTConfig:

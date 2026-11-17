@@ -43,17 +43,17 @@ def test_what_she_may_propose_is_read_from_code_each_turn() -> None:
         proposing_changes,
     )
     from app.services.finance.domains.detection.analyst.seeds import (
+        context_module_definitions,
         finance_chat_agent_definition,
-        memory_module_definitions,
     )
     from app.services.finance.domains.detection.analyst.shared import (
         CHANGES_MODULE_SLUG,
     )
 
     assert "## PROPOSING CHANGES" not in FINANCE_CHAT_SYSTEM_PROMPT
-    assert CHANGES_MODULE_SLUG in finance_chat_agent_definition()["memory_modules"]
+    assert CHANGES_MODULE_SLUG in finance_chat_agent_definition()["context_modules"]
     (module,) = [
-        m for m in memory_module_definitions() if m["slug"] == CHANGES_MODULE_SLUG
+        m for m in context_module_definitions() if m["slug"] == CHANGES_MODULE_SLUG
     ]
     assert (
         module["fetch_function"] == CHANGES_MODULE_SLUG and not module["prompt_content"]
@@ -65,7 +65,7 @@ def test_what_she_may_propose_is_read_from_code_each_turn() -> None:
 
 def test_every_registered_change_type_is_advertised() -> None:
     """A card she cannot name is a card she will say the app cannot make."""
-    from app.services.finance.domains import writes
+    from app.services import change_queue
     from app.services.finance.domains.detection.analyst.prompt_changes import (
         PROPOSING_CHANGES,
     )
@@ -82,7 +82,7 @@ def test_every_registered_change_type_is_advertised() -> None:
         "memory.replace",
         "memory.forget",
     }
-    registered = set(writes.registered_change_types())
+    registered = set(change_queue.registered_change_types())
     assert not_hers <= registered, not_hers - registered
     missing = [
         change_type

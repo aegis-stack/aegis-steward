@@ -13,12 +13,41 @@ from typing import Any
 import httpx
 import pytest
 
+from app.services.ai.domains.llm.etl import lab_resolver
 from app.services.ai.domains.llm.etl.lab_resolver import (
     _org_avatar,
     pick_repo,
     strip_local_tag,
 )
 from tests._fake_dns import answering, resolving_to
+
+
+class TestOneOrgOneLookup:
+    async def test_a_labs_models_read_its_overview_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sync re-read an org's overview and logo for every one of its
+        models; within a run it is read once, however many it made."""
+        asked: list[str] = []
+        real = httpx.AsyncClient
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            asked.append(request.url.path)
+            if request.url.path == "/api/models":
+                name = request.url.params["search"]
+                return httpx.Response(200, json=[{"modelId": f"lab/{name}"}])
+            return httpx.Response(200, json={"fullname": "The Lab"})
+
+        def client(**kwargs: Any) -> httpx.AsyncClient:
+            return real(transport=httpx.MockTransport(answer), **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", client)
+        orgs: dict[str, Any] = {}
+
+        found = [await lab_resolver.resolve_lab(name, orgs) for name in ("one", "two")]
+
+        assert [lab.name if lab else None for lab in found] == ["The Lab"] * 2
+        assert asked.count("/api/organizations/lab/overview") == 1
 
 
 class TestStripLocalTag:

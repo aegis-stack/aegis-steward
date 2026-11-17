@@ -1,12 +1,14 @@
-"""How the assistant hears and speaks, as rows the app changes (#262).
+"""How the assistant hears and speaks, as rows the app changes.
 
 Like the active model (``llm_active_selection``), a voice is table data:
-switching or editing it takes effect on the next thing she says, with no
+switching or editing it takes effect on the next thing said, with no
 ``.env`` edit and no restart. ``.env`` only seeds the first profile.
 """
 
 from datetime import datetime
+from typing import Any
 
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 from app.core.time import utcnow
@@ -40,10 +42,14 @@ class VoiceProfile(SQLModel, table=True):
         default=setting_default("TTS_SPEED"), ge=TTS_SPEED_MIN, le=TTS_SPEED_MAX
     )
     tts_instructions: str | None = None
-    # How a spoken turn's reply is heard, and what plays while she works.
+    # The voice designer's choices those instructions were made from
+    # (``domains/voice/delivery.Delivery``), so it opens on them again;
+    # None for instructions written by hand.
+    tts_delivery: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    # How a spoken turn's reply is heard, and what plays while it works.
     reply: str = Field(default=setting_default("VOICE_REPLY"))
     working_sound: str = Field(default=setting_default("VOICE_WORKING_SOUND"))
-    # Seconds of quiet on a live call before she checks in
+    # Seconds of quiet on a live call before the assistant checks in
     # (VOICE_LIVE_IDLE_SECONDS).
     live_idle_seconds: int = Field(
         default=setting_default("VOICE_LIVE_IDLE_SECONDS"),

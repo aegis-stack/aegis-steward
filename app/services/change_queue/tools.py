@@ -1,0 +1,414 @@
+"""The propose/approve queue's tools: propose, never mutate.
+
+A model's only write door, whoever runs it: a chat agent or an MCP
+client. ``propose`` and ``propose_many`` file pending changes of any
+registered type; ``pending``, ``withdraw`` and ``withdraw_batch`` let
+the author (``current_agent_slug``) see and retract its own cards, and
+``revise`` puts the user's correction on any card waiting for them.
+Execution happens only when the user approves in the app. The tools
+register ``effect="proposes"``, so code mode dispatches them as visible
+calls and MCP may serve them.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, TypeVar
+
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.db import get_async_session
+from app.core.time import utcnow
+from app.core.tools import (
+    current_agent_slug,
+    current_conversation_id,
+    current_owner_user_id,
+    register_tool,
+)
+from app.services import change_queue
+from app.services.change_queue.schemas import (
+    BatchRow,
+    BatchWithdrawn,
+    ChangeTypeContract,
+    Filed,
+    FiledCard,
+    NotFiled,
+    Proposed,
+    ProposedBatch,
+    Revised,
+    Withdrawn,
+)
+from app.services.shared import deps as shared_deps
+from app.services.shared.deps import caller_is_admin
+
+Answer = TypeVar("Answer")
+
+
+def _owner() -> int | None:
+    """Whose cards this call files, lists and withdraws
+    (``current_owner_user_id``)."""
+    owner = current_owner_user_id.get()
+    # Unscoped, a call without one would reach every user's cards - unless
+    # unowned rows are the household's, whose turn it then is.
+    if owner is None and not shared_deps.UNOWNED_IS_HOUSEHOLD:
+        raise ValueError("no signed-in user to file this change for")
+    return owner
+
+
+async def change_types() -> dict[str, ChangeTypeContract]:
+    """The changes you can propose: each change type's title, when to use
+    it, and its payload's JSON schema (``propose``'s ``payload`` must match
+    it exactly). Read this before proposing a type you have not used."""
+    return change_queue.change_type_contracts(admin=await caller_is_admin())
+
+
+async def _committed(
+    work: Callable[[AsyncSession], Awaitable[Answer]],
+    *,
+    vocabulary: bool = False,
+) -> Answer | NotFiled:
+    """Run ``work`` in one committed session. A refusal (a bad payload,
+    another agent's card, no signed-in user) is the tool's error result,
+    with the change-type contracts when the refusal was a proposal."""
+    async with get_async_session() as session:
+        try:
+            result = await work(session)
+            await session.commit()
+        except ValueError as e:
+            contracts = (
+                change_queue.change_type_contracts(admin=await caller_is_admin())
+                if vocabulary
+                else None
+            )
+            return NotFiled(error=str(e), change_types=contracts)
+    return result
+
+
+async def propose_many(
+    change_type: str, payloads: list[dict[str, Any]]
+) -> ProposedBatch | NotFiled:
+    """Propose MANY changes of one type as a single batch the user
+    resolves together ("approve them all"), with a per-row veto. Use
+    this whenever more than one change of the same type is wanted - a
+    batch renders as one card, not a pile. Max 100 per batch; every
+    payload follows the change type's contract. Never claim the changes
+    happened - they are pending until the user acts.
+    """
+
+    async def work(session: AsyncSession) -> ProposedBatch:
+        rows = await change_queue.propose_many(
+            session,
+            change_type,
+            payloads,
+            owner_user_id=_owner(),
+            proposed_by_agent=current_agent_slug.get(),
+            conversation_id=current_conversation_id.get(),
+        )
+        cards = await change_queue.cards(session, rows)
+        return ProposedBatch(
+            batch_id=rows[0].batch_id,
+            change_type=change_type,
+            title=change_queue.executor_for(change_type).title,
+            count=len(cards),
+            items=[
+                BatchRow(
+                    id=card.id,
+                    pending_change_id=card.id,
+                    status=card.status,
+                    display=card.display,
+                )
+                for card in cards
+            ],
+        )
+
+    return await _committed(work, vocabulary=True)
+
+
+async def propose(change_type: str, payload: dict[str, Any]) -> Proposed | NotFiled:
+    """Propose a change for the user's approval. The ONLY write tool:
+    nothing moves until the user approves the pending change in the
+    app, and execution happens exclusively there.
+
+    ``change_type`` must be a registered type (see the error message
+    for the current vocabulary); ``payload`` is that type's exact
+    mutation contract. Returns the pending change's id, status and the
+    human-readable description the approval card will show. Propose
+    ONE change per call; never claim a change happened - it is pending
+    until the user acts.
+    """
+
+    async def work(session: AsyncSession) -> Proposed:
+        row = await change_queue.propose(
+            session,
+            change_type,
+            payload,
+            owner_user_id=_owner(),
+            proposed_by_agent=current_agent_slug.get(),
+            conversation_id=current_conversation_id.get(),
+        )
+        card = await change_queue.card(session, row)
+        return Proposed(
+            pending_change_id=card.id,
+            change_type=card.change_type,
+            title=card.title,
+            status=card.status,
+            display=card.display,
+        )
+
+    return await _committed(work, vocabulary=True)
+
+
+async def pending(about: str | None = None, draw: bool = False) -> Filed | NotFiled:
+    """YOUR OWN cards: {"pending": [...]} still awaiting the user and
+    {"decided": [...]} the user acted on in the last two weeks. One entry
+    per card, with exactly these keys: batch_id (null for a single
+    proposal), pending_change_ids (its rows), rows (how many), change_type,
+    title, status (pending, approved, rejected, withdrawn by you, or mixed),
+    filed_at, decided_at (null while pending), summary (one line: what the
+    card does, with one example row). Read this before filing a
+    replacement so you can withdraw what it supersedes yourself -
+    withdraw_batch(batch_id) for a whole card, withdraw(id) for one row -
+    instead of asking the user to reject them. ``about`` narrows to cards
+    mentioning it ("state farm"). Other agents' cards and the user's own
+    are not listed and cannot be withdrawn.
+
+    Reading draws NOTHING. Set ``draw=True`` only when the user asked to
+    see a card - "show me that one", "what became of it?" - and then
+    {"draw": [...]} is what a chat redraws for them: the cards still
+    awaiting them, or with ``about`` whatever matched, decided ones in
+    their final state. A check before filing a replacement must stay
+    invisible: a settled card redrawn beside an answer reads as a fresh
+    offer."""
+    try:
+        owner = _owner()
+    except ValueError as e:
+        return NotFiled(error=str(e))
+    needle = (about or "").strip().lower()
+    horizon = utcnow() - timedelta(days=14)
+    async with get_async_session() as session:
+        rows = await change_queue.list_changes(
+            session,
+            owner_user_id=owner,
+            status=None,
+            proposed_by_agent=current_agent_slug.get(),
+            resolved_since=horizon,
+        )
+        bodies = await change_queue.describe_changes(session, rows)
+        cards: dict[str, _Card] = {}
+        for row, body in zip(rows, bodies):
+            line = " / ".join(f"{ln.label}: {ln.value}" for ln in body)
+            card = cards.setdefault(
+                row.batch_id or f"row-{row.id}",
+                _Card(
+                    batch_id=row.batch_id,
+                    change_type=row.change_type,
+                    filed_at=row.created_at,
+                    decided_at=row.resolved_at,
+                    summary=line,
+                ),
+            )
+            card.ids.append(row.id)
+            card.statuses.add(change_queue.outcome_of(row))
+            card.matches |= not needle or needle in line.lower()
+    waiting: list[FiledCard] = []
+    decided: list[FiledCard] = []
+    for card in cards.values():
+        if card.matches:
+            (waiting if "pending" in card.statuses else decided).append(card.filed())
+    # Decided here, the one place that knows whether the user asked about
+    # a card; capped, so even a drawing listing never papers the thread.
+    shown = (waiting + decided if needle else waiting)[:DRAW_CAP] if draw else []
+    # Only a chat redraws them; an MCP client's user sees nothing unless
+    # the client says it.
+    chat = current_conversation_id.get() is not None
+    note = (REDRAWN if draw else DREW_NOTHING) if chat else None
+    return Filed(pending=waiting, decided=decided, draw=shown, note=note)
+
+
+DRAW_CAP = 5
+REDRAWN = (
+    "The cards in `draw` are redrawn in the chat for the user, decided ones "
+    "in their final state. Point at them; never list their rows."
+)
+DREW_NOTHING = (
+    "This drew nothing, which is the norm. Call again with draw=True ONLY "
+    "when the user asked to see a card; then `draw` is what they see."
+)
+
+
+@dataclass
+class _Card:
+    """A card being gathered from its rows (``pending``)."""
+
+    batch_id: str | None
+    change_type: str
+    filed_at: datetime
+    decided_at: datetime | None
+    summary: str  # its first row's
+    ids: list[int] = field(default_factory=list)
+    statuses: set[str] = field(default_factory=set)
+    matches: bool = False
+
+    def filed(self) -> FiledCard:
+        rows = len(self.ids)
+        status = next(iter(self.statuses)) if len(self.statuses) == 1 else "mixed"
+        return FiledCard(
+            batch_id=self.batch_id,
+            pending_change_ids=self.ids,
+            rows=rows,
+            change_type=self.change_type,
+            title=change_queue.executor_for(self.change_type).title,
+            status=status,
+            filed_at=self.filed_at,
+            decided_at=self.decided_at,
+            summary=f"{rows} rows, e.g. {self.summary}" if rows > 1 else self.summary,
+        )
+
+
+async def withdraw(
+    pending_change_id: int, reason: str | None = None
+) -> Withdrawn | NotFiled:
+    """Retract one of YOUR OWN still-pending proposals - the cleanup
+    for a card you filed by mistake or have superseded. It resolves as
+    rejected with a "withdrawn" note the user can still see, so give a
+    short ``reason`` ("superseded by the five-row card"). Only the agent
+    that proposed a change can withdraw it. Use it yourself, immediately,
+    instead of asking the user to reject the card."""
+
+    async def work(session: AsyncSession) -> Withdrawn:
+        row = await change_queue.withdraw(
+            session,
+            pending_change_id,
+            agent_slug=current_agent_slug.get(),
+            owner_user_id=_owner(),
+            reason=reason,
+        )
+        return Withdrawn(
+            pending_change_id=row.id,
+            status=row.status,
+            note=(row.result or {}).get("note"),
+        )
+
+    return await _committed(work)
+
+
+async def withdraw_batch(
+    batch_id: str, reason: str | None = None
+) -> BatchWithdrawn | NotFiled:
+    """Retract a whole still-pending card of YOUR OWN in one step - every
+    row of one propose_many batch, one transaction, one reason the user
+    will see on the folded card ("superseded by the five-row card").
+    Prefer this over withdrawing a batch row by row."""
+
+    async def work(session: AsyncSession) -> BatchWithdrawn:
+        withdrawn = await change_queue.withdraw_batch(
+            session,
+            batch_id,
+            agent_slug=current_agent_slug.get(),
+            owner_user_id=_owner(),
+            reason=reason,
+        )
+        return BatchWithdrawn(batch_id=batch_id, withdrawn=withdrawn)
+
+    return await _committed(work)
+
+
+async def revise(
+    fields: dict[str, str],
+    pending_change_ids: list[int] | None = None,
+    about: str | None = None,
+) -> Revised | NotFiled:
+    """Put right what a waiting card got wrong, before the user approves it -
+    any card awaiting them whose type can be edited, not only your own. Use
+    it when the user corrects a reading: "it is Sweet shop, not Sweat shop"
+    is revise({"text": "Sweet shop"}, about="Sweat shop"), and every waiting
+    card that says Sweat shop is fixed. Name the cards by
+    ``pending_change_ids``, or by ``about`` (text the card's payload
+    contains). ``fields`` are only the ones to change; the rest of each card
+    stays. Returns the ids revised and, per card it could not change, why -
+    a card that cannot be edited says which fields can."""
+    needle = (about or "").strip().lower()
+    if not pending_change_ids and not needle:
+        return NotFiled(error="name the cards: pending_change_ids or about")
+
+    async def work(session: AsyncSession) -> Revised:
+        rows = await change_queue.list_changes(session, owner_user_id=_owner())
+        revised: list[int] = []
+        errors: dict[str, str] = {}
+        for row in rows:
+            if pending_change_ids and row.id not in pending_change_ids:
+                continue
+            if needle and needle not in str(row.payload).lower():
+                continue
+            # Found by what it says, a card that is answered rather than
+            # edited is not what the correction was about.
+            executor = change_queue.executor_for(row.change_type)
+            if not pending_change_ids and not change_queue.editable_fields(executor):
+                continue
+            try:
+                await change_queue.revise_row(session, row, fields)
+            except ValueError as e:
+                errors[str(row.id)] = str(e)
+                continue
+            revised.append(int(row.id or 0))
+        return Revised(revised=revised, errors=errors or None)
+
+    return await _committed(work)
+
+
+# Built-in registration: importing this module makes the tools grantable
+# via the agent registry. replace=True keeps re-imports idempotent.
+register_tool(
+    "change_types",
+    change_types,
+    description="The change types you can propose, each with its payload's schema",
+    effect="read",
+    replace=True,
+)
+register_tool(
+    "propose",
+    propose,
+    description="Propose a change for the user's approval (the only write)",
+    effect="proposes",
+    cards=True,
+    replace=True,
+)
+register_tool(
+    "propose_many",
+    propose_many,
+    description="Propose a batch of same-type changes for one bulk approval",
+    effect="proposes",
+    cards=True,
+    replace=True,
+)
+register_tool(
+    "pending",
+    pending,
+    description="Your own still-pending proposals, so you can withdraw what you supersede",
+    effect="proposes",
+    cards=True,
+    replace=True,
+)
+register_tool(
+    "withdraw",
+    withdraw,
+    description="Retract one of your own still-pending proposals",
+    effect="proposes",
+    replace=True,
+)
+register_tool(
+    "revise",
+    revise,
+    description="Correct a waiting card the user can edit, before they approve it",
+    effect="proposes",
+    replace=True,
+)
+register_tool(
+    "withdraw_batch",
+    withdraw_batch,
+    description="Retract one of your own still-pending batch cards, all rows at once",
+    effect="proposes",
+    replace=True,
+)

@@ -1,6 +1,6 @@
 """What spends money or runs work on demand is the admins' alone (#479):
 comms sends, task enqueue, load tests, scheduler run-now, container
-restarts. Signed in is not
+restarts, voice changes. Signed in is not
 enough; ``ADMIN_USER_EMAILS`` decides."""
 
 from fastapi import FastAPI
@@ -21,6 +21,9 @@ ADMIN_ONLY = [
     ("POST", "/api/v1/tasks/load-test"),
     ("POST", "/api/v1/scheduler/jobs/some-job/run"),
     ("POST", "/api/v1/runtime/containers/someone-elses-db-1/restart"),
+    ("POST", "/api/v1/voice/use"),
+    ("POST", "/api/v1/voice/design"),
+    ("POST", "/api/v1/voice/pronunciation"),
 ]
 
 

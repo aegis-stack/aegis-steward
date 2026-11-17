@@ -12,6 +12,7 @@ import pytest
 from starlette.responses import Response
 
 from app.components.web_frontend.rendering import (
+    close_dialog,
     dialog_done,
     go_to,
     hx_dialog,
@@ -47,8 +48,8 @@ class TestWithToast:
 
 class TestToastRegion:
     @pytest.fixture
-    def page(self, client: TestClient) -> str:
-        return client.get("/overview").text
+    def page(self, shell: str) -> str:
+        return shell
 
     def test_present_outside_the_content_area(self, page: str) -> None:
         """Lives in the base layout, not the swap target, so it survives
@@ -61,10 +62,21 @@ class TestToastRegion:
 
     def test_listens_for_the_toast_event(self, page: str) -> None:
         assert one(page, "#toasts").get("@toast.window") is not None
+        # In the top layer, so a modal dialog never hides one.
+        assert one(page, "#toasts").get("popover") == "manual"
 
     def test_reload_snackbar_is_gone(self, page: str) -> None:
         for banned in ("appFlashSnackbar", "__app_snackbar", 'x-data="snackbar()"'):
             assert banned not in page, banned
+
+
+class TestToastRegionInTheAppShell(TestToastRegion):
+    """The app shell (``layouts/app_shell.html``) mounts its own region;
+    every finance page answers inside it."""
+
+    @pytest.fixture
+    def page(self, client: TestClient) -> str:  # type: ignore[override]
+        return client.get("/overview").text
 
 
 def render(source: str, **context: object) -> str:
@@ -102,30 +114,115 @@ class TestErrorBanner:
         ]
 
 
+class TestCloseDialog:
+    def test_fires_after_settle_not_before_the_swap(self) -> None:
+        """A plain HX-Trigger would close the dialog and then the swap into
+        #dialog-body would re-open it, empty."""
+        response = close_dialog(Response())
+        assert "HX-Trigger" not in response.headers
+        assert json.loads(response.headers["HX-Trigger-After-Settle"]) == {
+            "dialog:close": None
+        }
+
+    def test_stacks_with_a_toast(self) -> None:
+        response = close_dialog(with_toast(Response(), "Saved"))
+        fired = triggers(response)
+        assert "dialog:close" in fired and fired["toast"]["text"] == "Saved"
+
+
 class TestNavigate:
+    def test_sets_hx_location_for_the_content_area(self) -> None:
+        response = navigate(Response(), "/accounts/3")
+        assert json.loads(response.headers["HX-Location"]) == {
+            "path": "/accounts/3",
+            "target": "#app-content",
+        }
+
     def test_closes_the_dialog_before_htmx_follows_the_location(self) -> None:
         """HX-Location is followed instead of swapped, so an after-settle
         close would never fire; the plain trigger is processed first."""
         response = navigate(Response(), "/accounts/3")
-        assert json.loads(response.headers["HX-Location"])["path"] == "/accounts/3"
         assert json.loads(response.headers["HX-Trigger"]) == {"dialog:close": None}
 
 
-class TestAction:
-    def test_one_recipe_with_tones(self) -> None:
-        source = '{% from "components/macros/form.html" import action %}'
-        quiet = one(render(source + '{{ action("Edit", \'hx-get="/e"\') }}'), "button")
-        danger = one(
-            render(
-                source + '{{ action("Remove", \'hx-delete="/r"\', tone="danger") }}'
-            ),
-            "button",
+class TestGoTo:
+    def test_replaces_the_target_with_its_twin_from_the_page(self) -> None:
+        """The page answers with its whole shell; swapping that into the
+        target nests a second sidebar inside the first. Selecting the
+        target out of the answer is the ``hx_replace`` recipe."""
+        response = go_to("/overseer/services/blog/posts", "Saved", "#overseer-main")
+        assert json.loads(response.headers["HX-Location"]) == {
+            "path": "/overseer/services/blog/posts",
+            "target": "#overseer-main",
+            "select": "#overseer-main",
+            "swap": "outerHTML",
+        }
+        assert triggers(response)["toast"]["text"] == "Saved"
+
+
+class TestOobMacro:
+    def test_marks_a_sibling_out_of_band(self) -> None:
+        html = render(
+            '{% from "components/macros/feedback.html" import oob %}'
+            '{% call oob("count", tag="p") %}3 left{% endcall %}'
         )
-        assert quiet.get("hx-get") == "/e" and quiet.get("type") == "button"
-        assert "text-aegis-muted" in quiet.get(
-            "class"
-        ) and "btn-error" not in quiet.get("class")
-        assert "btn-error" in danger.get("class") and danger.get("hx-delete") == "/r"
+        element = one(html, "p#count")
+        assert element.get("hx-swap-oob") == "true" and text(element) == "3 left"
+
+
+class TestDialogHelpers:
+    """One definition of how the modal is opened, posted to, and finished."""
+
+    def test_open_and_post_attributes_name_the_one_body(self) -> None:
+        opener = one(f"<button {hx_dialog('/accounts/new')}></button>", "button")
+        assert opener.get("hx-get") == "/accounts/new"
+        assert opener.get("hx-target") == "#dialog-body"
+
+        form = one(f"<form {hx_dialog_post('/accounts/new')}></form>", "form")
+        assert form.get("hx-post") == "/accounts/new"
+        assert form.get("hx-target") == "#dialog-body"
+
+    def test_the_swap_is_stated_so_it_cannot_be_inherited(self) -> None:
+        """htmx inherits ``hx-swap`` from ancestors. An opener inside a
+        form that swaps ITSELF outerHTML borrowed that and replaced
+        #dialog-body with the dialog's content, so every later open
+        failed against an element that no longer existed - "I can't open
+        a new one until I refresh"."""
+        opener = one(f"<button {hx_dialog('/accounts/new')}></button>", "button")
+        assert opener.get("hx-swap") == "innerHTML"
+
+        form = one(f"<form {hx_dialog_post('/accounts/new')}></form>", "form")
+        assert form.get("hx-swap") == "innerHTML"
+
+    def test_an_opener_can_carry_more(self) -> None:
+        html = (
+            f"""<button {hx_dialog("/x", 'hx-include="[name=k]:checked"')}></button>"""
+        )
+        assert one(html, "button").get("hx-include") == "[name=k]:checked"
+
+    def test_done_closes_says_and_navigates(self) -> None:
+        response = dialog_done("/accounts/3", "Added Ally.")
+        assert json.loads(response.headers["HX-Location"])["path"] == "/accounts/3"
+        fired = json.loads(response.headers["HX-Trigger"])
+        assert "dialog:close" in fired and fired["toast"]["text"] == "Added Ally."
+
+
+class TestSelectField:
+    """The Alpine dropdown binds with ``x-model`` only, so inside a plain
+    ``<form hx-post>`` the chosen value was never sent."""
+
+    SOURCE = (
+        '{% from "components/macros/form.html" import select_field %}'
+        "{{ select_field('account', 'accounts', name=name) }}"
+    )
+
+    def test_a_named_field_posts_its_value(self) -> None:
+        field = one(render(self.SOURCE, name="account_id"), 'input[type="hidden"]')
+        assert field.get("name") == "account_id"
+        assert field.get(":value") == "account"
+
+    def test_an_unnamed_field_stays_script_only(self) -> None:
+        none(render(self.SOURCE, name=None), 'input[type="hidden"]')
 
 
 class TestRangeChips:
@@ -143,45 +240,20 @@ class TestRangeChips:
         ]
         assert "sr-only" in radios[0].get("class")  # the pill is the label
 
-
-class TestDialogHelpers:
-    """One definition of how the modal is opened, posted to, and finished."""
-
-    def test_open_and_post_attributes_name_the_one_body(self) -> None:
-        opener = one(f"<button {hx_dialog('/accounts/new')}></button>", "button")
-        assert opener.get("hx-get") == "/accounts/new"
-        assert opener.get("hx-target") == "#dialog-body"
-
-        form = one(f"<form {hx_dialog_post('/accounts/new')}></form>", "form")
-        assert form.get("hx-post") == "/accounts/new"
-        assert form.get("hx-target") == "#dialog-body"
-
-    def test_an_opener_can_carry_more(self) -> None:
-        html = (
-            f"""<button {hx_dialog("/x", 'hx-include="[name=k]:checked"')}></button>"""
+    def test_a_multiple_row_is_a_checklist_of_ticks(self) -> None:
+        html = render(
+            '{% from "components/macros/form.html" import range_chips %}'
+            "{{ range_chips(((10, '10'), (9, '9s'), (8, '8s')), [9, 8],"
+            " field='score', aria='Score', multiple=True) }}"
         )
-        assert one(html, "button").get("hx-include") == "[name=k]:checked"
-
-    def test_done_closes_says_and_navigates(self) -> None:
-        response = dialog_done("/accounts/3", "Added Ally.")
-        assert json.loads(response.headers["HX-Location"])["path"] == "/accounts/3"
-        fired = json.loads(response.headers["HX-Trigger"])
-        assert "dialog:close" in fired and fired["toast"]["text"] == "Added Ally."
-
-
-class TestGoTo:
-    def test_replaces_the_target_with_its_twin_from_the_page(self) -> None:
-        """The page answers with its whole shell; swapping that into the
-        target nests a second sidebar inside the first. Selecting the
-        target out of the answer is the ``hx_replace`` recipe."""
-        response = go_to("/overseer/services/blog/posts", "Saved", "#overseer-main")
-        assert json.loads(response.headers["HX-Location"]) == {
-            "path": "/overseer/services/blog/posts",
-            "target": "#overseer-main",
-            "select": "#overseer-main",
-            "swap": "outerHTML",
-        }
-        assert triggers(response)["toast"]["text"] == "Saved"
+        one(html, "fieldset[data-checklist]")
+        none(html, 'input[type="radio"]')
+        boxes = select(html, 'input[type="checkbox"]')
+        assert {b.get("name") for b in boxes} == {"score"}
+        assert [b.get("value") for b in boxes if b.get("checked") is not None] == [
+            "9",
+            "8",
+        ]
 
 
 def _layer(html: str, css: str) -> int:
@@ -203,3 +275,19 @@ def test_a_toast_shows_over_the_side_drawer() -> None:
         '{% from "components/macros/layout.html" import drawer %}{{ drawer() }}'
     ).render()
     assert _layer(toasts, "#toasts") > _layer(drawer, "#drawer")
+
+
+class TestAction:
+    def test_one_recipe_with_tones(self) -> None:
+        source = '{% from "components/macros/form.html" import action %}'
+        quiet = one(render(source + '{{ action("Edit", \'hx-get="/e"\') }}'), "button")
+        danger = one(
+            render(
+                source + '{{ action("Remove", \'hx-delete="/r"\', tone="danger") }}'
+            ),
+            "button",
+        )
+        assert quiet.get("hx-get") == "/e" and quiet.get("type") == "button"
+        assert "text-aegis-muted" in quiet.get("class")
+        assert "btn-error" not in quiet.get("class")
+        assert "btn-error" in danger.get("class") and danger.get("hx-delete") == "/r"

@@ -2,19 +2,19 @@
    them (a page opens its preview), the edit form, and its tags. Read pages
    hands it to the worker; the pages fill in on the next open. #}
 {% from "components/macros/layout.html" import card, dialog_title, facts %}
-{% from "components/macros/form.html" import action, field, text_input, textarea, date_input, primary_button, select %}
+{% from "components/macros/form.html" import action, date_input, field, form_footer, select, text_input, textarea %}
 <div class="space-y-4">
   {{ dialog_title(document.title, facts=[document.kind, details[2][1], (document.page_count or 0) ~ " pages"]|join(" . ")) }}
   <div class="flex flex-wrap items-center gap-2">
     {{ action("Read pages", 'hx-post="' ~ urls.read ~ '" hx-swap="none" data-api-done="Reading started" data-write', "primary") }}
-    <a href="{{ urls.download }}" download class="px-2.5 py-1 text-xs rounded border border-aegis-border text-aegis-muted hover:text-aegis-text hover:border-aegis-muted transition-colors">Download</a>
+    {{ action("Download", "download", href=urls.download) }}
     {{ action("Delete", hx_dialog(urls.delete, "data-write"), "danger") }}
   </div>
   <section id="document-pages" aria-label="Pages" class="flex flex-wrap gap-2">
     {% for p in pages %}
     <button type="button" {{ hx_dialog(p.preview) }} title="Page {{ p.number }}: {{ p.status }}"
-            class="w-16 h-20 rounded border border-aegis-border bg-aegis-bg overflow-hidden flex items-center justify-center text-xs text-aegis-muted hover:ring-2 hover:ring-aegis-teal{{ ' opacity-50' if p.status != 'read' }}">
-      {% if p.image %}<img src="{{ p.image }}" alt="Page {{ p.number }}" width="1275" height="1650" loading="lazy" class="w-full h-full object-cover object-top">{% else %}{{ p.number }}{% endif %}
+            class="w-16 h-20 rounded border border-aegis-border bg-aegis-bg overflow-hidden flex items-center justify-center text-xs text-aegis-muted hover-card hover:ring-2 hover:ring-aegis-teal{{ ' opacity-50' if p.status != 'read' }}">
+      {% if p.image %}<img src="{{ p.image }}" alt="Page {{ p.number }}" width="64" height="80" loading="lazy" class="w-full h-full object-cover object-top">{% else %}{{ p.number }}{% endif %}
     </button>
     {% else %}
     <p class="text-xs text-aegis-muted">Not read yet. Read pages hands it to the worker.</p>
@@ -29,7 +29,7 @@
       {% call field("Dated") %}{{ date_input("document_date", document.document_date, block=True) }}{% endcall %}
     </div>
     {% call field("Note") %}{{ textarea("note", document.note or "", rows=3) }}{% endcall %}
-    {{ primary_button("Save", type="submit", attrs="data-write") }}
+    {{ form_footer("Save", cancel=False, attrs="data-write") }}
   </form>
   {% endcall %}
   {% call card("Tags", id="document-tags") %}

@@ -1,8 +1,11 @@
-"""Layout macros: card, stat_tile, chart_panel, dialog."""
+"""Layout macros: card, stat_tile, chart_panel, dialog, badge, dropdown, confirm."""
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.components.web_frontend.rendering import templates
 from tests.web.conftest import Ledger
@@ -10,7 +13,9 @@ from tests.web.dom import none, one, select, text
 
 IMPORT = (
     '{% from "components/macros/layout.html" '
-    "import card, stat_tile, chart_panel, dialog, tab_bar, tab_item, chip, dropdown, page_header, figures, stats_strip, ranked_rows, facts, stat_row %}"
+    "import card, stat_tile, chart_panel, dialog, badge, menu_item, dropdown, "
+    "confirm, progress, page_header, figures, stats_strip, ranked_rows, "
+    "tab_bar, tab_item, chip, facts, stat_row %}"
 )
 
 
@@ -39,12 +44,12 @@ class TestStatTile:
         assert text(one(html, "dd")) == "$100.00"
 
     def test_it_lights_on_hover_only_when_a_click_does_something(self) -> None:
-        """A lit border says "click me": a tile given attributes to act on
-        carries the pointer and the hover, a plain figure does not."""
+        """A teal border says "click me": a tile given attributes to act on
+        carries the card hover, a plain figure does not."""
         plain = render('{{ stat_tile("Assets", "$1") }}')
         acting = render('{{ stat_tile("Assets", "$1", attrs=\'hx-get="/x"\') }}')
-        assert "cursor-pointer" not in (one(plain, "div").get("class") or "").split()
-        assert "cursor-pointer" in (one(acting, "div").get("class") or "").split()
+        assert "hover-card" not in (one(plain, "div").get("class") or "").split()
+        assert "hover-card" in (one(acting, "div").get("class") or "").split()
 
     def test_negative_tone_marks_the_value(self) -> None:
         """Red once a figure goes negative; nothing for healthy figures,
@@ -95,25 +100,11 @@ class TestDialog:
         one(dialog, "#dialog-body")
         assert one(dialog, "button[aria-label='Close']") is not None
 
-    def test_the_body_scrolls_and_the_way_out_does_not(self) -> None:
-        """A dialog that scrolls as a whole takes its own close button
-        off the top of the screen. With a document open, the remaining
-        way out is Escape - which the embedded PDF viewer has already
-        swallowed - so the body scrolls and the chrome stays put.
-
-        ``flex`` must not be on the dialog element itself: an author
-        ``display: flex`` beats the UA sheet's rule hiding a dialog that
-        is not open, whatever the specificity says, and the dialog would
-        render on the page while closed.
-        """
-        html = render("{{ dialog() }}")
-        dialog = one(html, "dialog#dialog")
-        assert "flex" not in (dialog.get("class") or "").split()
-        assert "max-h-[90dvh]" in (dialog.get("class") or "")
-        body = one(dialog, "#dialog-body")
-        assert "overflow-y-auto" in (body.get("class") or "")
-        chrome = one(dialog, "button[aria-label='Close']").getparent()
-        assert "shrink-0" in (chrome.get("class") or "")
+    def test_a_picture_is_as_wide_as_itself(self) -> None:
+        """A table or a result in the dialog (``data-snug``) is not cut to
+        max-w-md."""
+        dialog = one(render("{{ dialog() }}"), "dialog#dialog")
+        assert "has-[[data-snug]]:w-fit" in (dialog.get("class") or "").split()
 
     def test_its_way_out_needs_no_alpine_component(self) -> None:
         """The Overseer mounts the modal outside any Alpine component, where
@@ -126,8 +117,6 @@ class TestDialog:
     def test_every_close_is_the_one_attribute(self) -> None:
         """One way to close a dialog from inside it, so a change to how
         closing works (clearing, unsaved work) cannot miss a copy."""
-        from pathlib import Path
-
         root = Path("app/components/web_frontend/templates")
         copies = [
             str(p)
@@ -136,54 +125,75 @@ class TestDialog:
         ]
         assert copies == []
 
-    def test_mounted_once_by_the_app_shell(self) -> None:
-        page = templates.env.from_string(
-            '{% extends "layouts/app_shell.html" %}{% block app_content %}x{% endblock %}'
-        ).render()
-        one(page, "dialog#dialog")
-        none(one(page, "main#app-content"), "dialog")
-        assert len(select(page, "dialog")) == 1
 
+class TestBadge:
+    def test_tone_rides_a_data_attribute(self) -> None:
+        html = render('{{ badge("Active", "ok") }}')
+        badge = one(html, "[data-tone]")
+        assert text(badge) == "Active" and badge.get("data-tone") == "ok"
 
-class TestTabsAndChips:
-    def test_tabs_are_an_underlined_tablist(self) -> None:
-        html = render(
-            '{% call tab_bar("Views", id="v") %}'
-            '{{ tab_item("One", True, "/one") }}{{ tab_item("Two", False, "/two") }}'
-            "{% endcall %}"
-        )
-        nav = one(html, "nav#v[role=tablist]")
-        assert "border-b" in nav.get("class")
-        links = select(nav, "a")
-        assert [link.get("class") for link in links] == ["tab", "tab"]
-        assert links[0].get("aria-current") == "page"  # .tab underlines it
-        assert links[1].get("aria-current") is None
-
-    def test_chip_is_the_one_chip_class(self) -> None:
-        """Every chip row wears ``chip`` (input.css); a link marks the
-        current choice with aria-current, and that is all it says."""
-        active = one(render('{{ chip("30d", True, "/x?days=30") }}'), "a")
-        idle = one(render('{{ chip("90d", False, "/x?days=90") }}'), "a")
-        assert active.get("class") == "chip" and active.get("aria-current") == "page"
-        assert idle.get("class") == "chip" and idle.get("aria-current") is None
+    def test_no_tone_is_plain_text_without_a_dot(self) -> None:
+        html = render('{{ badge("Jul 6") }}')
+        none(html, "[data-tone] span")
 
 
 class TestDropdown:
+    def test_menu_items_are_the_menus_buttons(self) -> None:
+        """What closes the menu (a click outside it, or on an item) is
+        app.js's one listener, keyed on ``data-dropdown``
+        (``tests/web/test_app_js.py``)."""
+        html = render(
+            '{% call dropdown("More") %}'
+            '{{ menu_item("Edit", \'hx-get="/x/edit" hx-target="#dialog-body"\') }}'
+            '{{ menu_item("Remove", \'hx-delete="/x"\', danger=True) }}'
+            "{% endcall %}"
+        )
+        details = one(html, "details[data-dropdown]")
+        items = select(details, "[role=menu] li button")
+        assert [text(i) for i in items] == ["Edit", "Remove"]
+        assert items[0].get("hx-get") == "/x/edit"
+        assert "text-error" in items[1].get("class")
+
     def test_app_js_places_every_dropdown(self) -> None:
-        """A right-aligned menu whose button wrapped to the left of a phone
-        opened off the screen; one listener in app.js moves any dropdown
-        that would, keyed on ``data-dropdown``."""
-        html = render('{% call dropdown("Connect") %}<li>x</li>{% endcall %}')
+        """One listener in app.js places any dropdown on opening, keyed on
+        ``data-dropdown`` (``tests/web/test_app_js.py``)."""
+        html = render('{% call dropdown("More") %}<li>x</li>{% endcall %}')
         details = one(html, "details[data-dropdown]")
         one(details, "summary + [role=menu]")
 
-    def test_a_panel_holds_controls_not_actions(self) -> None:
+
+class TestConfirm:
+    def test_destructive_verb_and_a_way_out(self) -> None:
         html = render(
-            '{% call dropdown("Accounts", panel="p-2") %}<p>x</p>{% endcall %}'
+            '{{ confirm("Remove Savings?", "It goes away.", "/accounts/3") }}'
         )
-        panel = one(html, "details[data-dropdown] > div")
-        assert panel.get("role") is None
-        assert "p-2" in (panel.get("class") or "").split()
+        button = one(html, '[hx-delete="/accounts/3"]')
+        assert button.get("hx-swap") == "none"
+        assert "Savings" in text(one(html, "h2"))
+        one(html, 'button[type="button"]:not([hx-delete])')
+
+    def test_post_variant(self) -> None:
+        html = render('{{ confirm("Run?", "", "/jobs", label="Run", method="post") }}')
+        assert one(html, '[hx-post="/jobs"]') is not None
+
+
+class TestStatTileExtras:
+    def test_caption_and_attributes_make_a_clickable_cell(self) -> None:
+        html = render(
+            '{{ stat_tile("Bills", "$10.00", caption="3 bills", '
+            'attrs=\'hx-get="/x/bills" hx-target="#dialog-body"\') }}'
+        )
+        tile = one(html, "div[hx-get]")
+        assert tile.get("hx-target") == "#dialog-body"
+        assert [text(dd) for dd in select(tile, "dd")] == ["$10.00", "3 bills"]
+
+
+class TestProgress:
+    def test_native_progress_clamped_to_the_unit_interval(self) -> None:
+        assert one(render("{{ progress(0.25) }}"), "progress").get("value") == "0.25"
+        assert (
+            one(render('{{ progress(1.7, "error") }}'), "progress").get("value") == "1"
+        )
 
 
 class TestPageHeader:
@@ -194,6 +204,29 @@ class TestPageHeader:
         header = one(html, "header")
         assert text(one(header, "h1")) == "Budget" and "the month" in text(header)
         one(header, "#r")
+
+    def test_a_section_may_name_itself(self) -> None:
+        """``page_titled`` heads a section with the page's name: a page
+        whose Overview is the thing itself reads "Media", not "Overview"."""
+        page = SimpleNamespace(
+            single=False, labels={"overview": "Overview"}, folder="none", live=False
+        )
+        item = SimpleNamespace(title="Media", component=SimpleNamespace(message=""))
+        section = templates.env.get_template("pages/overseer/_section.html")
+
+        def heading(**context: object) -> str:
+            html = section.render(
+                item=item,
+                page=page,
+                current="overview",
+                header_message=None,
+                section_partial="components/macros/icons.html",
+                **context,
+            )
+            return text(one(one(html, "header"), "h1"))
+
+        assert heading() == "Overview"
+        assert heading(page_titled=True) == "Media"
 
     def test_figures_are_a_definition_list_the_stat_helper_reads(self) -> None:
         html = render(
@@ -225,15 +258,24 @@ class TestStatsStrip:
         strip = one(html, "dl#s")
         assert len(select(strip, "dt")) == 2
         assert one(strip, "[hx-get]").get("hx-get") == "/x/income"
-        assert "text-error" in select(strip, "dd")[2].get("class")
+        assert select(strip, "dd")[2].get("data-tone") == "error"
 
-    def test_five_cells_share_one_row(self) -> None:
-        """The budget strip has five cells whenever there is everything
-        else, and the column lookup stopped at four: the five stacked in
-        two columns on a wide screen."""
-        cells = [{"label": str(n), "value": "$1.00"} for n in range(5)]
-        html = render("{{ stats_strip(cells, id='s') }}", cells=cells)
-        assert "lg:grid-cols-5" in one(html, "dl#s").get("class", "").split()
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '{{ badge("Down", "error") }}',
+        '{{ progress(0.5, "error") }}',
+        "{{ stats_strip([{'label': 'Owed', 'value': '1', 'tone': 'error'}]) }}",
+    ],
+)
+def test_a_tone_is_coloured_in_one_place(source: str) -> None:
+    """Every tone maps to its colour in input.css's ``.toned`` family, so an
+    error is the same red on a badge, a bar and a stat."""
+    toned = one(render(source), ".toned")
+    assert toned.get("data-tone") == "error"
+    colours = ("text-aegis-", "text-error")
+    assert not [c for c in toned.get("class").split() if c.startswith(colours)]
 
 
 class TestRankedRows:
@@ -258,6 +300,177 @@ class TestRankedRows:
         items = select(html, ".ranked li")
         assert len(items) == 2 and "Market" in text(items[0])
         assert one(items[1], "[style]").get("style") == "width: 44%"
+
+
+class TestTabsAndChips:
+    def test_tabs_are_an_underlined_tablist(self) -> None:
+        html = render(
+            '{% call tab_bar("Views", id="v") %}'
+            '{{ tab_item("One", True, "/one") }}{{ tab_item("Two", False, "/two") }}'
+            "{% endcall %}"
+        )
+        nav = one(html, "nav#v[role=tablist]")
+        assert "border-b" in nav.get("class")
+        links = select(nav, "a")
+        assert [link.get("class") for link in links] == ["tab", "tab"]
+        assert links[0].get("aria-current") == "page"  # .tab underlines it
+        assert links[1].get("aria-current") is None
+
+    def test_chip_is_the_one_chip_class(self) -> None:
+        """Every chip row wears ``chip`` (input.css); a link marks the
+        current choice with aria-current, and that is all it says."""
+        active = one(render('{{ chip("30d", True, "/x?days=30") }}'), "a")
+        idle = one(render('{{ chip("90d", False, "/x?days=90") }}'), "a")
+        assert active.get("class") == "chip" and active.get("aria-current") == "page"
+        assert idle.get("class") == "chip" and idle.get("aria-current") is None
+
+    def test_a_time_window_chip_is_the_same_chip(self) -> None:
+        """The radio chips (``form.range_chips``) wear the same class, the
+        checked one marked through its sibling radio."""
+        html = render(
+            '{% from "components/macros/form.html" import range_chips %}'
+            '{{ range_chips([(30, "30d"), (90, "90d")], 30) }}'
+        )
+        assert [s.get("class") for s in select(html, "label > span")] == [
+            "chip",
+            "chip",
+        ]
+
+
+class TestFacts:
+    def test_label_value_pairs_skip_blank_values(self) -> None:
+        html = render(
+            '{{ facts([("State", "Healthy"), ("Note", none), ("Tags", ["a", "b"])]) }}'
+        )
+        assert [text(dt) for dt in select(html, "dt")] == ["State", "Tags"]
+        assert [text(dd) for dd in select(html, "dd")] == ["Healthy", "a, b"]
+
+
+class TestStatRow:
+    def test_label_over_value_figures(self) -> None:
+        html = render('{{ stat_row([("p95 ms", "4.2"), ("Clients", 3)]) }}')
+        assert [text(dt) for dt in select(html, "dt")] == ["p95 ms", "Clients"]
+        assert [text(dd) for dd in select(html, "dd")] == ["4.2", "3"]
+
+
+def test_a_toggle_action_shows_when_it_is_on() -> None:
+    """Wrap, Pause: a pressed action reads as on, as a pressed chip does."""
+    html = render(
+        '{% from "components/macros/form.html" import action %}{{ action("Wrap", \'aria-pressed="true"\') }}'
+    )
+    assert "action" in one(html, "button").get("class").split()  # input.css
+
+
+def test_a_primary_button_is_as_tall_as_an_action() -> None:
+    """Save stands as tall as Read pages: one button height, whichever
+    macro drew it."""
+    html = render(
+        '{% from "components/macros/form.html" import action, primary_button %}'
+        '{{ primary_button("Save") }}{{ action("Read pages", "", "primary") }}'
+    )
+    save, read = select(html, "button")
+
+    def size(button: object) -> set[str]:
+        classes = (button.get("class") or "").split()  # type: ignore[attr-defined]
+        return {
+            c
+            for c in classes
+            if c.startswith(("btn-xs", "btn-sm", "text-xs", "text-sm", "py-", "px-"))
+        }
+
+    assert size(save) == size(read)
+
+
+def test_a_filled_button_is_the_pages_one_action() -> None:
+    """Make it: the accent as its fill, as tall as every other button."""
+    html = render(
+        '{% from "components/macros/form.html" import primary_button %}'
+        '{{ primary_button("Make it", filled=True) }}{{ primary_button("Save") }}'
+    )
+    made, save = (set((b.get("class") or "").split()) for b in select(html, "button"))
+    assert "btn-primary" in made and "btn-outline" not in made
+    assert "btn-outline" in save
+    assert {c for c in made if c.startswith(("btn-xs", "btn-sm"))} == {
+        c for c in save if c.startswith(("btn-xs", "btn-sm"))
+    }
+
+
+class TestButtonType:
+    """A button macro takes ``type`` as its argument, never in ``attrs``:
+    the second ``type`` is one the browser ignores."""
+
+    def test_type_is_the_macros_argument(self) -> None:
+        html = render(
+            '{% from "components/macros/form.html" import action %}'
+            "{{ action('Go', 'data-write', type='submit') }}"
+        )
+        assert one(html, "button").get("type") == "submit"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            '{% from "components/macros/form.html" import action %}'
+            """{{ action('Go', 'type="submit" data-write') }}""",
+            '{% from "components/macros/form.html" import primary_button %}'
+            """{{ primary_button('Go', attrs='type="submit"') }}""",
+            """{{ menu_item('Go', 'type="submit"') }}""",
+        ],
+    )
+    def test_type_in_attrs_is_refused(self, source: str) -> None:
+        with pytest.raises(ValueError, match="type="):
+            render(source)
+
+
+class TestDialogBody:
+    def test_the_body_scrolls_and_the_way_out_does_not(self) -> None:
+        """A dialog that scrolls as a whole takes its own close button
+        off the top of the screen. With a document open, the remaining
+        way out is Escape - which the embedded PDF viewer has already
+        swallowed - so the body scrolls and the chrome stays put.
+
+        ``flex`` must not be on the dialog element itself: an author
+        ``display: flex`` beats the UA sheet's rule hiding a dialog that
+        is not open, whatever the specificity says, and the dialog would
+        render on the page while closed.
+        """
+        html = render("{{ dialog() }}")
+        dialog = one(html, "dialog#dialog")
+        assert "flex" not in (dialog.get("class") or "").split()
+        assert "max-h-[90dvh]" in (dialog.get("class") or "")
+        body = one(dialog, "#dialog-body")
+        assert "overflow-y-auto" in (body.get("class") or "")
+        chrome = one(dialog, "button[aria-label='Close']").getparent()
+        assert "shrink-0" in (chrome.get("class") or "")
+
+
+class TestTheAppShell:
+    def test_mounted_once_by_the_app_shell(self) -> None:
+        page = templates.env.from_string(
+            '{% extends "layouts/app_shell.html" %}{% block app_content %}x{% endblock %}'
+        ).render()
+        one(page, "dialog#dialog")
+        none(one(page, "main#app-content"), "dialog")
+        assert len(select(page, "dialog")) == 1
+
+
+class TestDropdownPanel:
+    def test_a_panel_holds_controls_not_actions(self) -> None:
+        html = render(
+            '{% call dropdown("Accounts", panel="p-2") %}<p>x</p>{% endcall %}'
+        )
+        panel = one(html, "details[data-dropdown] > div")
+        assert panel.get("role") is None
+        assert "p-2" in (panel.get("class") or "").split()
+
+
+class TestStatsStripWidth:
+    def test_five_cells_share_one_row(self) -> None:
+        """The budget strip has five cells whenever there is everything
+        else, and the column lookup stopped at four: the five stacked in
+        two columns on a wide screen."""
+        cells = [{"label": str(n), "value": "$1.00"} for n in range(5)]
+        html = render("{{ stats_strip(cells, id='s') }}", cells=cells)
+        assert "lg:grid-cols-5" in one(html, "dl#s").get("class", "").split()
 
 
 class TestTheAccountFilterIsSectioned:
@@ -305,47 +518,3 @@ class TestTheAccountFilterIsSectioned:
 
         assert panel.get("role") is None, "checkboxes, not a menu of actions"
         assert "Banking" in [text(p) for p in select(panel, "p")]
-
-
-class TestFacts:
-    def test_label_value_pairs_skip_blank_values(self) -> None:
-        html = render(
-            '{{ facts([("State", "Healthy"), ("Note", none), ("Tags", ["a", "b"])]) }}'
-        )
-        assert [text(dt) for dt in select(html, "dt")] == ["State", "Tags"]
-        assert [text(dd) for dd in select(html, "dd")] == ["Healthy", "a, b"]
-
-
-class TestStatRow:
-    def test_label_over_value_figures(self) -> None:
-        html = render('{{ stat_row([("p95 ms", "4.2"), ("Clients", 3)]) }}')
-        assert [text(dt) for dt in select(html, "dt")] == ["p95 ms", "Clients"]
-        assert [text(dd) for dd in select(html, "dd")] == ["4.2", "3"]
-
-
-def test_a_toggle_action_shows_when_it_is_on() -> None:
-    """Wrap, Pause: a pressed action reads as on, as a pressed chip does."""
-    html = render(
-        '{% from "components/macros/form.html" import action %}{{ action("Wrap", \'aria-pressed="true"\') }}'
-    )
-    assert "action" in one(html, "button").get("class").split()  # input.css
-
-
-def test_a_primary_button_is_as_tall_as_an_action() -> None:
-    """Save stands as tall as Read pages: one button height, whichever
-    macro drew it."""
-    html = render(
-        '{% from "components/macros/form.html" import action, primary_button %}'
-        '{{ primary_button("Save") }}{{ action("Read pages", "", "primary") }}'
-    )
-    save, read = select(html, "button")
-
-    def size(button: object) -> set[str]:
-        classes = (button.get("class") or "").split()  # type: ignore[attr-defined]
-        return {
-            c
-            for c in classes
-            if c.startswith(("btn-xs", "btn-sm", "text-xs", "text-sm", "py-", "px-"))
-        }
-
-    assert size(save) == size(read)

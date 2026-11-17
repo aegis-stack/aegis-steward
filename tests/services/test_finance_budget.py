@@ -373,15 +373,18 @@ class TestAccountScoping:
         assert stats.income_count == 2
 
 
+JULY_END = date(2026, 7, 31)
+
+
 def _days_ago(day: int) -> date:
-    """Four weekly rows (``day`` 1, 8, 15, 22) inside the 90-day window."""
-    return current_date() - timedelta(days=day)
+    """Four weekly rows (``day`` 1, 8, 15, 22) inside the 90-day window
+    before ``JULY_END``, the day every goal here reads as today."""
+    return JULY_END - timedelta(days=day)
 
 
 class TestParseBudgetGoal:
-    """The goal's baseline is the payee's or category's last 90 days, so the
-    rows are dated from today: pinned dates age out of the window (these
-    broke on 2026-09-30, when 1 July fell out)."""
+    """The 90-day lookback reads an injected day, never the real clock:
+    July purchases fell out of the window on the calendar, not the code."""
 
     @pytest.mark.asyncio
     async def test_matches_payee_with_default_fifty_percent(
@@ -394,7 +397,7 @@ class TestParseBudgetGoal:
             )
 
         result = await svc.parse_budget_goal(
-            owner_user_id=1, text="I wanna cut back on Starbucks"
+            owner_user_id=1, today=JULY_END, text="I wanna cut back on Starbucks"
         )
         assert result.matched is True
         assert result.target_type == "payee"
@@ -415,7 +418,7 @@ class TestParseBudgetGoal:
             await _txn(svc, checking.id, -1_000, _days_ago(day), name="Starbucks")
 
         result = await svc.parse_budget_goal(
-            owner_user_id=1, text="cut Starbucks to 30%"
+            owner_user_id=1, today=JULY_END, text="cut Starbucks to 30%"
         )
         assert result.matched is True
         assert result.fraction == 0.30
@@ -451,7 +454,7 @@ class TestParseBudgetGoal:
             )
 
         result = await svc.parse_budget_goal(
-            owner_user_id=1, text="I need to cut back on groceries"
+            owner_user_id=1, today=JULY_END, text="I need to cut back on groceries"
         )
         assert result.matched is True
         assert result.target_type == "category"
@@ -476,7 +479,7 @@ class TestParseBudgetGoal:
         )
 
         result = await svc.parse_budget_goal(
-            owner_user_id=1, text="cut back on groceries"
+            owner_user_id=1, today=JULY_END, text="cut back on groceries"
         )
 
         assert result.category_id == groceries.id
@@ -487,7 +490,7 @@ class TestParseBudgetGoal:
         self, svc: FinanceService
     ) -> None:
         result = await svc.parse_budget_goal(
-            owner_user_id=1, text="something entirely unrelated"
+            owner_user_id=1, today=JULY_END, text="something entirely unrelated"
         )
         assert result.matched is False
         assert result.category_id is None
@@ -1613,7 +1616,7 @@ class TestOneTimePlansGetTheirOwnGroup:
 class TestTheSummaryClockIsInjectable:
     """budget_summary was the one read API stuck on the real clock - which
     is exactly where the suite's time bombs lived: a pause that expires
-    against current_date() flips assertions on a calendar day, and tests
+    against the real date flips assertions on a calendar day, and tests
     could only dodge it with relative dates. The clock is a parameter
     now; this pins both sides of a pause boundary on fixed days."""
 

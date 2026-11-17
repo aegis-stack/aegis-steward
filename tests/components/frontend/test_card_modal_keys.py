@@ -10,9 +10,13 @@ gap fails here instead.
 from pathlib import Path
 import re
 
+import pytest
+
 from app.components.frontend.dashboard import cards
 from app.components.frontend.dashboard.modal_registry import modal_registry
+from app.core.constants import ComponentName
 from app.services.system.models import ComponentStatus, ComponentStatusType
+from tests.components.frontend._tree import rendered
 
 # The aggregate card expands the services group in place; it has no modal.
 _NO_MODAL = {"ServicesCard"}
@@ -36,7 +40,10 @@ def test_every_card_routes_to_a_registered_modal() -> None:
 # Health checks are registered with a literal name, one call each, in the
 # startup hook - so the file that registers them IS the list of what the
 # dashboard has to be able to open.
-_REGISTRAR = re.compile(r'register_(?:service_)?health_check\(\s*"([a-z_0-9]+)"')
+# A name is a literal or a ``ComponentName`` member, read as its value.
+_REGISTRAR = re.compile(
+    r'register_(?:service_)?health_check\(\s*(?:"([a-z_0-9]+)"|ComponentName\.([A-Z_0-9]+))'
+)
 _HEALTH_HOOK = (
     Path(__file__).resolve().parents[3]
     / "app/components/backend/startup/component_health.py"
@@ -57,7 +64,12 @@ def test_every_registered_component_opens_a_modal() -> None:
     counts.
     """
     registry = modal_registry()
-    registered = sorted(set(_REGISTRAR.findall(_HEALTH_HOOK.read_text())))
+    registered = sorted(
+        {
+            literal or ComponentName[member].value
+            for literal, member in _REGISTRAR.findall(_HEALTH_HOOK.read_text())
+        }
+    )
     assert registered, "no health checks found - has the hook moved?"
     missing = [
         name
@@ -78,3 +90,25 @@ def test_components_without_a_card_are_skipped_quietly() -> None:
             name=name, status=ComponentStatusType.HEALTHY, message="ok", metadata={}
         )
         assert create_component_card(name, status).content is None, name
+
+
+async def test_every_installed_component_has_a_card_of_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whatever the stack registers a health check for draws a card, never
+    the "Unknown component" placeholder. The browser shipped with a health
+    check and no card, and logged a warning on every dashboard refresh."""
+    from app.components.backend.startup.component_health import startup_hook
+    from app.components.frontend.overseer.cards import create_component_card
+    from app.services.system import health
+
+    monkeypatch.setattr(health, "_health_checks", {})
+    await startup_hook()
+
+    for name in health.registered_health_names()["components"]:
+        status = ComponentStatus(
+            name=name, status=ComponentStatusType.HEALTHY, message="ok", metadata={}
+        )
+        assert "Unknown component" not in rendered(
+            create_component_card(name, status)
+        ), name

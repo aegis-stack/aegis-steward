@@ -1,0 +1,89 @@
+"""Reads for the propose/approve queue."""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlmodel import col, func, or_, select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.services.change_queue.models import PendingChange
+from app.services.shared.queries import owner_filters, within
+
+
+async def batch_rows(
+    db: AsyncSession, batch_id: str, *, owner_user_id: int | None
+) -> list[PendingChange]:
+    query = select(PendingChange).where(
+        PendingChange.batch_id == batch_id,
+        *owner_filters(PendingChange.owner_user_id, owner_user_id),
+    )
+    return list((await db.exec(query.order_by(PendingChange.id))).all())  # type: ignore[arg-type]
+
+
+async def get_change(
+    db: AsyncSession, change_id: int, *, owner_user_id: int | None
+) -> PendingChange | None:
+    query = select(PendingChange).where(
+        PendingChange.id == change_id,
+        *owner_filters(PendingChange.owner_user_id, owner_user_id),
+    )
+    return (await db.exec(query)).first()
+
+
+async def count_changes(
+    db: AsyncSession, *, owner_user_id: int | None, status: str = "pending"
+) -> int:
+    """How many rows are in ``status``, without reading them."""
+    query = select(func.count()).where(
+        PendingChange.status == status,
+        *owner_filters(PendingChange.owner_user_id, owner_user_id),
+    )
+    return (await db.exec(query)).one()
+
+
+async def change_counts(
+    db: AsyncSession, since: datetime | None = None
+) -> list[tuple[str, str, int]]:
+    """Every owner's cards proposed since ``since`` (all, when None), as
+    ``(status, change_type, count)``: one grouped read, never a card."""
+    query = (
+        select(PendingChange.status, PendingChange.change_type, func.count())
+        .where(*within(PendingChange.created_at, since, None))
+        .group_by(PendingChange.status, PendingChange.change_type)
+    )
+    return [(status, kind, int(n)) for status, kind, n in (await db.exec(query)).all()]
+
+
+async def list_changes(
+    db: AsyncSession,
+    *,
+    owner_user_id: int | None,
+    status: str | None = "pending",
+    proposed_by_agent: str | None = None,
+    batch_ids: list[str] | None = None,
+    resolved_since: datetime | None = None,
+) -> list[PendingChange]:
+    """Newest first. ``status=None`` returns the full audit trail;
+    ``proposed_by_agent`` narrows to one proposer's cards, which is how an
+    agent sees its own open work before filing more; ``batch_ids`` to the
+    rows of those batches, read in one query; ``resolved_since`` drops
+    rows decided before it, so a recent-history read stays bounded."""
+    query = select(PendingChange).order_by(
+        PendingChange.id.desc()  # type: ignore[attr-defined]
+    )
+    if status is not None:
+        query = query.where(PendingChange.status == status)
+    if proposed_by_agent is not None:
+        query = query.where(PendingChange.proposed_by_agent == proposed_by_agent)
+    if batch_ids is not None:
+        query = query.where(col(PendingChange.batch_id).in_(batch_ids))
+    if resolved_since is not None:
+        query = query.where(
+            or_(
+                PendingChange.status == "pending",
+                col(PendingChange.resolved_at) >= resolved_since,
+            )
+        )
+    query = query.where(*owner_filters(PendingChange.owner_user_id, owner_user_id))
+    return list((await db.exec(query)).all())

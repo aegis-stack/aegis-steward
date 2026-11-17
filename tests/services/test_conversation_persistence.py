@@ -49,10 +49,17 @@ def _no_user_memory_db(monkeypatch: pytest.MonkeyPatch) -> None:
     persistence, not memory.
     """
 
-    async def no_memory(user_id: str, **kwargs: object) -> None:
-        return None
+    async def no_memory(user_id: str, **kwargs: object) -> object:
+        from app.services.ai.domains.chat.user_memory import UserContext
+
+        return UserContext(memory=None, readings=[])
 
     # raising=False: the memory backend ships without the user-memory block.
+    monkeypatch.setattr(
+        "app.services.ai.service.turn.build_user_memory_context",
+        no_memory,
+        raising=False,
+    )
     monkeypatch.setattr(
         "app.services.ai.service.streaming.build_user_memory_context",
         no_memory,
@@ -94,11 +101,11 @@ def _fake_runtime(reply: str) -> Iterator[None]:
         mock_config.return_value.enabled = True
         mock_config.return_value.provider = AIProvider.OPENAI
         mock_config.return_value.model = "gpt-4"
-        # A real agent on pydantic-ai's test model: a turn streams the way
-        # a provider's does, whichever entry point asked for it (#455).
         from pydantic_ai import Agent
         from pydantic_ai.models.test import TestModel
 
+        # A real agent on a model that streams ``reply``: a turn is streamed
+        # however it is asked for.
         runtime.return_value = Agent(TestModel(custom_output_text=reply))
         yield
 
@@ -261,7 +268,7 @@ class TestAIServiceConversationMemory:
             assert conversation is not None
             assert conversation.get_message_count() == 2  # User + AI messages
 
-    @pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version (#355)
+    @pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version
     @pytest.mark.asyncio
     async def test_chat_uses_existing_conversation(self, mock_settings):
         """Test that chat uses existing conversation when provided."""
@@ -315,22 +322,9 @@ class TestAIServiceConversationMemory:
             retrieved = await service2.conversation_manager.get_conversation(
                 conversation.id
             )
-
-            # Check if using database persistence (has the async store)
-            try:
-                from app.core.db import get_async_session  # noqa: F401
-
-                uses_database = True
-            except ImportError:
-                uses_database = False
-
-            if uses_database:
-                # SQLite mode: conversations persist across instances
-                assert retrieved is not None
-                assert retrieved.id == conversation.id
-            else:
-                # In-memory mode: each instance has isolated storage
-                assert retrieved is None
+            # A stored backend: conversations persist across instances
+            assert retrieved is not None
+            assert retrieved.id == conversation.id
 
 
 class TestConversationMemoryEdgeCases:
@@ -481,7 +475,7 @@ class TestSurfaceScopingAndTitles:
             assert len(conversation.title) == 60
             assert conversation.title.endswith("...")
 
-    @pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version (#355)
+    @pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version
     @pytest.mark.asyncio
     async def test_list_conversations_filters_by_surface(self, mock_settings):
         with _fake_runtime("ok"):

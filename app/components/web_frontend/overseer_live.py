@@ -12,12 +12,13 @@ import time
 from typing import Any
 
 from fastapi.responses import StreamingResponse
+from markupsafe import Markup
 
 from app.core import series
 from app.core.concurrency import until_closing
 from app.core.log import logger
 
-from .rendering import templates, with_query
+from .rendering import fragment, templates, with_query
 
 MAX_STREAM_SECONDS = 300
 MACROS = "components/macros/layout.html"  # ``chart_data``, a chart's data
@@ -98,6 +99,56 @@ def frame(event: str, html: str) -> str:
     return f"event: {event}\n{data}\n"
 
 
+# A job on a section: each state pushed as ``JOB_EVENT``, then ``JOB_DONE``,
+# which closes the stream; each state rendered in ``JOB_TEMPLATE``.
+JOB_EVENT = "job"
+JOB_DONE = "job-done"
+JOB_TEMPLATE = "pages/overseer/ai/_job.html"
+
+
+def job_state(
+    job: dict[str, Any],
+    events: str,
+    title: str,
+    ended: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    """A job as a section shows it: running (``title``, how far its label
+    says, the stream ``events`` to follow it on), failed (its error), or
+    how it ended, which is the section's to say (``ended`` of its result)."""
+    from app.services.system.jobs import progress_of
+
+    status, label = job["status"], job["label"]
+    named = {"running": title, "failed": "Failed"}.get(status, "Done")
+    view = {"status": status, "title": named, "label": label, "ratio": None}
+    if status == "running":
+        if found := progress_of(label):
+            view["ratio"] = found[0] / max(found[1], 1)
+        return view | {"events": events, "event": JOB_EVENT, "done": JOB_DONE}
+    if status == "failed":
+        return view | {"label": job["error"] or "The job failed", "tone": "error"}
+    return view | ended(job["result"] or {})
+
+
+async def job_frames(
+    job_id: str, view: Callable[[dict[str, Any]], dict[str, Any]], reload: Markup
+) -> AsyncIterator[str]:
+    """A job over SSE, pushed as it changes (the job runner's own updates,
+    nothing polled): each state as ``view`` shows it, as ``JOB_EVENT``, the
+    last one loading what the job made (``reload``, its hx attributes);
+    then ``JOB_DONE``, which closes the stream. Nothing for a job the
+    runner does not know."""
+    from app.services.system.jobs import get_job_runner
+
+    runner = get_job_runner()
+    queue = await runner.subscribe_any(job_id)
+    if queue is None:
+        return
+    async for snapshot in runner.follow(job_id, queue):
+        html = fragment(JOB_TEMPLATE, job=view(snapshot), reload=reload)
+        yield frame(JOB_EVENT, html)
+    yield frame(JOB_DONE, "done")
+
+
 async def heartbeat(
     frames: AsyncIterator[str], every: float = HEARTBEAT_SECONDS
 ) -> AsyncIterator[str]:
@@ -165,3 +216,28 @@ def chart_frames(
             held[event] = (lines, data["labels"][-1])
         sent[event] = str(chart_data(event, data))
     return sent
+
+
+Drawn = list[dict[str, Any]] | None
+
+
+def live_events(
+    prefix: str,
+    read: Callable[[bool], Awaitable[tuple[dict[str, str], Drawn]]],
+    window: int,
+    max_frames: int | None = None,
+) -> AsyncIterator[str]:
+    """A page's live parts and its charts on one stream, each sent again
+    only when it changes: ``read(draw)`` gives the parts' html by event and,
+    asked to draw, its charts (``chart_panel``'s, by ``prefix``). A long
+    window's charts are drawn again only when its tier moves
+    (``series.Redraw``), and sent whole, then only their new points
+    (``chart_frames``)."""
+    held: dict[str, tuple[list[str], int]] = {}
+    redraw = series.Redraw(window)
+
+    async def frame() -> dict[str, str]:
+        sent, drawn = await read(redraw.due())
+        return sent if drawn is None else sent | chart_frames(prefix, drawn, held)
+
+    return fragments_events(frame, series.TICK_SECONDS, max_frames)

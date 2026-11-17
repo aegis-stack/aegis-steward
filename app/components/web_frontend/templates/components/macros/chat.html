@@ -3,30 +3,29 @@
    A live turn and a history replay draw the same markup: ``user_bubble``
    for what was asked, ``streaming_bubble`` while the answer arrives (the
    script fills its body), ``assistant_bubble`` for a stored, settled
-   message (markdown, the tool trail, components, the footer). The
-   assistant is named once, by the route.
+   message (markdown, the tool trail, the footer). Every hook the scripts
+   read is a data attribute or an id here, never framework scope, which is
+   what lets one macro serve both a history render and the swap at the end
+   of a live turn.
 #}
 {% from "components/macros/icons.html" import icon %}
+{% from "components/macros/layout.html" import avatar, copy_icon %}
+{% import "components/macros/layout.html" as layout %}
 
-{# The copy button, one definition for both bubbles. A clipboard write
-   leaves no trace, so the button answers for it: the icon becomes a tick
-   and pops, then settles back. Without it the button looks broken and
-   gets pressed twice. ``extra`` carries the bubble's own reveal rule -
-   the answer's controls live in a hover footer, the question's sit
-   beside its name. #}
-{% macro copy_button(extra="") %}
-<button type="button" data-copy aria-label="Copy" title="Copy" class="{{ extra }}">
-  {{ icon("copy", "w-3.5 h-3.5", 1.5, 'data-copy-idle') }}
-  {{ icon("check", "w-3.5 h-3.5 hidden", 2, 'data-copy-done') }}
-</button>
-{% endmacro %}
+{# The chat's buttons: outlined and quiet, so the conversation stays louder
+   than the controls. ``tone`` primary is teal; ``size`` sm or xs. #}
+{% macro button_classes(tone="default", size="sm") -%}
+{% set tones = {"default": "border-aegis-border text-aegis-muted hover:border-aegis-muted hover:text-aegis-text hover:bg-aegis-border/20", "primary": "btn-primary"} %}
+btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, tones["default"]) }}
+{%- endmacro %}
+
 
 {# What a voice control is doing, drawn from its data-state (voice.js only
-   sets it): the resting icon (the caller) while idle; recording - a pulsing
-   dot (the mic only, ``record=True``); thinking - a spinner while audio is
-   heard or fetched; speaking - an equalizer while it plays. The control
+   sets it): the resting icon (the caller) while idle; recording, a pulsing
+   dot (the mic only, ``record=True``); thinking, a spinner while audio is
+   heard or fetched; speaking, an equalizer while it plays. The control
    carries ``group relative``; one set of visuals for the mic and every
-   speaker, so they cannot drift apart. #}
+   speaker. #}
 {% macro voice_states(size="w-4 h-4", record=False, work=False) %}
 <span class="contents group-data-[state=thinking]:hidden group-data-[state=speaking]:hidden group-data-[state=working]:hidden">{{ caller() }}</span>
 {% if record %}
@@ -36,8 +35,8 @@
 </span>
 {% endif %}
 {{ icon("spinner", "hidden group-data-[state=thinking]:block " ~ size ~ " animate-spin", 1.5, 'data-mic-visual="thinking"') }}
-{# ``work``: her agent pulling data for a live call - not the spinner,
-   which is connecting or transcribing. #}
+{# ``work``: the agent pulling data mid-call - not the spinner, which is
+   connecting or transcribing. #}
 {% if work %}
 <span data-mic-visual="working" class="hidden group-data-[state=working]:flex items-center justify-center gap-0.5 {{ size }}" aria-hidden="true">
   <span class="w-1 h-1 rounded-full bg-current animate-bounce"></span>
@@ -52,21 +51,35 @@
 </span>
 {% endmacro %}
 
-{# Hear an answer: the stored message, said aloud (routes/chat_speech.py).
-   Same place and weight as the copy button; the script plays it, and
-   plays it unasked when the turn began at the microphone. ``form``: speak
-   what the surrounding form holds, unsaved (voice.js sends its fields as
-   the query), not what ``url`` stored. #}
-{% macro speak_button(url, extra="", form=False) %}
-<button type="button" data-speak="{{ url }}" data-state="idle" {% if form %}data-speak-form{% endif %} aria-label="Listen" title="Listen" aria-pressed="false" class="group relative {{ extra }} aria-pressed:text-aegis-text data-[state=speaking]:text-aegis-teal">
-  {% call voice_states("w-3.5 h-3.5") %}{{ icon("speaker", "w-3.5 h-3.5") }}{% endcall %}
+{# A card under a reply, loaded in place by its own route. #}
+{% macro card_loader(url, what) %}
+<div data-card-load id="{{ drawn_id(url) }}" hx-preserve hx-get="{{ url }}" hx-trigger="load" hx-swap="outerHTML" class="my-2 text-xs text-aegis-muted">Loading {{ what }}…</div>
+{% endmacro %}
+
+{# A drawn card's id, the same on the card and its loader: a thread
+   reloaded around a card already up (a call saves each turn while she
+   is still talking about it) has its loader keep that card
+   (``hx-preserve``), moved into place rather than drawn again. Only the
+   loader is kept: a card answering its own loader would keep the loader. #}
+{% macro drawn_id(url) %}drawn-{{ url.rsplit('/', 1)[-1] }}{% endmacro %}
+
+{# Hear an answer: the stored message, said aloud. Same place and weight
+   as the copy button; voice.js plays it, and plays it unasked when the
+   turn began at the microphone. ``form`` speaks its form's fields, unsaved;
+   ``labelled`` says "Listen" beside the speaker; ``tone`` is the muted
+   one every speaker but a bubble's (which shows on hover) takes; ``extra``
+   adds to it. #}
+
+{% macro speak_button(url, extra="", form=False, labelled=False, tone="text-aegis-muted hover:text-aegis-text") %}
+<button type="button" data-speak="{{ url }}" data-state="idle" {% if form %}data-speak-form{% endif %} aria-label="Listen" title="Listen" aria-pressed="false" class="group relative {% if labelled %}inline-flex items-center gap-1 text-sm {% endif %}{{ tone }} {{ extra }} aria-pressed:text-aegis-text data-[state=speaking]:text-aegis-teal">
+  {% call voice_states("w-3.5 h-3.5") %}{{ icon("speaker", "w-3.5 h-3.5") }}{% endcall %}{% if labelled %}Listen{% endif %}
 </button>
 {% endmacro %}
 
-{% macro user_bubble(text, at=None, attachments=None, attachment_names=None, pastes=None) %}
-<li class="flex justify-end pl-24" data-role="user">
-  {# A filled card, the way the Flet panel drew it: the tint is the
-     fill, not a hairline, and the text sits at body size. #}
+{# ``text`` is what the reader sees, ``sent`` what Send again sends (its
+   paste markers kept). #}
+{% macro user_bubble(text, sent, attachments=None, attachment_names=None, pastes=None) %}
+<li class="flex justify-end pl-24" data-role="user" data-sent="{{ sent }}">
   <div class="max-w-full rounded-lg bg-aegis-teal/15 px-5 py-4 text-base text-aegis-text">
     <div class="flex items-center gap-2 mb-1.5">
       <span class="text-sm font-semibold text-aegis-text">You</span>
@@ -74,22 +87,20 @@
               class="text-aegis-muted/70 hover:text-aegis-text transition-colors">
         {{ icon("replay", "w-3.5 h-3.5") }}
       </button>
-      {{ copy_button("text-aegis-muted/70 hover:text-aegis-text transition-colors") }}
+      {{ copy_icon(text, "text-aegis-muted/70 hover:text-aegis-text transition-colors") }}
     </div>
     <span class="whitespace-pre-wrap" data-text>{{ text }}</span>
-    {# A wall of pasted text is a document, not a sentence: it sits as a
-       chip that opens the whole thing in the one modal, so the question
-       stays readable and the page is still one click away. #}
+    {# A pasted page or an attached document is not a sentence: it sits as a
+       chip that opens it whole in the modal, so the question stays readable. #}
     {% if pastes %}
     <div class="mt-2 flex flex-wrap gap-2" data-pastes>
       {% for paste in pastes %}
-      <button type="button" {{ hx_dialog(paste.url) }}
-              class="inline-flex items-center gap-2 rounded border border-aegis-border bg-aegis-bg/60 px-2.5 py-1.5 text-left hover:border-aegis-teal transition-colors"
-              data-paste="{{ paste.id }}" title="{{ paste.title }}">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="w-4 h-4 shrink-0 text-aegis-muted" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5A3.375 3.375 0 0010.125 2.25H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+      <button type="button" {{ hx_dialog(paste.url) }} data-paste="{{ paste.id }}" title="{{ paste.title }}"
+              class="inline-flex items-center gap-2 rounded border border-aegis-border bg-aegis-bg/60 px-2.5 py-1.5 text-left hover:border-aegis-teal transition-colors">
+        {{ icon("document-text", "w-4 h-4 shrink-0 text-aegis-muted") }}
         <span class="min-w-0">
           <span class="block truncate max-w-[14rem] text-xs text-aegis-text">{{ paste.title }}</span>
-          <span class="block text-xxs text-aegis-muted">{{ "{:,}".format(paste.chars) }} characters</span>
+          <span class="block text-xxs text-aegis-muted">{{ paste.size }}</span>
         </span>
       </button>
       {% endfor %}
@@ -109,7 +120,7 @@
 {% endmacro %}
 
 {# The rows under an answer: one per tool call, each opening the run in
-   the one modal (pattern 4) with what it actually did. #}
+   the modal with what it actually did. #}
 {% set trail_classes = "mt-1 mb-3 space-y-1 text-xs font-mono text-aegis-muted" %}
 {% macro trail_rows(rows) %}
 {% if rows %}
@@ -125,95 +136,99 @@
 {% endif %}
 {% endmacro %}
 
-{# The answer's typography: what the markdown filter emits, styled once. #}
-{% set prose = "text-sm leading-relaxed text-aegis-text [&_p]:my-2 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:mt-5 [&_h1]:mb-2 [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:font-semibold [&_h3]:mt-4 [&_h3]:mb-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2 [&_li]:my-0.5 [&_strong]:font-semibold [&_code]:font-mono [&_code]:text-xs [&_code]:text-aegis-teal [&_pre]:rounded [&_pre]:bg-aegis-bg [&_pre]:border [&_pre]:border-aegis-border [&_pre]:p-3 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:text-aegis-text [&_table]:my-2 [&_th]:text-left [&_th]:font-medium [&_th]:pr-4 [&_td]:pr-4 [&_td]:py-0.5 [&_a]:text-aegis-teal [&_blockquote]:border-l-2 [&_blockquote]:border-aegis-border [&_blockquote]:pl-3 [&_blockquote]:text-aegis-muted" %}
-
-{% from "components/macros/changes.html" import component %}
-{% from "components/macros/form.html" import action %}
-
 {# The assistant's name over an answer, in both bubbles. #}
-{% macro assistant_name(assistant) %}<span class="micro-label text-aegis-muted" data-assistant>{{ assistant }}</span>{% endmacro %}
+{# The agent's name over a reply. With ``url`` it opens that agent's
+   settings in the side drawer; inside the trail's summary the click must not
+   also fold the trail, hence the preventDefault. #}
+{% macro assistant_name(assistant, url=None) %}{% if url %}<button type="button" {{ hx_drawer(url) }} hx-on:click="event.preventDefault()" title="{{ assistant }}'s settings" class="micro-label text-aegis-muted hover:text-aegis-text underline-offset-2 hover:underline transition-colors" data-assistant>{{ assistant }}</button>{% else %}<span class="micro-label text-aegis-muted" data-assistant>{{ assistant }}</span>{% endif %}{% endmacro %}
 
-{# An answer's row in the thread: the settled bubble, the one streaming,
-   and a card drawn mid-call all sit in it. #}
+{# An assistant's row in the thread: the settled bubble, the one a turn
+   streams into, and a card drawn mid-call all sit on it. #}
 {% macro assistant_row() %}class="pr-24" data-role="assistant"{% endmacro %}
 
 {% macro assistant_bubble(message, assistant) %}
 <li {{ assistant_row() }} data-message-id="{{ message.id }}">
   <div class="group/bubble">
-    {# The tool trail folds under the name: a caret shows on hover over
-       the bubble (and stays while open), so the audit is a click away
-       without sitting in the transcript. #}
+    {# The tool trail folds under the name: a caret shows on hover over the
+       bubble (and stays while open), so the audit is a click away without
+       sitting in the transcript. #}
     {% if message.trail %}
     <details class="group/trail mb-1" data-trail-fold>
       <summary class="list-none cursor-pointer inline-flex items-center gap-1.5 text-aegis-muted">
-        {{ assistant_name(assistant) }}
+        {{ assistant_name(assistant, message.agent_url) }}
         <span class="text-xxs opacity-0 group-hover/bubble:opacity-100 group-open/trail:opacity-100 transition-opacity">{{ message.trail|length }} {{ "step" if message.trail|length == 1 else "steps" }}</span>
         {{ icon("chevron-down", "w-3 h-3 opacity-0 group-hover/bubble:opacity-100 group-open/trail:opacity-100 group-open/trail:rotate-180 transition", 2) }}
       </summary>
       {{ trail_rows(message.trail) }}
     </details>
     {% else %}
-    <div class="flex items-center gap-2 mb-1">{{ assistant_name(assistant) }}</div>
+    <div class="flex items-center gap-2 mb-1">{{ assistant_name(assistant, message.agent_url) }}</div>
     {% endif %}
-    <div class="{{ prose }}" data-body>{{ message.content|markdown }}</div>
-    {% if message.components %}
-    <div class="mt-3 space-y-3" data-components>
-      {% for marker in message.components %}{{ component(marker) }}{% endfor %}
+    <div class="{{ layout.prose }}" data-body>{{ message.content|markdown }}</div>
+    {# The card the reply drew, then the approval cards its tools proposed,
+       loaded fresh so a change shows its state now, not when it was filed. #}
+    {% for url in message.cards %}{{ card_loader(url, "the chart") }}{% endfor %}
+    {% for url in message.changes %}{{ card_loader(url, "the change") }}{% endfor %}
+    {% if message.cut_off %}
+    <div data-cut-off class="mt-2 flex flex-wrap items-center gap-2 text-xs text-aegis-amber">
+      <span>{{ message.cut_off }}</span>
+      {% if message.agent_url %}<button type="button" data-raise {{ hx_drawer(message.agent_url ~ "?focus=max_tokens") }} class="{{ button_classes('default', 'xs') }}">Raise max tokens</button>{% endif %}
+      <button type="button" data-continue hx-post="{{ message.turns_url }}" hx-target="#chat-thread" hx-swap="beforeend" hx-vals='{{ message.continue_vals|tojson }}' class="{{ button_classes('default', 'xs') }}">Continue</button>
     </div>
     {% endif %}
-    {% if message.footer %}
     <div class="mt-2 flex items-center gap-2 text-xxs text-aegis-muted">
-      {% if message.model_icon %}<img src="{{ message.model_icon }}" alt="" width="14" height="14" class="w-3.5 h-3.5 rounded-full brand-tile object-contain p-px" data-model-icon>{% endif %}
-      <span data-footer>{{ message.footer }}</span>
-      {{ copy_button("opacity-0 group-hover/bubble:opacity-100") }}
-      {% if message.speech %}{{ speak_button(message.speech, "opacity-0 group-hover/bubble:opacity-100 focus:opacity-100 aria-pressed:opacity-100") }}{% endif %}
+      {% if message.model_icon %}<span data-model-icon class="inline-flex">{{ avatar(message.footer, message.model_icon, size="xs") }}</span>{% endif %}
+      {% if message.footer %}<span data-footer>{{ message.footer }}</span>{% endif %}
+      {{ copy_icon(message.content, "opacity-0 group-hover/bubble:opacity-100") }}
+      {% if message.eval_url %}<button type="button" data-make-eval {{ hx_dialog(message.eval_url) }} aria-label="Make this an eval" title="Make this an eval" class="opacity-0 group-hover/bubble:opacity-100 focus:opacity-100 hover:text-aegis-text transition">{{ icon("beaker", "w-3.5 h-3.5") }}</button>{% endif %}
+      {% if message.speech %}{{ speak_button(message.speech, "opacity-0 group-hover/bubble:opacity-100 focus:opacity-100 aria-pressed:opacity-100", tone="") }}{% endif %}
     </div>
-    {% endif %}
-    <template data-raw>{{ message.content }}</template>
   </div>
 </li>
 {% endmacro %}
 
-{# The bubble a live turn streams into. The script reads ``data-stream``
+{# The bubble a live turn streams into. The script reads ``data-text``
    (what to send) and fills ``data-body`` and ``data-trail``; when the
    stream completes it swaps this whole element for ``assistant_bubble``
    rendered from the stored message. #}
+{# Her name over the steps of a turn still running: a typed one as it
+   streams, a call's as it talks. #}
+{% macro turn_head(assistant, hidden=False) %}
+<div class="flex items-center gap-2 mb-1">{{ assistant_name(assistant) }}</div>
+<ul class="{{ trail_classes }}" data-trail{% if hidden %} hidden{% endif %}></ul>
+{%- endmacro %}
+
 {% macro streaming_bubble(text, conversation_id, assistant) %}
 <li {{ assistant_row() }} data-stream data-text="{{ text }}" {% if conversation_id %}data-conversation-id="{{ conversation_id }}"{% endif %}>
-  <div class="flex items-center gap-2 mb-1">{{ assistant_name(assistant) }}</div>
-  <ul class="{{ trail_classes }}" data-trail hidden></ul>
-  <div class="{{ prose }}" data-body></div>
+  {{ turn_head(assistant, hidden=True) }}
+  <div class="{{ layout.prose }}" data-body></div>
   <div class="mt-2 flex items-center gap-2 py-1" data-busy aria-label="Thinking">
     <span class="flex gap-1">
       <span class="w-1.5 h-1.5 rounded-full bg-aegis-muted/60 animate-pulse"></span>
       <span class="w-1.5 h-1.5 rounded-full bg-aegis-muted/60 animate-pulse [animation-delay:.15s]"></span>
       <span class="w-1.5 h-1.5 rounded-full bg-aegis-muted/60 animate-pulse [animation-delay:.3s]"></span>
     </span>
-    {# How long this pause has lasted, filled from the stream's `waiting`
-       frames. Hidden until there is a pause worth naming - a prompt
-       answer must not flash a stopwatch. #}
+    {# How long this pause has lasted, and why, from the stream's ``waiting``
+       frames; hidden until there is a pause to name. #}
     <span class="text-xs text-aegis-muted" data-waiting hidden></span>
   </div>
 </li>
 {% endmacro %}
 
 {# The chat's two verbs, wherever the surface shows: a fresh thread, and
-   the history dialog - of ``surface`` when it is not the Chat page's. #}
-{% macro chat_toolbar(path, surface=None) %}
+   the history dialog. #}
+{% macro chat_toolbar(path) %}
 <div class="flex items-center gap-2">
-  {{ action("New conversation", hx_thread(chat_urls.conversations ~ "/new")) }}
-  {{ action("History", hx_dialog(chat_urls.conversations ~ ("?surface=" ~ surface if surface else ""))) }}
+  <button type="button" {{ hx_thread(path ~ "/conversations/new") }} class="{{ button_classes('default', 'xs') }} whitespace-nowrap">New conversation</button>
+  <button type="button" {{ hx_dialog(path ~ "/conversations") }} class="{{ button_classes('default', 'xs') }} whitespace-nowrap">History</button>
 </div>
 {% endmacro %}
 
-{# The composer's model chip: the active model's id, opening the picker.
-   Re-rendered out of band by a pick. #}
-{# The composer's chips - model, voice, live engine - are one button: a
-   label that opens its dialog. ``mark`` names the attribute that says what
-   the chip shows (for scripts and tests), ``value`` its value if any. #}
-{% macro composer_chip(id, label, path, title, mark, value=None, oob=False) %}
-<button type="button" id="{{ id }}" {% if oob %}hx-swap-oob="true"{% endif %} {{ hx_dialog(path) }}
+{# The composer's chips are one button: a label that opens its dialog.
+   ``mark`` names the attribute that says what the chip shows (for scripts
+   and tests), ``value`` its value if any. #}
+{% macro composer_chip(id, label, path, title, mark, value=None, oob=False, opens=None) %}
+<button type="button" id="{{ id }}" {% if oob %}hx-swap-oob="true"{% endif %} {{ opens or hx_dialog(path) }}
         title="{{ title }}" aria-label="{{ title }}"
         class="inline-flex items-center gap-1 text-xs text-aegis-muted hover:text-aegis-text transition-colors whitespace-nowrap">
   <span {{ mark }}{% if value is not none %}="{{ value }}"{% endif %}>{{ label }}</span>
@@ -221,25 +236,57 @@
 </button>
 {% endmacro %}
 
+{# The composer's model chip: the active model's id, opening the picker.
+   Re-rendered out of band by a pick. #}
 {% macro model_chip(chip, path, oob=False) %}{{ composer_chip("chat-model", chip.label, path, "Switch the active model", "data-model", chip.model, oob) }}{% endmacro %}
+
+{# The composer's voice chip: what a live call runs on (``calling``), else
+   the active voice profile's name, opening the dialog that picks both.
+   Same place and weight as the model chip; it loads itself, and a pick
+   sends it back out of band. #}
+{% macro voice_chip(active, path, calling=None, oob=False) %}{{ composer_chip("chat-voice", "Calls: " ~ calling.title if calling else "Voice: " ~ (active.name if active else "default"), path, "Change what calls run on and the voice", "data-voice-name", oob=oob) }}{% endmacro %}
+
+{# The composer's agent chip: who answers here, opening the agent's editor
+   in the side drawer, where what it runs on is changed. #}
+{% macro agent_chip(name, url) %}{{ composer_chip("chat-agent", name, url, name ~ "'s settings", "data-assistant", opens=hx_drawer(url)) }}{% endmacro %}
+
+{# One model as a picker's row (the chat model's, a call's): a pick posts
+   its id from the form ``form`` (its attributes; ``hidden``, what else it
+   posts), ``mark`` naming it for the page; teal-checked when ``current``. #}
+{% macro model_row(row, current, mark, form, hidden="") %}
+<li>
+  <form {{ form }}>
+    {{ hidden }}
+    <button type="submit" name="model_id" value="{{ row.model_id }}" {{ mark }}="{{ row.model_id }}" {% if current %}aria-current="true"{% endif %}
+            class="w-full flex items-center gap-3 px-2 py-2 rounded text-left hover:bg-aegis-border/20 transition-colors">
+      {% if row.icon_name %}{{ avatar(row.icon_name, row.icon_url) }}{% else %}<span class="w-5 shrink-0"></span>{% endif %}
+      <span class="min-w-0 flex-1">
+        <span class="block text-sm text-aegis-text truncate">{{ row.title }}</span>
+        <span class="block text-xs text-aegis-muted truncate">{{ row.model_id }}</span>
+      </span>
+      {% if row.facts %}<span class="text-xs text-aegis-muted whitespace-nowrap">{{ row.facts }}</span>{% endif %}
+      {% if current %}{{ icon("check", "w-4 h-4 text-aegis-teal shrink-0", 2, '', label="In use") }}{% endif %}
+    </button>
+  </form>
+</li>
+{% endmacro %}
 
 {# One stored message as its bubble: the transcript and the settle swap
    draw messages through this, so the role switch has one home. #}
 {% macro bubble(message, assistant) %}
-{% if message.role == "user" %}{{ user_bubble(message.content, message.at, attachments=message.attachments, pastes=message.pastes) }}{% else %}{{ assistant_bubble(message, assistant) }}{% endif %}
+{% if message.role == "user" %}{{ user_bubble(message.content, message.sent, attachments=message.attachments, pastes=message.pastes) }}{% else %}{{ assistant_bubble(message, assistant) }}{% endif %}
 {% endmacro %}
 
-{# The composer's voice chip: the active voice profile's name, opening the
-   voice dialog (routes/chat_voices.py). Same place and weight as the model
-   chip; it loads itself, and a switch sends it back out of band. #}
-{% macro voice_chip(active, path, oob=False) %}{{ composer_chip("chat-voice", active.name if active else "Voice", path, "Change her voice", "data-voice-name", oob=oob) }}{% endmacro %}
-
-{# The composer's conversation id: in the composer itself, and out of
-   band when a load replaces the thread. #}
+{# The composer's conversation id: in the composer itself, and out of band
+   when a load replaces the thread. #}
 {% macro conversation_field(conversation_id, oob=False) %}
 <input type="hidden" id="chat-conversation" name="conversation_id" value="{{ conversation_id or '' }}"{% if oob %} hx-swap-oob="true"{% endif %}>
 {% endmacro %}
 
-{# The attributes for "load ``url`` into the thread", replacing it: a
-   fresh thread, a conversation picked from history. #}
+{# The attributes for "load ``url`` into the thread", replacing it: a fresh
+   thread, a conversation picked from history. #}
 {% macro hx_thread(url) %}hx-get="{{ url }}" hx-target="#chat-thread" hx-swap="innerHTML"{% endmacro %}
+{# A part of the page an agent may point at (``app.core.pages``): its id
+   taken from the page's declaration, so one it does not declare fails the
+   render. On the part's element: <section {{ page_target(page, "build") }}>. #}
+{% macro page_target(page, id) %}id="{{ page.target(id) }}" data-page-target{% endmacro %}

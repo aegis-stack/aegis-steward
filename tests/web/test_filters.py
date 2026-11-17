@@ -12,7 +12,12 @@ from typing import Any
 from fastapi import FastAPI
 import pytest
 
-from app.components.web_frontend.filters import exactly
+from app.components.web_frontend import overseer_code
+from app.components.web_frontend.filters import (
+    cents_to_input,
+    exactly,
+    money_to_cents,
+)
 from app.components.web_frontend.rendering import templates
 from app.services.system.models import ComponentStatus
 from tests.web.dom import select, text
@@ -103,6 +108,131 @@ class TestPct:
 
     def test_blank_stays_blank(self, pct: Callable[..., Any]) -> None:
         assert pct(None) == ""
+
+
+class TestMoneyRoundTrip:
+    def test_money_to_cents_reads_what_people_type(self) -> None:
+        assert money_to_cents("$1,200.50") == 120_050
+        assert money_to_cents(" 12 ") == 1_200
+        assert money_to_cents("") == 0
+        assert money_to_cents("lots") is None
+
+    def test_cents_to_input_is_the_inverse_for_form_values(self) -> None:
+        assert cents_to_input(350_000_00) == "350,000.00"
+        assert cents_to_input(None) == ""
+        assert money_to_cents(cents_to_input(1_250_50)) == 1_250_50
+
+
+class TestMarkdown:
+    """One renderer for anything a model wrote.
+
+    A chat reply, a generated report and a long-form field are all model
+    markdown. Rendering them in the browser instead means a second, weaker
+    implementation that drifts from this one, and the escaping has to be
+    earned again there.
+    """
+
+    @pytest.fixture
+    def markdown(self) -> Callable[..., str]:
+        return templates.env.filters["markdown"]
+
+    def test_the_things_a_model_actually_writes(
+        self, markdown: Callable[..., str]
+    ) -> None:
+        """Headings, tables and fenced code are exactly what a
+        regex-and-replace renderer in the browser gets wrong."""
+        out = markdown(
+            "# Head\n\n"
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+            "```python\nx = 1\n```\n\n"
+            "- one\n- two\n"
+        )
+
+        assert "<h1>" in out
+        assert "<table>" in out
+        assert "<pre>" in out
+        assert "<ul>" in out
+
+    def test_fenced_code_is_highlighted_by_its_language(
+        self, markdown: Callable[..., str]
+    ) -> None:
+        out = markdown("```python\ndef upgrade():\n    pass\n```")
+        keywords = [text(span) for span in select(out, ".highlight pre span.k")]
+        assert "def" in keywords
+        assert "pass" in keywords
+
+    def test_fence_options_never_reach_the_formatter(
+        self, markdown: Callable[..., str]
+    ) -> None:
+        """marko's stock extension feeds ``key=value`` after the language
+        into Pygments; ``full`` would emit a whole document, ``cssfile``
+        would write to disk. Model markdown must not steer either."""
+        out = markdown('```python full=true,title="x"\nx = 1\n```')
+        assert "<html" not in out and "<style" not in out
+
+    def test_a_line_of_the_apps_code_links_to_it(
+        self, markdown: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A path the Code page shows, set as code (with its line or not),
+        opens there; one it does not show stays code."""
+        monkeypatch.setattr(overseer_code, "enabled", lambda: True)
+        out = markdown(
+            "At `app/core/cache.py:10`, `app/core/cache.py` and `app/no.py`."
+        )
+        links = select(out, "a")
+        assert [link.get("href") for link in links] == [
+            overseer_code.line_url("app/core/cache.py", 10),
+            overseer_code.Scope().url("app/core/cache.py"),
+        ]
+        assert [text(link) for link in links] == [
+            "app/core/cache.py:10",
+            "app/core/cache.py",
+        ]
+        assert "<code>app/no.py</code>" in out
+
+    def test_code_stays_code_while_the_code_page_is_off(
+        self, markdown: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(overseer_code, "enabled", lambda: False)
+        assert "<a" not in markdown("`app/core/cache.py:10`")
+
+    def test_code_inside_a_fence_is_escaped(self, markdown: Callable[..., str]) -> None:
+        out = markdown("```html\n<script>alert(1)</script>\n```")
+        assert "<script>" not in out
+
+    def test_raw_html_is_shown_not_run(self, markdown: Callable[..., str]) -> None:
+        """The model can format, never inject. This is why the renderer
+        carries an escaping mixin instead of using marko bare."""
+        out = markdown("<script>alert(1)</script>")
+
+        assert "<script>" not in out
+        assert "&lt;script&gt;" in out
+
+    def test_inline_html_is_escaped_too(self, markdown: Callable[..., str]) -> None:
+        assert "<img" not in markdown("hello <img src=x onerror=alert(1)> there")
+
+    def test_empty_input_is_not_an_error(self, markdown: Callable[..., str]) -> None:
+        assert markdown(None) == ""
+        assert markdown("") == ""
+
+    def test_a_source_on_its_own_is_highlighted_whole(self) -> None:
+        """A traceback is source, not markdown: a fence it quotes does not
+        end it early, and the HTML in it stays text."""
+        highlight: Callable[..., str] = templates.env.filters["highlight"]
+        out = highlight(
+            "Traceback (most recent call last):\n````\n<b>x</b>\nValueError: bad",
+            "pytb",
+        )
+        assert text(select(out, ".highlight .gr")[-1]) == "ValueError"
+        assert "<b>" not in out
+
+    def test_one_set_of_classes_styles_the_output(self) -> None:
+        """A heading that looks different in chat than in a report is a bug
+        nobody files and everybody notices."""
+        from app.components.web_frontend.filters import PROSE_CLASSES
+
+        for element in ("h1", "h2", "h3", "ul", "ol", "li", "pre", "table", "a"):
+            assert f"[&_{element}]" in PROSE_CLASSES, element
 
 
 class TestWindows:

@@ -55,14 +55,14 @@ class TestOpenRouter:
 
 
 class TestTheOldLookupsReadTheRegistry:
-    """The maps are gone; the functions that used them stay, because
+    """The maps are gone; the helpers that used them stay, because
     callers all over the app and CLI use them."""
 
     @pytest.mark.parametrize("provider", list(AIProvider))
-    def test_env_var_name_matches_the_registry(self, provider: AIProvider) -> None:
-        from app.services.ai.domains.llm.providers import _get_env_var_name
+    def test_api_key_env_matches_the_registry(self, provider: AIProvider) -> None:
+        from app.services.ai.domains.llm.config import api_key_env
 
-        assert _get_env_var_name(provider) == PROVIDERS[provider].env_var
+        assert api_key_env(provider) == PROVIDERS[provider].env_var
 
     def test_supported_providers_is_the_enum(self) -> None:
         from app.services.ai.domains.llm.providers import get_supported_providers
@@ -72,6 +72,10 @@ class TestTheOldLookupsReadTheRegistry:
 
 class TestOneClientForEveryOpenAICompatibleProvider:
     """Mistral, Cohere, OpenRouter and Ollama differ by a URL and a key.
+
+    Pydantic-ai only: on the LangChain framework a model is built through
+    that project's own per-provider packages, which a stack installs only
+    for the providers it selected - and which have no OpenRouter at all.
 
     They used to differ by more: two of them passed ``base_url`` to
     ``OpenAIChatModel``, which takes no such argument, so selecting

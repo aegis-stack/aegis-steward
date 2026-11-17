@@ -1,0 +1,183 @@
+"""The propose/approve queue's HTTP surface (FW-05): approval behind
+the app user, never in a tool (the rules live in ``change_queue.queue``).
+Every change type any service registered resolves through these routes.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.db import get_async_db
+from app.core.log import logger
+from app.services import change_queue
+from app.services.change_queue import PendingChange
+from app.services.change_queue.deps import owned_batch, owned_change
+from app.services.change_queue.schemas import (
+    BatchResolveRequest,
+    BatchResolveResponse,
+    ChangeProposal,
+    ChangeRevision,
+    PendingChangeCount,
+    PendingChangeListResponse,
+    PendingChangeResponse,
+)
+from app.services.shared.deps import get_owner_user_id
+
+router = APIRouter(prefix="/changes", tags=["changes"])
+
+
+@router.post("", response_model=PendingChangeResponse)
+async def propose_change(
+    body: ChangeProposal,
+    db: AsyncSession = Depends(get_async_db),
+    owner_user_id: int | None = Depends(get_owner_user_id),
+) -> PendingChangeResponse:
+    """Record a proposal. Nothing moves here."""
+    try:
+        row = await change_queue.propose(
+            db,
+            body.change_type,
+            body.payload,
+            owner_user_id=owner_user_id,
+            proposed_by_agent=body.proposed_by_agent,
+            conversation_id=body.conversation_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from None
+    response = await change_queue.card(db, row)
+    await db.commit()
+    return response
+
+
+@router.get("", response_model=PendingChangeListResponse)
+async def list_changes(
+    status_filter: str | None = Query("pending", alias="status"),
+    db: AsyncSession = Depends(get_async_db),
+    owner_user_id: int | None = Depends(get_owner_user_id),
+) -> PendingChangeListResponse:
+    rows = await change_queue.list_changes(
+        db, owner_user_id=owner_user_id, status=status_filter
+    )
+    items = await change_queue.cards(db, rows)
+    return PendingChangeListResponse(items=items, total=len(items))
+
+
+@router.get("/count", response_model=PendingChangeCount)
+async def count_changes(
+    status_filter: str = Query("pending", alias="status"),
+    db: AsyncSession = Depends(get_async_db),
+    owner_user_id: int | None = Depends(get_owner_user_id),
+) -> PendingChangeCount:
+    """The badge's number, without describing a card."""
+    return PendingChangeCount(
+        count=await change_queue.count_changes(
+            db, owner_user_id=owner_user_id, status=status_filter
+        )
+    )
+
+
+@router.get("/{change_id}", response_model=PendingChangeResponse)
+async def get_change(
+    row: PendingChange = Depends(owned_change),
+    db: AsyncSession = Depends(get_async_db),
+) -> PendingChangeResponse:
+    return await change_queue.card(db, row)
+
+
+@router.post("/{change_id}/approve", response_model=PendingChangeResponse)
+async def approve_change(
+    row: PendingChange = Depends(owned_change),
+    db: AsyncSession = Depends(get_async_db),
+) -> PendingChangeResponse:
+    """Execute the stored mutation."""
+    try:
+        await change_queue.approve_row(db, row)
+    except ValueError as e:
+        await db.commit()  # a recorded execution error is audit
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from None
+    except Exception:
+        # Same audit rule for a NON-domain crash - the row's recorded
+        # error must survive, or the card shows a pending change with
+        # no explanation - but internals never reach the client.
+        await db.commit()
+        logger.exception(f"Executing pending change {row.id} failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The change could not be executed.",
+        ) from None
+    response = await change_queue.card(db, row)
+    await db.commit()
+    await change_queue.after_commit(db)
+    return response
+
+
+@router.post("/{change_id}/revise", response_model=PendingChangeResponse)
+async def revise_change(
+    body: ChangeRevision,
+    row: PendingChange = Depends(owned_change),
+    db: AsyncSession = Depends(get_async_db),
+) -> PendingChangeResponse:
+    """Put the reader's own words on a waiting card of a type that allows
+    it; the card stays pending, revalidated by its type's contract."""
+    try:
+        await change_queue.revise_row(db, row, body.fields)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from None
+    response = await change_queue.card(db, row)
+    await db.commit()
+    return response
+
+
+@router.post("/{change_id}/reject", response_model=PendingChangeResponse)
+async def reject_change(
+    row: PendingChange = Depends(owned_change),
+    db: AsyncSession = Depends(get_async_db),
+) -> PendingChangeResponse:
+    try:
+        await change_queue.reject_row(db, row)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from None
+    response = await change_queue.card(db, row)
+    await db.commit()
+    return response
+
+
+@router.get("/batch/{batch_id}", response_model=PendingChangeListResponse)
+async def get_batch(
+    rows: list[PendingChange] = Depends(owned_batch),
+    db: AsyncSession = Depends(get_async_db),
+) -> PendingChangeListResponse:
+    """Every row of one batch, whatever its status - the batch card's
+    refresh source."""
+    items = await change_queue.cards(db, rows)
+    return PendingChangeListResponse(items=items, total=len(items))
+
+
+@router.post("/batch/{batch_id}/approve", response_model=BatchResolveResponse)
+async def approve_batch(
+    body: BatchResolveRequest,
+    rows: list[PendingChange] = Depends(owned_batch),
+    db: AsyncSession = Depends(get_async_db),
+) -> BatchResolveResponse:
+    """Approve the batch's pending rows, rejecting any vetoed ids."""
+    summary = await change_queue.approve_rows(db, rows, exclude_ids=body.exclude_ids)
+    await db.commit()
+    await change_queue.after_commit(db)
+    return summary
+
+
+@router.post("/batch/{batch_id}/reject", response_model=BatchResolveResponse)
+async def reject_batch(
+    rows: list[PendingChange] = Depends(owned_batch),
+    db: AsyncSession = Depends(get_async_db),
+) -> BatchResolveResponse:
+    summary = await change_queue.reject_rows(db, rows)
+    await db.commit()
+    return summary

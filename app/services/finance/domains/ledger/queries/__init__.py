@@ -145,6 +145,7 @@ from app.services.finance.domains.ledger.queries.transactions import (
     transaction_by_id,
     transactions_by_ids,
     transactions_page,
+    transactions_window_with_payees,
     uncategorized_page,
 )
 
@@ -252,6 +253,7 @@ __all__ = [
     "transactions",
     "transactions_by_ids",
     "transactions_page",
+    "transactions_window_with_payees",
     "uncategorized_catchall_ids",
     "uncategorized_page",
     "valuation_by_key",

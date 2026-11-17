@@ -121,15 +121,10 @@ class TestWhichDoorAnnounces:
     async def test_approving_announces(
         self, svc, async_db_session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from app.components.backend.api.finance import changes as endpoints
+        from app.components.backend.api import changes as endpoints
         from tests.services._finance_factories import seed_account
 
-        told: list[list[object]] = []
-
-        async def fake(db: object, rows: list[object]) -> None:
-            told.append(rows)
-
-        monkeypatch.setattr(endpoints, "announce", fake)
+        told = _told(monkeypatch)
         account = await seed_account(svc, name="Announcing")
         row = await svc.propose_change(
             "account.valuation",
@@ -138,11 +133,11 @@ class TestWhichDoorAnnounces:
                 "source": "manual",
                 "points": [{"as_of_date": "2026-09-01", "value": 100}],
             },
-            owner_user_id=1,
+            conversation_id="conv-1",
         )
         await async_db_session.commit()
 
-        await endpoints.approve_change(row.id, service=svc, owner_user_id=1)
+        await endpoints.approve_change(row=row, db=async_db_session)
 
         assert [one.id for one in told[0]] == [row.id]
 
@@ -150,16 +145,11 @@ class TestWhichDoorAnnounces:
     async def test_proposing_announces_nothing(
         self, svc, async_db_session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from app.components.backend.api.finance import changes as endpoints
-        from app.services.finance.schemas import ChangeProposal
+        from app.components.backend.api import changes as endpoints
+        from app.services.change_queue.schemas import ChangeProposal
         from tests.services._finance_factories import seed_account
 
-        told: list[list[object]] = []
-
-        async def fake(db: object, rows: list[object]) -> None:
-            told.append(rows)
-
-        monkeypatch.setattr(endpoints, "announce", fake)
+        told = _told(monkeypatch)
         account = await seed_account(svc, name="Quiet")
 
         await endpoints.propose_change(
@@ -170,12 +160,27 @@ class TestWhichDoorAnnounces:
                     "source": "manual",
                     "points": [{"as_of_date": "2026-09-01", "value": 100}],
                 },
+                conversation_id="conv-1",
             ),
-            service=svc,
-            owner_user_id=1,
+            db=async_db_session,
+            owner_user_id=None,
         )
+        await endpoints.change_queue.after_commit(async_db_session)
 
         assert told == []
+
+
+def _told(monkeypatch: pytest.MonkeyPatch) -> list[list[object]]:
+    """What the approval announcer was handed, one list per landing."""
+    from app.services.finance.domains.writes import announce as module
+
+    told: list[list[object]] = []
+
+    async def fake(rows: list[object], *, send: object) -> None:
+        told.append(rows)
+
+    monkeypatch.setattr(module, "announce_approval", fake)
+    return told
 
 
 class TestTheSenderDoesNotWaitOnItself:

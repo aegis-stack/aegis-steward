@@ -17,18 +17,18 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, field_validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.change_queue import ChangeDisplayRow
 
 
 async def awaiting_resolution(db: AsyncSession) -> set[int]:
     """Insights a pending card is deciding. A rule must not withdraw one
     out from under the person mid-decision: found live, when a rule fix
     retracted insight 1058 and approving its card answered "not found"."""
-    from app.services.finance.domains.writes.queue import list_changes
+    from app.services.change_queue import list_changes
 
     return {
         int(change.payload["insight_id"])
-        for change in await list_changes(db, status="pending")
+        for change in await list_changes(db, owner_user_id=None, status="pending")
         if change.change_type == "insight.resolve"
     }
 

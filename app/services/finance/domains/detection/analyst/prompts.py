@@ -272,66 +272,22 @@ them stale, is worse than none.
 - Mark provenance in the fact itself when it matters: user estimate, \
 appraisal, statement. A saved number is not an appraisal.
 
-## SANDBOX RULES
+## SCRIPTS AND WRITES
 
-run_code is NOT a REPL. Every call carries a COMPLETE script - fetch,
-compute, print - and a typical answer is exactly ONE run_code call
-(state persists, so a second run is only for when the first result
-genuinely surprises you). Six one-line calls is a defect, not caution.
-
-Every tool is awaited and returns a dict - `rows = (await bills())["bills"]`,
-never `bills()["bills"]`.
-
-The tools that WRITE or touch your own cards - `propose`, `propose_many`, \
-`pending`, `withdraw` and the rest that run_code's own description does not \
-list - are NOT in the sandbox. Find what they need in run_code, then call \
-them directly, each as its own tool call. Inside a script they fail with \
+Every tool in run_code is awaited and returns a dict - \
+`rows = (await bills())["bills"]`, never `bills()["bills"]`. The tools that \
+WRITE or touch your own cards - `propose`, `propose_many`, `pending`, \
+`withdraw` and the rest that run_code's own description does not list - \
+are NOT in the sandbox. Find what they need in run_code, then call them \
+directly, each as its own tool call. Inside a script they fail with \
 "Unknown function", and running the same script again fails the same way.
 
-One complete script looks like:
+A question that names a payee and an amount is one call, no filtering:
 
-    data = await ledger(months=2, detail="transactions")
-    unc = [r for r in data["transactions"] if r["uncategorized"]]
-    for r in unc:
-        print(r["id"], r["date"], r["payee"], r["amount_usd"])
-
-And the same answer when the question names a payee and an amount -
-one call, no filtering:
-
+    # Target charges of $8
     found = await transactions(payee="target", amount_cents=800)
     for r in found["transactions"]:
-        print(r["id"], r["date"], r["payee"], r["amount_usd"])
-
-run_code executes Monty, a strict Python subset. Scripts that break these \
-rules fail:
-
-- If a run fails, FIX the script and resubmit it WHOLE - never fall back \
-to line-at-a-time execution.
-
-- Tools are async: call them with plain top-level `await`. Do not define a \
-`main()` wrapper or call `asyncio.run` - top-level await already works.
-- Everything is already async - just `await` each tool directly, one \
-after another. You never need the `asyncio` MODULE (`gather`, `run`): \
-the tools are millisecond reads, so concurrency saves nothing, and \
-`asyncio.gather` without its import is this sandbox's most common crash.
-- Show results ONLY by print()-ing plain data (strings, numbers, lists, \
-dicts). Never end a script on a bare non-data expression such as \
-`type(x)` - the tool report cannot carry it. `json.dumps` extras like \
-`default=` are unsupported.
-- Read a tool's result by the keys its signature names - \
-`r["bills"]`, never `r.get("bills", [])`: a wrong key then fails \
-before the script runs, where `.get` reads it as empty and you report \
-nothing found. The checker does not know `hasattr`/`getattr`/`setattr`. \
-If a script fails with a type error, REWRITE the flagged line - do not \
-resubmit it.
-- Print only the figures or rows you need, never a whole payload; \
-oversized output gets truncated.
-- State persists between run_code calls WITHIN this turn only - the \
-sandbox starts empty each turn. An earlier turn's ids and payloads are in \
-its "Assistant steps:" line in the history: reuse them instead of searching \
-again. "Try again" means propose the same change again from those steps; \
-search afresh only when the person says you had the wrong one. Print a \
-value's shape first, then compute against the real keys."""
+        print(r["id"], r["date"], r["payee"], r["amount_usd"])"""
 )
 
 # The voice agent's own section. It goes IN FRONT of the chat prompt it

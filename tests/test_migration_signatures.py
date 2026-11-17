@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
+from typing import Any
 
 import pytest
 
@@ -38,45 +39,86 @@ def _revision_files() -> list[Path]:
     return [p for p in sorted(VERSIONS.glob("*.py")) if not p.name.startswith("__")]
 
 
-def test_every_migration_file_has_a_stamp_signature() -> None:
-    signatures = signatures_module.SERVICE_MIGRATION_SIGNATURES
-    missing = []
-    for path in sorted(VERSIONS.glob("*.py")):
-        match = re.match(r"\d+_(.+)", path.stem)
-        if match and match.group(1) not in signatures and not _carried_signature(path):
-            missing.append(path.name)
-    assert not missing, (
-        f"migrations without a stamp signature: {missing} - add an entry to "
-        "SERVICE_MIGRATION_SIGNATURES or declare aegis_stamp_signature"
+def _retired_tables() -> set[str]:
+    """Tables a later revision drops: what ``aegis remove-service`` retires.
+    The service's own revisions stay, so its signature is history then."""
+    return {
+        name
+        for p in _revision_files()
+        for name in re.findall(r"""drop_table\(\s*["']([^"']+)["']""", p.read_text())
+    }
+
+
+PROVABLE = ("create_table(", "add_column(", "create_foreign_key(", "INSERT INTO")
+
+
+def _has_something_to_prove(path: Path) -> bool:
+    """Whether the revision makes something whose existence proves it ran.
+
+    A created table, an added column, a new foreign key, an inserted row.
+    A revision that only drops or re-indexes leaves nothing to check for,
+    so the re-adoption hook has nothing to do with it either. Only
+    ``upgrade()`` counts: the downgrade of a revision that drops a removed
+    plugin's tables recreates them, and proves nothing about the upgrade.
+    """
+    source = path.read_text()
+    upgrade = next(
+        (
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name == "upgrade"
+        ),
+        None,
     )
+    body = ast.get_source_segment(source, upgrade) or "" if upgrade else source
+    return any(marker in body for marker in PROVABLE)
 
 
 def _carried_signature(path: Path) -> tuple[str, ...] | None:
+    """The signature a generated revision declares about itself."""
     for node in ast.parse(path.read_text()).body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "aegis_stamp_signature"
-            for target in node.targets
-        ):
-            return tuple(ast.literal_eval(node.value))
+        if isinstance(node, ast.Assign):
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id == "aegis_stamp_signature":
+                value = ast.literal_eval(node.value)
+                return tuple(value) if value is not None else None
     return None
 
 
-def test_generated_signature_takes_precedence_over_legacy_service_entry() -> None:
-    from types import SimpleNamespace
+def test_every_migration_file_has_a_stamp_signature() -> None:
+    """Either the revision declares its own, or the legacy table names it.
 
-    from app.components.backend.startup.migrations import _signature_for_revision
+    Revisions are derived from the models now, so a generated one carries
+    the signature of the object it creates. The table stays for revisions
+    written before that, which a long-lived project still has on disk.
+    """
+    signatures = signatures_module.SERVICE_MIGRATION_SIGNATURES
+    missing = [
+        path.name
+        for path in _revision_files()
+        if _has_something_to_prove(path)
+        and _carried_signature(path) is None
+        and (re.match(r"\d+_(.+)", path.stem) or [None, ""])[1] not in signatures
+    ]
+    assert not missing, (
+        f"migrations without a stamp signature: {missing} - a generated "
+        "revision declares `aegis_stamp_signature`; a hand-written one needs "
+        "an entry in SERVICE_MIGRATION_SIGNATURES naming the table or column "
+        "whose existence proves the migration ran"
+    )
 
-    revision = SimpleNamespace(
-        path="/tmp/038_ai.py",
-        module=SimpleNamespace(
-            aegis_stamp_signature=("column", "llm_usage", "duration_ms")
-        ),
-    )
-    assert _signature_for_revision(revision, {"ai": ("table", "llm_org")}) == (
-        "column",
-        "llm_usage",
-        "duration_ms",
-    )
+
+def test_a_carried_signature_names_something_the_revision_creates() -> None:
+    """A signature that points outside its own revision can never fire."""
+    for path in _revision_files():
+        signature = _carried_signature(path)
+        if signature is None:
+            continue
+        body = path.read_text()
+        name = signature[1].split(".")[-1]
+        assert f'"{name}"' in body or f"'{name}'" in body, (
+            f"{path.name} claims {signature!r}, but never mentions {name}"
+        )
 
 
 def test_signatures_name_real_model_objects() -> None:
@@ -93,13 +135,47 @@ def test_signatures_name_real_model_objects() -> None:
     tables = set(sqlmodel.SQLModel.metadata.tables)
     bare = {t.split(".")[-1] for t in tables}
     installed = set(_service_suffixes())
+    retired = _retired_tables()
     for service, sig in signatures_module.SERVICE_MIGRATION_SIGNATURES.items():
         if service not in installed:
             continue  # signature for a service this stack doesn't ship
         name = sig[1]
+        if name.split(".")[-1] in retired:
+            continue  # a removed service's: a later revision drops it
         assert name in tables or name in bare or name.split(".")[-1] in bare, (
             f"signature for '{service}' names '{name}', which no model declares"
         )
+
+
+def test_row_signature_checks_the_live_database(tmp_path: Path) -> None:
+    """``("row", table, where)``: the hook must replay a data-only revision
+    whose row is missing and stamp it when the row is there."""
+    already_applied = _hook().already_applied
+    import sqlalchemy as sa
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'rows.db'}")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text('CREATE TABLE "user" (id INTEGER PRIMARY KEY, email TEXT)')
+        )
+    signature = ("row", "user", "id = 0")
+    assert already_applied(sa.inspect(engine), signature) is False
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text("INSERT INTO \"user\" VALUES (0, 'standalone@finance.local')")
+        )
+    assert already_applied(sa.inspect(engine), signature) is True
+    # A table that does not exist is "not applied", never an exception.
+    assert already_applied(sa.inspect(engine), ("row", "nope", "id = 0")) is False
+    engine.dispose()
+
+
+def test_data_only_revisions_use_the_row_form() -> None:
+    """A data-only revision cannot be proven by a schema object."""
+    sig = signatures_module.SERVICE_MIGRATION_SIGNATURES.get("finance_auth_link")
+    if sig is None:
+        pytest.skip("finance_auth_link not in this stack")
+    assert sig[0] == "row" and sig[1] == "user" and "id = 0" in sig[2]
 
 
 @pytest.mark.skipif(
@@ -134,12 +210,74 @@ def test_the_startup_hook_can_read_a_carried_signature() -> None:
     )
 
 
-def _create(table: str) -> object:
-    import sqlalchemy as sa
+def _hook():  # type: ignore[no-untyped-def]
+    """Steward's adoption hook (``startup.migrations``), or a skip."""
+    pytest.importorskip("alembic", reason="no database component in this stack")
+    return pytest.importorskip("app.components.backend.startup.migrations")
 
+
+class TestSignatureMatching:
+    """Every signature form is decided from the live schema."""
+
+    def _inspector(self, tmp_path: Path):  # type: ignore[no-untyped-def]
+        import sqlalchemy as sa
+
+        engine = sa.create_engine(f"sqlite:///{tmp_path / 'forms.db'}")
+        with engine.begin() as conn:
+            conn.execute(sa.text("CREATE TABLE org (id INTEGER PRIMARY KEY)"))
+            conn.execute(
+                sa.text(
+                    'CREATE TABLE "user" (id INTEGER PRIMARY KEY, '
+                    "org_id INTEGER REFERENCES org(id), locale TEXT)"
+                )
+            )
+        return sa.inspect(engine)
+
+    def test_table_form(self, tmp_path: Path) -> None:
+        inspector, applied = self._inspector(tmp_path), _hook().already_applied
+        assert applied(inspector, ("table", "public.user")) is True
+        assert applied(inspector, ("table", "public.absent")) is False
+
+    def test_column_form(self, tmp_path: Path) -> None:
+        inspector, applied = self._inspector(tmp_path), _hook().already_applied
+        assert applied(inspector, ("column", "public.user", "locale")) is True
+        assert applied(inspector, ("column", "public.user", "nope")) is False
+
+    def test_no_column_form(self, tmp_path: Path) -> None:
+        """A migration that drops a column: proven by the column's absence,
+        never by a table that is not there at all."""
+        inspector, applied = self._inspector(tmp_path), _hook().already_applied
+        assert applied(inspector, ("no_column", "public.user", "nope")) is True
+        assert applied(inspector, ("no_column", "public.user", "locale")) is False
+        assert applied(inspector, ("no_column", "absent", "locale")) is False
+
+    def test_no_table_form(self, tmp_path: Path) -> None:
+        """A migration that folds a table into another: proven by the old
+        one's absence beside the one it went into, never by both absent."""
+        inspector, applied = self._inspector(tmp_path), _hook().already_applied
+        assert applied(inspector, ("no_table", "public.absent", "public.user"))
+        assert applied(inspector, ("no_table", "org", "user")) is False
+        assert applied(inspector, ("no_table", "absent", "also_absent")) is False
+
+    def test_foreign_key_form(self, tmp_path: Path) -> None:
+        inspector, applied = self._inspector(tmp_path), _hook().already_applied
+        assert applied(inspector, ("foreign_key", "user", "org_id")) is True
+        assert applied(inspector, ("foreign_key", "user", "locale")) is False
+
+
+def _create(table: str) -> object:
+    # alembic and sqlalchemy never share an import block: ruff counts alembic
+    # as first-party only where an alembic/ folder exists, so a shared block
+    # sorts one way before a database is added and the other way after.
     from alembic.operations import ops
 
-    return ops.CreateTableOp(table, [sa.Column("id", sa.Integer, primary_key=True)])
+    return ops.CreateTableOp(table, [_id_column()])
+
+
+def _id_column() -> Any:
+    import sqlalchemy as sa
+
+    return sa.Column("id", sa.Integer, primary_key=True)
 
 
 @pytest.fixture
@@ -165,4 +303,22 @@ def test_a_revision_with_no_table_of_its_own_still_signs(gen: object) -> None:
     assert gen._signature([_create("apscheduler_jobs")], own_tables=set()) == (
         "table",
         "apscheduler_jobs",
+    )
+
+
+def test_generated_signature_takes_precedence_over_legacy_service_entry() -> None:
+    from types import SimpleNamespace
+
+    from app.components.backend.startup.migrations import _signature_for_revision
+
+    revision = SimpleNamespace(
+        path="/tmp/038_ai.py",
+        module=SimpleNamespace(
+            aegis_stamp_signature=("column", "llm_usage", "duration_ms")
+        ),
+    )
+    assert _signature_for_revision(revision, {"ai": ("table", "llm_org")}) == (
+        "column",
+        "llm_usage",
+        "duration_ms",
     )

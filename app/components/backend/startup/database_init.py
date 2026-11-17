@@ -12,7 +12,11 @@ from app.components.backend.startup.schema_recovery import (
     _existing_tables_by_schema,
 )
 from app.core.log import logger
-from app.services.scheduler.models import JobExecution  # noqa: F401
+from app.core.model_registry import import_all_models
+
+# Every model on the metadata: a table's foreign key cannot resolve without
+# the table it points at, and the schema checks read every one.
+import_all_models()
 
 
 def schema_gaps(engine: Any = None, metadata: Any = None) -> dict[str, set[str]]:
@@ -76,7 +80,7 @@ def _check_schema_mismatch() -> None:
             logger.error("=" * 60)
 
     except Exception as e:
-        logger.debug(f"Schema mismatch check skipped: {e}")
+        logger.warning(f"Schema mismatch check skipped: {e}")
 
 
 def _build_schema() -> None:
@@ -204,7 +208,7 @@ async def startup_database_init() -> None:
         except Exception as e:
             logger.warning(f"Finance seed failed: {e}")
 
-        # Seed the agent registry: agents, memory modules, and one tool row
+        # Seed the agent registry: agents, context modules, and one tool row
         # per registered tool. Tool rows are what grants attach to by name,
         # so an unseeded registry leaves every agent without its tools.
         try:

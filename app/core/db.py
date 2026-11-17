@@ -231,6 +231,11 @@ db_activity.watch(engine)
 db_activity.watch(async_engine.sync_engine)
 
 
+# Long-held transactions and lock failures, for the Database pages.
+db_activity.watch(engine)
+db_activity.watch(async_engine.sync_engine)
+
+
 # Configure session factory with SQLModel Session (sync)
 SessionLocal = sessionmaker(
     class_=Session, bind=engine, autoflush=False, autocommit=False
@@ -303,6 +308,33 @@ async def get_async_session(read_only: bool = False) -> AsyncGenerator[AsyncSess
         except Exception:
             await session.rollback()
             raise
+        await _purge_released(session)
+
+
+async def _purge_released(session: AsyncSession) -> None:
+    """Delete what the transaction just committed released
+    (``app.components.database.stored``): every caller's session ends here,
+    so none has to remember to. A purge that fails leaves the objects
+    marked, and the next one deletes them."""
+    if not session.info.pop("released", False):
+        return
+    from app.components.database.stored import purge
+
+    try:
+        await purge(session)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.exception("The storage purge failed; the next one will retry")
+
+
+def insert(session: AsyncSession, model: Any) -> Any:
+    """The INSERT for ``session``'s database that can take an ``ON CONFLICT``
+    (upsert, or do nothing): each dialect spells it under its own ``insert``."""
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    name = session.sync_session.get_bind().dialect.name
+    return (postgresql if name == "postgresql" else sqlite).insert(model)
 
 
 async def release_lock(session: AsyncSession) -> None:
@@ -354,10 +386,14 @@ def init_database() -> Path:
         # (2026-09-18) - three times through this one door.
         #
         # A project generated WITHOUT migrations has nothing else to
-        # build its tables, so that case still creates them.
+        # build its tables, so that case still creates them: every one,
+        # not just those this process imported, since a table's foreign
+        # key cannot resolve without the table it points at.
         from app.components.backend.startup.migrations import versions_exist
+        from app.core.model_registry import import_all_models
 
         if not versions_exist():
+            import_all_models()
             SQLModel.metadata.create_all(engine)
 
         if db_path.exists():
@@ -405,3 +441,4 @@ async def get_async_db() -> AsyncGenerator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
+        await _purge_released(session)

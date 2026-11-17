@@ -74,6 +74,7 @@ class TestItWaits:
             not in (await DocumentService(db).get(document_id)).meta_data
         )
 
+    @pytest.mark.real_clock  # seeds its age from the real clock
     @pytest.mark.asyncio
     @pytest.mark.queryspy(threshold=3)  # looked for twice
     async def test_after_the_wait_it_asks_once_and_stops(

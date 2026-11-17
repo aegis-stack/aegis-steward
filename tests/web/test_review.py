@@ -57,22 +57,39 @@ class TestNav:
 
 
 class TestApprovals:
-    def test_single_card_then_approve(self, client: TestClient, review: Review) -> None:
-        page = client.get("/review").text
-        card = one(page, f"#change-{review.change}")
-        assert "Categorize a transaction" in text(one(card, "h3"))
-        one(card, "[data-subject]")  # the subject line, then the facts
-        approve = one(card, f'[hx-post="/review/changes/{review.change}/approve"]')
-        assert approve.get("hx-target") == f"#change-{review.change}"
-        assert approve.get("hx-swap") == "outerHTML"
+    """The queue's own cards (``partials/changes``, whose deciding
+    ``test_change_cards`` covers); here, what Review adds around them."""
 
-        response = client.post(f"/review/changes/{review.change}/approve")
-        primary, siblings = oob(response.text)
-        assert primary == []
-        ids = {s.get("id") for s in siblings}
-        assert {"pending-changes", "review-nav"} <= ids
-        assert "Approved" in triggers(response)["toast"]["text"]
-        assert nav(client.get("/review").text)["Approvals"] == "Approvals (2)"
+    def test_the_page_draws_the_queues_cards(
+        self, client: TestClient, review: Review
+    ) -> None:
+        page = client.get("/review").text
+        card = one(page, f"#approvals #change-{review.change}[data-change]")
+        assert "Categorize a transaction" in text(card)
+        one(card, "[data-subject]")  # the subject line, then the facts
+        one(card, f'[hx-post="/partials/changes/{review.change}/approve"]')
+        batch = one(page, f"#approvals #batch-{review.batch}[data-change-batch]")
+        assert len(select(batch, 'input[name="exclude_ids"]')) == 2
+
+    def test_a_decision_anywhere_redraws_the_counts(
+        self, client: TestClient, review: Review
+    ) -> None:
+        """Decided anywhere on the page (the chat drawer over a Review tab),
+        the sub-nav fetches its counts again."""
+        redraws = one(
+            client.get("/review/uncategorized").text,
+            '[data-redraws][hx-select="#review-nav"]',
+        )
+        assert redraws.get("hx-get") == "/review/nav?tab=uncategorized"
+        assert "change:resolved" in redraws.get("hx-trigger")
+
+    def test_an_approval_lands_and_moves_the_counts(
+        self, client: TestClient, review: Review
+    ) -> None:
+        client.post(f"/partials/changes/{review.change}/approve")
+
+        counts = client.get("/review/nav?tab=approvals").text
+        assert nav(counts)["Approvals"] == "Approvals (2)"
         assert "Food:Groceries" in text(
             one(
                 client.get(REGISTER).text,
@@ -80,34 +97,8 @@ class TestApprovals:
             )
         )
 
-    def test_reject(self, client: TestClient, review: Review) -> None:
-        response = client.post(f"/review/changes/{review.change}/reject")
-        assert oob(response.text)[0] == []
-        none(client.get("/review").text, f"#change-{review.change}")
-
-    def test_batch_card_with_vetoes(self, client: TestClient, review: Review) -> None:
-        page = client.get("/review").text
-        card = one(page, f"#batch-{review.batch}")
-        rows = select(card, 'input[name="exclude_ids"]')
-        assert len(rows) == 2 and all(r.get("checked") is None for r in rows)
-        approve = one(card, f'[hx-post="/review/changes/batch/{review.batch}/approve"]')
-        assert approve.get("hx-include") == f"#batch-{review.batch}"
-
-        response = client.post(
-            f"/review/changes/batch/{review.batch}/approve",
-            data={"exclude_ids": [rows[1].get("value")]},
-        )
-        assert oob(response.text)[0] == []
-        toast = triggers(response)["toast"]["text"]
-        assert "1 approved" in toast and "1 rejected" in toast
-        none(client.get("/review").text, f"#batch-{review.batch}")
-
-    def test_reject_batch(self, client: TestClient, review: Review) -> None:
-        response = client.post(f"/review/changes/batch/{review.batch}/reject")
-        assert "2 rejected" in triggers(response)["toast"]["text"]
-
     def test_empty_queue_says_so(self, client: TestClient, ledger: Ledger) -> None:
-        assert "Nothing waiting" in text(one(client.get("/review").text, "#approvals"))
+        one(client.get("/review").text, "#approvals [data-empty]")
 
 
 class TestEdit:
@@ -137,13 +128,13 @@ class TestEdit:
     ) -> None:
         page = client.get("/review").text
         opener = one(page, f"#change-{offered} [data-edit]")
-        assert opener.get("hx-get") == f"/review/changes/{offered}/edit"
+        assert opener.get("hx-get") == f"/partials/changes/{offered}/edit"
         none(page, f"#change-{review.change} [data-edit]")
 
     def test_the_dialog_is_prefilled_from_the_card(
         self, client: TestClient, offered: int
     ) -> None:
-        dialog = client.get(f"/review/changes/{offered}/edit").text
+        dialog = client.get(f"/partials/changes/{offered}/edit").text
         assert one(dialog, 'input[name="name"]').get("value") == "Optum"
         assert (
             one(dialog, 'input[name="email"]').get("value") == "of-service@of.optum.com"
@@ -151,13 +142,13 @@ class TestEdit:
         kind = one(dialog, 'select[name="kind"] option[selected]')
         assert kind.get("value") == "organization"
         form = one(dialog, "form")
-        assert form.get("hx-post") == f"/review/changes/{offered}/edit"
+        assert form.get("hx-post") == f"/partials/changes/{offered}/edit"
 
     def test_saving_puts_your_words_on_the_card(
         self, client: TestClient, offered: int
     ) -> None:
         answer = client.post(
-            f"/review/changes/{offered}/edit",
+            f"/partials/changes/{offered}/edit",
             data={
                 "name": "Optum Financial",
                 "kind": "organization",
@@ -174,7 +165,8 @@ class TestEdit:
         self, client: TestClient, offered: int
     ) -> None:
         answer = client.post(
-            f"/review/changes/{offered}/edit", data={"name": "", "kind": "organization"}
+            f"/partials/changes/{offered}/edit",
+            data={"name": "", "kind": "organization"},
         )
         assert answer.status_code == 422
         one(answer.text, "[role=alert]")

@@ -170,7 +170,7 @@ class TestWhatWasProposed:
         """A pending change aimed at the copy names an account a merge
         removes. Applying it to yours could rename or reassign the wrong
         account, so it is expired, saying why (#389); yours stay."""
-        from app.services.finance.domains.writes import queue
+        from app.services import change_queue as queue
 
         yours, copy = await _doubled(async_db_session)
         aimed = await queue.propose(

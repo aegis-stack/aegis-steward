@@ -122,8 +122,10 @@ def oob(markup: str) -> tuple[list[HtmlElement], list[HtmlElement]]:
     out-of-band siblings (those carrying ``hx-swap-oob``), so a test asserts
     the swapped row and the moved counters separately."""
     wrapper = html.fromstring(f"<div>{markup}</div>")
-    primary = [el for el in wrapper if el.get("hx-swap-oob") is None]
-    siblings = [el for el in wrapper if el.get("hx-swap-oob") is not None]
+    # A row out of band travels in a <template> htmx unwraps (table_row).
+    top = [child for el in wrapper for child in (el if el.tag == "template" else [el])]
+    primary = [el for el in top if el.get("hx-swap-oob") is None]
+    siblings = [el for el in top if el.get("hx-swap-oob") is not None]
     return primary, siblings
 
 
@@ -135,12 +137,13 @@ def row_text(markup: Markup, rows: str, needle: str) -> str:
 
 def table_rows(markup: Markup, table: str = "table") -> list[dict[str, HtmlElement]]:
     """Each body row of ``table`` as ``{header label: cell}``, so tests read
-    cells by name instead of counting columns."""
+    cells by name instead of counting columns; a row's opened detail
+    (``data_table``'s ``detail``) is not a row."""
     root = one(markup, table)
     headers = [text(th) for th in select(root, "thead th")]
     return [
         dict(zip(headers, tr.getchildren(), strict=False))
-        for tr in select(root, "tbody tr")
+        for tr in select(root, "tbody tr:not([data-detail])")
     ]
 
 

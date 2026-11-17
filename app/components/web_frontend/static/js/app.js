@@ -1,8 +1,8 @@
 /* htmx lifecycle hooks and the toast component.
 
-   Fragments carry no inline scripts (plan decision 7), so nothing here
-   re-executes swapped <script> tags. Behaviour that needs JS is registered
-   once, on this file's load, and keyed off DOM events. */
+   Fragments carry no inline scripts, so nothing here re-executes swapped
+   <script> tags. Behaviour that needs JS is registered once, on this
+   file's load, and keyed off DOM events. */
 
 // The browser's time zone, for the pages that show times of day (the
 // meeting calendar): the server reads it from this cookie (viewer_zone()).
@@ -16,6 +16,11 @@ document.addEventListener('alpine:init', () => {
     items: [],
     _seq: 0,
     push(detail) {
+      // Shown again on top: the top layer stacks by order of showing.
+      if (this.$root.showPopover) {
+        if (this.$root.matches(':popover-open')) this.$root.hidePopover();
+        this.$root.showPopover();
+      }
       const id = ++this._seq;
       const tone = detail.tone || 'ok';
       this.items.push({ id, text: detail.text, tone });
@@ -52,6 +57,78 @@ document.addEventListener('alpine:init', () => {
     openIlliana() {
       this.illiana = true;
       if (!this.$refs.illianaBody.children.length) htmx.ajax('GET', drawerUrl, { target: '#illiana-body', swap: 'innerHTML' });
+    },
+  }));
+});
+
+// A form in steps (macros/form.html ``wizard``): one step shown at a
+// time, Next only once its fields are valid, and any step already reached
+// a click away. ``$bytes`` says a size for people, as charts and the
+// server do (charts.js, loaded after this file, by the time it is asked);
+// ``$files`` says how many files and how big ("" for none), of a list
+// picked or (``$tally``) of a count and a size.
+function tally(n, bytes) {
+  return n ? `${n} file${n === 1 ? '' : 's'} · ${formatValue(bytes, 'bytes')}` : '';
+}
+document.addEventListener('alpine:init', () => {
+  Alpine.magic('bytes', () => (n) => formatValue(n, 'bytes'));
+  Alpine.magic('tally', () => tally);
+  Alpine.magic('files', () => (files) => tally(files.length, [...files].reduce((t, f) => t + f.size, 0)));
+  Alpine.data('wizard', (count) => ({
+    step: 0,
+    reached: 0,
+    count,
+    done(i) {
+      return i < this.reached && i !== this.step;
+    },
+    valid() {
+      const here = this.$root.querySelector(`[data-wizard-step="${this.step}"]`);
+      return [...here.querySelectorAll('input, select, textarea')].every((f) => f.reportValidity());
+    },
+    go(i) {
+      if (i <= this.reached) this.step = i;
+    },
+    next() {
+      if (!this.valid()) return;
+      this.step = Math.min(this.step + 1, this.count - 1);
+      this.reached = Math.max(this.reached, this.step);
+    },
+    back() {
+      this.step = Math.max(this.step - 1, 0);
+    },
+    // Enter in a field is Next, not a submit that skips the steps after
+    // it (and their checks); on the last step it submits as ever.
+    enter(event) {
+      if (event.target.tagName !== 'INPUT' || this.step === this.count - 1) return;
+      event.preventDefault();
+      this.next();
+    },
+  }));
+  // A file picker that keeps what was picked before (macros/form.html
+  // ``file_button`` with ``submit=False``): a second pick adds to the
+  // first (one file where it takes one), each listed with its size and
+  // removable. The input's own files are kept to the list, so the form
+  // posts what it shows; a removal says so with a ``change``.
+  Alpine.data('filePicker', (multiple) => ({
+    files: [],
+    keep(files) {
+      const kept = new DataTransfer();
+      for (const f of files) kept.items.add(f);
+      this.$refs.input.files = kept.files;
+      this.files = [...kept.files];
+    },
+    add() {
+      const picked = [...this.$refs.input.files];
+      const before = multiple ? this.files : [];
+      const fresh = picked.filter((f) => !before.some((b) => b.name === f.name && b.size === f.size));
+      this.keep([...before, ...fresh]);
+    },
+    remove(i) {
+      this.keep(this.files.filter((_, at) => at !== i));
+      this.$refs.input.dispatchEvent(new Event('change', { bubbles: true }));
+    },
+    get said() {
+      return this.$files(this.files) || 'Nothing chosen';
     },
   }));
 });
@@ -96,49 +173,17 @@ function placeDropdown(details) {
 document.addEventListener('toggle', (event) => {
   if (event.target.matches?.('details[data-dropdown]')) placeDropdown(event.target);
 }, true);
-// A click anywhere else closes an open dropdown, and so does picking one
-// of its items; a panel's controls (the account filter) leave it open.
+// An open dropdown closes on a click off it, or on one of its entries (so
+// a dialog an entry opens is never under it). One listener for them all:
+// a table can have a menu a row.
+function closesDropdown(details, target) {
+  return !details.contains(target) || Boolean(target.closest('[role="menu"] a, [role="menu"] button'));
+}
 document.addEventListener('click', (event) => {
-  for (const details of document.querySelectorAll('details[data-dropdown][open]')) {
-    if (!details.contains(event.target) || event.target.closest('[role=menu] button')) details.removeAttribute('open');
-  }
+  document.querySelectorAll('details[data-dropdown][open]').forEach((details) => {
+    if (closesDropdown(details, event.target)) details.removeAttribute('open');
+  });
 });
-
-// Markup a script needs is cloned from a <template> in its partial, so
-// styling has one home (the template), never a JS string.
-function clone(id) {
-  return document.getElementById(id).content.firstElementChild.cloneNode(true);
-}
-
-// The chat surface's parts that both chat.js and voice.js reach: the
-// thread (streamed into, reloaded mid-call), the conversation it is, and
-// the composer's box.
-function chatThread() {
-  return document.getElementById('chat-thread');
-}
-function chatConversation() {
-  return document.getElementById('chat-conversation');
-}
-// The conversation's id, or null for a new one; and a new id kept.
-function conversationId() {
-  return chatConversation()?.value || null;
-}
-function setConversation(id) {
-  const field = chatConversation();
-  if (id && field) field.value = id;
-}
-function chatComposer() {
-  return document.getElementById('chat-composer');
-}
-function composerBox() {
-  return chatComposer()?.querySelector('textarea');
-}
-// Text put into a box Alpine owns through x-model: it never sees a
-// direct assignment, so the input event tells it.
-function setBoxText(box, text) {
-  box.value = text;
-  box.dispatchEvent(new Event('input', { bubbles: true }));
-}
 
 // A moment the server keeps in UTC, read in the viewer's own clock: the
 // time alone for today, the day with it otherwise (Settings > Changes).
@@ -154,6 +199,15 @@ document.body.addEventListener('htmx:load', (event) => {
   event.detail.elt.querySelectorAll?.('time[data-local]').forEach((el) => {
     el.textContent = localTime(el.dateTime);
   });
+});
+
+// An approval batch's "skip all" for a group of the same change ticks the
+// group's own rows (macros/changes.html): the form reads only their boxes,
+// so they stay the one record of what is skipped.
+document.addEventListener('change', (event) => {
+  const all = event.target.closest?.('[data-skip-group]');
+  if (!all) return;
+  all.closest('[data-change-group]').querySelectorAll('input[name=exclude_ids]').forEach((box) => { box.checked = all.checked; });
 });
 
 function toast(text, tone) {
@@ -185,11 +239,27 @@ function showCopied(button, on) {
   if (on) button.dataset.copied = 'true';
   else delete button.dataset.copied;
 }
+// A part of the page copied as it reads (``data-copy-from``, a selector):
+// each ``data-copy-line`` in it, its label then its words (``data-said``),
+// without the buttons among them. Read when pressed, so a page drawn again
+// every few seconds never carries its text twice.
+function pageText(selector) {
+  return [...document.querySelectorAll(`${selector} [data-copy-line]`)]
+    .map((line) => {
+      const said = line.querySelector('[data-said]').cloneNode(true);
+      for (const button of said.querySelectorAll('button')) button.remove();
+      return `${line.dataset.copyLine}: ${said.textContent.trim()}\n`;
+    })
+    .join('');
+}
 document.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-copy]');
-  if (!button || !button.dataset.copy) return;
+  const button = event.target.closest('[data-copy], [data-copy-from]');
+  if (!button) return;
+  const { copy, copyFrom } = button.dataset;
+  const text = copyFrom ? pageText(copyFrom) : copy;
+  if (!text) return;
   const ticks = button.querySelector('[data-copy-done]');
-  copyText(button.dataset.copy).then(
+  copyText(text).then(
     () => {
       if (!ticks) return toast('Copied to clipboard', 'ok');
       showCopied(button, true);
@@ -237,28 +307,63 @@ function restoreFolds(root) {
     if (fold.dataset.fold in folds) fold.open = folds[fold.dataset.fold];
   }
 }
-// The tabs picked and the folds left, back on whatever htmx brings in;
-// again the moment new content is in, before the browser paints it: htmx
-// fires ``load`` only once the swap settles, a frame later, and a view
-// re-reading itself every few seconds would flash its first tab, and shut
-// the folds held open, each time.
+// A row a click opened (``opens_rows``) with a ``data-row`` key stays open
+// the same way, so a table that re-sends itself (Transactions over SSE,
+// every second) keeps the statement open. Read once the click has reached
+// the page, after ``opens_rows`` opened or shut it.
+const openRows = {};
+document.addEventListener('click', (event) => {
+  const row = event.target.closest?.('tr.log-row[data-row]');
+  if (row) openRows[row.dataset.row] = row.hasAttribute('data-open');
+});
+function restoreRows(root) {
+  for (const row of root.querySelectorAll('tr.log-row[data-row]')) {
+    if (openRows[row.dataset.row]) row.setAttribute('data-open', '');
+  }
+}
+// The tabs picked, the folds left and the rows opened, back on whatever
+// htmx brings in; again the moment new content is in, before the browser
+// paints it: htmx fires ``load`` only once the swap settles, a frame later,
+// and a view re-reading itself every few seconds would flash its first
+// tab, and shut the folds held open, each time.
 function restoreView(root) {
   if (!root?.querySelectorAll) return;
   restoreTabs(root);
   restoreFolds(root);
+  restoreRows(root);
 }
 document.body.addEventListener('htmx:load', (event) => restoreView(event.detail.elt));
 document.body.addEventListener('htmx:afterSwap', () => restoreView(document.body));
-// Something in a hidden panel is shown before it is reached: a note's
-// line in the transcript, a ``data-scroll-to`` target, a search hit.
+// Something in a hidden panel or a shut fold is shown before it is
+// reached: a note's line in the transcript, a ``data-scroll-to`` target, a
+// search hit, a fold's contents linked to. Whether it was hidden.
 function revealTab(target) {
+  let hidden = false;
   const panel = target?.closest('[data-tab-panel]');
-  if (panel?.hidden) showTab(panel.parentElement, panel.dataset.tabPanel);
+  if (panel?.hidden) {
+    showTab(panel.parentElement, panel.dataset.tabPanel);
+    hidden = true;
+  }
+  for (let fold = target?.closest('details'); fold; fold = fold.parentElement.closest('details')) {
+    hidden ||= !fold.open;
+    fold.open = true;
+  }
+  return hidden;
 }
+const hashed = (hash) => document.getElementById(hash.slice(1));
+// A link is followed after its click, so the browser scrolls to what the
+// click revealed; an address arrived at (a load, back, a typed hash) was
+// scrolled to while it was still hidden, so it is scrolled to again.
 document.addEventListener('click', (event) => {
   const link = event.target.closest('a[href^="#"]');
-  if (link && link.hash.length > 1) revealTab(document.getElementById(link.hash.slice(1)));
+  if (link) revealTab(hashed(link.hash));
 });
+function revealHash() {
+  const target = hashed(window.location.hash);
+  if (revealTab(target)) target.scrollIntoView();
+}
+window.addEventListener('hashchange', revealHash);
+revealHash();
 
 // Any ``data-scroll-to`` button brings the element its selector names into
 // view (a list's first or last row), scrolling only what it must.
@@ -270,62 +375,11 @@ document.addEventListener('click', (event) => {
   target?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 });
 
-// Server and network failures never swap (see the htmx-config
-// responseHandling rules in base.html); they surface here as one error
-// toast instead of a silently unchanged page.
-document.body.addEventListener('htmx:responseError', (event) => {
-  if (event.detail.elt.dataset.apiDone !== undefined) return; // told below
-  toast(`Request failed (${event.detail.xhr.status})`, 'error');
-});
-
-// A 422 swaps for the form it re-renders (base.html). One that is not HTML
-// (a service's refusal, FastAPI's own validation) would swap its JSON in
-// and blank its target: it is the error toast instead.
-document.body.addEventListener('htmx:beforeSwap', (event) => {
-  const { xhr, elt } = event.detail;
-  const type = xhr.getResponseHeader('Content-Type') || '';
-  if (xhr.status !== 422 || type.startsWith('text/html')) return;
-  event.detail.shouldSwap = false;
-  if (elt.dataset.apiDone === undefined) toast(apiDetail(xhr), 'error'); // told below
-});
-
-// A button that calls the JSON API directly (the Overseer's Authentication
-// actions) says what it did in `data-api-done`. The API answers with JSON,
-// not HTML, so nothing swaps: on success the dialog closes, the toast
-// shows, and the page's main area is re-requested to show the change; on
-// failure the API's own `detail` is the toast.
-document.body.addEventListener('htmx:afterRequest', (event) => {
-  const done = event.detail.elt.dataset.apiDone;
-  if (done === undefined) return;
-  if (!event.detail.successful) {
-    toast(apiDetail(event.detail.xhr), 'error');
-    return;
-  }
-  document.body.dispatchEvent(new Event('dialog:close'));
-  toast(done, 'ok');
-  // The whole URL: a page's state (a filter, the open folder) lives in
-  // its query string.
-  htmx.ajax('GET', window.location.pathname + window.location.search, {
-    target: '#overseer-main', select: '#overseer-main', swap: 'outerHTML',
-  });
-});
-
-function apiDetail(xhr) {
-  try {
-    const detail = JSON.parse(xhr.responseText).detail;
-    if (typeof detail === 'string') return detail;
-  } catch (_) { /* not JSON */ }
-  return `Request failed (${xhr.status})`;
-}
-document.body.addEventListener('htmx:sendError', () => {
-  toast('Network error. Check the connection and try again.', 'error');
-});
-
-// Keep a sidebar's aria-current in step with the URL. The server sets it
-// on a full load; htmx swaps only what is right of the sidebar, so after a
-// pushed URL (and on back/forward) the mark moves to the link whose page
-// holds the address: the longest such link, so a home link marks only
-// the home page (the server's rule, ``nav_item``).
+// A sidebar (the app's, the Overseer's) is never swapped (a link replaces
+// only what is right of it), so it keeps its scroll; its current mark
+// moves here instead, after a pushed URL and on back/forward, to the link
+// whose page holds the address: the longest such link, so a home link
+// marks only the home page (the server's rule, ``nav_item``).
 function markCurrent(links, path) {
   const holds = (href) => path === href || path.startsWith(href + '/');
   const best = [...links].filter((link) => holds(link.getAttribute('href')))
@@ -342,8 +396,19 @@ function markCurrentSection() {
   // Overseer > Code swaps only its file: the tree's link is the address.
   markCurrent(document.querySelectorAll('[data-code-tree] a[href]'), path + window.location.search);
 }
-document.body.addEventListener('htmx:pushedIntoHistory', markCurrentSection);
 window.addEventListener('popstate', markCurrentSection);
+// The window keeps the last page's scroll too, so a new page (a new path)
+// opens at its top: a pager, a filter or a chart's window changes only the
+// query and keeps its place, as does an address naming a place on the page.
+let leftPath = null;
+document.body.addEventListener('htmx:beforeHistorySave', () => {
+  leftPath = window.location.pathname;
+});
+document.body.addEventListener('htmx:pushedIntoHistory', () => {
+  if (leftPath !== window.location.pathname && !window.location.hash) window.scrollTo(0, 0);
+  revealHash();
+  markCurrentSection();
+});
 
 // Cmd-P (Ctrl-P) on Overseer > Code jumps to a file by name, not print.
 document.addEventListener('keydown', (event) => {
@@ -389,18 +454,73 @@ document.addEventListener('click', (event) => {
   });
 });
 
-// The one modal (pattern 4). Any swap into #dialog-body opens the native
-// <dialog>, as does a script that fills it itself (chat's image viewer);
-// closing it clears the body (see the dialog macro).
-function openDialog() {
-  const dialog = document.getElementById('dialog');
-  if (dialog && !dialog.open) dialog.showModal();
+// Server and network failures never swap (see the htmx-config
+// responseHandling rules in base.html); they surface here as one error
+// toast instead of a silently unchanged page.
+document.body.addEventListener('htmx:responseError', (event) => {
+  if (event.detail.elt.dataset.apiDone !== undefined) return; // told below
+  // A drawer for an item no longer there (deleted from that very drawer,
+  // or a stale link): it closes, and its parameter leaves the address.
+  if (event.detail.target?.id === 'drawer-body' && event.detail.xhr.status === 404) {
+    document.getElementById('drawer')?.close();
+    return;
+  }
+  toast(`Request failed (${event.detail.xhr.status})`, 'error');
+});
+
+// A 422 swaps for the form it re-renders (base.html). One that is not HTML
+// (a service's refusal, FastAPI's own validation) would swap its JSON in
+// and blank its target: it is the error toast instead.
+document.body.addEventListener('htmx:beforeSwap', (event) => {
+  const { xhr, elt } = event.detail;
+  const type = xhr.getResponseHeader('Content-Type') || '';
+  if (xhr.status !== 422 || type.startsWith('text/html')) return;
+  event.detail.shouldSwap = false;
+  if (elt.dataset.apiDone === undefined) toast(apiDetail(xhr), 'error'); // told below
+});
+
+// A button that calls the JSON API directly (the Overseer's Authentication
+// actions) says what it did in `data-api-done`. The API answers with JSON,
+// not HTML, so nothing swaps: on success the dialog closes, the toast
+// shows, and the page's main area is re-requested to show the change; on
+// failure the API's own `detail` is the toast.
+document.body.addEventListener('htmx:afterRequest', (event) => {
+  const done = event.detail.elt.dataset.apiDone;
+  if (done === undefined) return;
+  if (!event.detail.successful) {
+    toast(apiDetail(event.detail.xhr), 'error');
+    return;
+  }
+  document.body.dispatchEvent(new Event('dialog:close'));
+  toast(done, 'ok');
+  // The whole URL: a page's state (a filter, the open folder) lives in
+  // its query string.
+  htmx.ajax('GET', window.location.pathname + window.location.search, {
+    target: '#overseer-main', select: '#overseer-main', swap: 'outerHTML',
+  });
+});
+
+function apiDetail(xhr) {
+  try {
+    const detail = JSON.parse(xhr.responseText).detail;
+    if (typeof detail === 'string') return detail;
+  } catch (_) { /* not JSON */ }
+  return `Request failed (${xhr.status})`;
 }
+const NETWORK_ERROR = 'Network error. Check the connection and try again.';
+document.body.addEventListener('htmx:sendError', () => toast(NETWORK_ERROR, 'error'));
+
+// The one modal. Any swap into #dialog-body opens the native <dialog>, as
+// does a script that fills it itself; closing it clears the body (below,
+// and the dialog macro in macros/layout.html).
 // A swap into #drawer-body (``hx_drawer``) opens the side drawer the same way.
 document.body.addEventListener('htmx:afterSwap', (event) => {
   // A live stream's swap (the SSE extension) carries no target.
   const id = event.detail.target?.id;
-  if (id === 'dialog-body') openDialog();
+  if (id === 'dialog-body') {
+    const dialog = document.getElementById('dialog');
+    if (dialog && !dialog.open) dialog.showModal();
+  }
   if (id === 'drawer-body') {
     const drawer = document.getElementById('drawer');
     if (drawer && !drawer.open) drawer.show();
@@ -480,9 +600,9 @@ document.body.addEventListener('htmx:load', (event) => syncDrawer(event.detail.e
 // Light dismiss for the drawer and the modal. A click outside (the modal's
 // backdrop) or Escape closes it; a click on a row that opens another item
 // switches the drawer to it; typed-but-unsaved work holds either open with
-// a toast. An X or a Cancel (``data-dialog-close``) still closes on
-// purpose. A form inside is dirty once typed in, and clean again when it
-// saves or the panel reloads.
+// a toast. An X or a Cancel (``data-dialog-close``, the drawer's
+// ``data-drawer-close``) still closes on purpose. A form inside is dirty
+// once typed in, and clean again when it saves or the panel reloads.
 function outsideClick(panel, target) {
   if (!panel.open || panel.contains(target)) return 'ignore';
   if (target.closest('dialog[open]')) return 'ignore'; // the modal, over the drawer
@@ -505,7 +625,7 @@ function markClean(panel) {
 document.addEventListener('click', (event) => {
   const drawer = document.getElementById('drawer');
   const modal = document.getElementById('dialog');
-  const closer = event.target.closest('[data-dialog-close]');
+  const closer = event.target.closest('[data-dialog-close], [data-drawer-close]');
   if (closer) {
     const panel = closer.closest('dialog');
     markClean(panel);
@@ -533,6 +653,12 @@ document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape' || (modal && modal.open)) return; // its cancel, below
   if (drawer && drawer.open) dismiss(drawer);
 });
+// A modal's Escape arrives as ``cancel``; unsaved work cancels the cancel.
+document.addEventListener('cancel', (event) => {
+  if (event.target.id !== 'dialog' || !event.target.dataset.dirty) return;
+  event.preventDefault();
+  dismiss(event.target);
+}, true);
 document.addEventListener('input', (event) => {
   const panel = event.target.closest && event.target.closest('#drawer, #dialog');
   if (panel && event.target.closest('form')) panel.dataset.dirty = '1';
@@ -546,9 +672,8 @@ document.body.addEventListener('htmx:afterRequest', (event) => {
   markClean(form.closest('#drawer, #dialog'));
 });
 document.body.addEventListener('htmx:afterSwap', (event) => {
-  if (['drawer-body', 'dialog-body'].includes(event.detail.target?.id)) {
-    markClean(event.detail.target.closest('dialog'));
-  }
+  const id = event.detail.target?.id;
+  if (id === 'drawer-body' || id === 'dialog-body') markClean(event.detail.target.closest('dialog'));
 });
 // ``close`` does not bubble; the capture phase still sees it.
 document.addEventListener('close', (event) => {
@@ -603,6 +728,54 @@ for (const type of ['focusin', 'pointerdown']) {
     fillOptions(event.target.closest?.('select[data-options]'));
   });
 }
+
+// A home-screen iPhone app's status bar wears base.html's theme-color.
+// It is read from the page's own background, so the bar follows the
+// theme without a second copy of any theme's color.
+const paintStatusBar = () => {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = getComputedStyle(document.body).backgroundColor;
+};
+document.addEventListener('theme-changed', paintStatusBar);
+window.addEventListener('load', paintStatusBar);
+
+// Notifications on this device (Settings > Comms). The card hands over
+// the server's key and paths; the service worker shows the
+// notifications, and the subscription goes to the API the native shells
+// register through, again on every visit, so a device the server forgot
+// (it answered 410 once) comes back on its own.
+document.addEventListener('alpine:init', () => {
+  Alpine.data('pushDevice', () => ({
+    state: 'unsupported',
+    keep(subscription) {
+      // fetchAuth (auth.js) renews an expired session; it is absent when
+      // the stack runs without auth.
+      return (window.fetchAuth || fetch)(this.$root.dataset.devices, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(subscription),
+      });
+    },
+    async init() {
+      if (!('serviceWorker' in navigator && 'PushManager' in window)) return;
+      const registration = await navigator.serviceWorker.register(this.$root.dataset.worker);
+      const subscription = await registration.pushManager.getSubscription();
+      if (subscription) this.keep(subscription);
+      this.state = Notification.permission === 'denied' ? 'denied' : subscription ? 'on' : 'off';
+    },
+    async enable() {
+      if (await Notification.requestPermission() !== 'granted') { this.state = 'denied'; return; }
+      const key = atob(this.$root.dataset.key.replace(/-/g, '+').replace(/_/g, '/'));
+      const registration = await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: Uint8Array.from(key, (c) => c.charCodeAt(0)),
+      });
+      if ((await this.keep(subscription)).ok) this.state = 'on';
+      else toast('Notifications could not be turned on.', 'error');
+    },
+  }));
+});
 
 // The progress bar along the top (#page-progress in base.html): on while
 // htmx has a request out, while part of the page is still on its way
@@ -1087,57 +1260,12 @@ document.addEventListener('mouseout', (event) => {
   delete root.dataset.hover;
   applyMapFocus(root);
 });
-document.body.addEventListener('htmx:load', () => {
-  applyMapFocus(document.getElementById('overview-stack'));
-});
+// On the swap itself, before the frame paints: ``htmx:load`` waits out the
+// settle delay, so a live frame showed its dimmed nodes lit, then faded
+// them back. The page's first load still needs its own.
+const refocus = () => applyMapFocus(document.getElementById('overview-stack'));
+document.body.addEventListener('htmx:afterSwap', refocus);
+document.body.addEventListener('htmx:load', refocus);
 
 // For the node tests (tests/web/test_app_js.py).
-if (typeof module !== 'undefined') module.exports = { placeDropdown, revealTab, outsideClick, dismiss, navigates, markCurrent, spanned, inView, splitMatches, mapFocus, sourceColumn, localTime, pathFocus, kept, volumeOf };
-
-// A home-screen iPhone app's status bar wears base.html's theme-color.
-// It is read from the page's own background, so the bar follows the
-// theme without a second copy of any theme's color.
-const paintStatusBar = () => {
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = getComputedStyle(document.body).backgroundColor;
-};
-document.addEventListener('theme-changed', paintStatusBar);
-window.addEventListener('load', paintStatusBar);
-
-// Notifications on this device (Settings > Comms). The card hands over
-// the server's key and paths; the service worker shows the
-// notifications, and the subscription goes to the API the native shells
-// register through, again on every visit, so a device the server forgot
-// (it answered 410 once) comes back on its own.
-document.addEventListener('alpine:init', () => {
-  Alpine.data('pushDevice', () => ({
-    state: 'unsupported',
-    keep(subscription) {
-      // fetchAuth (auth.js) renews an expired session; it is absent when
-      // the stack runs without auth.
-      return (window.fetchAuth || fetch)(this.$root.dataset.devices, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(subscription),
-      });
-    },
-    async init() {
-      if (!('serviceWorker' in navigator && 'PushManager' in window)) return;
-      const registration = await navigator.serviceWorker.register(this.$root.dataset.worker);
-      const subscription = await registration.pushManager.getSubscription();
-      if (subscription) this.keep(subscription);
-      this.state = Notification.permission === 'denied' ? 'denied' : subscription ? 'on' : 'off';
-    },
-    async enable() {
-      if (await Notification.requestPermission() !== 'granted') { this.state = 'denied'; return; }
-      const key = atob(this.$root.dataset.key.replace(/-/g, '+').replace(/_/g, '/'));
-      const registration = await navigator.serviceWorker.ready;
-      const subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: Uint8Array.from(key, (c) => c.charCodeAt(0)),
-      });
-      if ((await this.keep(subscription)).ok) this.state = 'on';
-      else toast('Notifications could not be turned on.', 'error');
-    },
-  }));
-});
+if (typeof module !== 'undefined') module.exports = { revealTab, placeDropdown, closesDropdown, outsideClick, dismiss, navigates, markCurrent, spanned, inView, splitMatches, mapFocus, pathFocus, sourceColumn, kept, volumeOf, localTime };

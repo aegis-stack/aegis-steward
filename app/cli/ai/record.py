@@ -11,9 +11,10 @@ from app.cli.ai.shared import (
     app,
     console,
 )
+from app.cli.ai.speech import speaking_settings
+from app.core.formatting import format_clock
 from app.i18n import lazy_t, t
 
-from ...core.config import settings
 from ...core.log import suppress_logs
 
 
@@ -63,13 +64,13 @@ async def record(
         console.print(f"  [{theme.ACCENT}]apt install portaudio19-dev[/{theme.ACCENT}]")
         raise typer.Exit(1)
 
-    from app.services.ai.domains.voice import (
+    from app.services.ai.service import (
+        AIService,
         AudioFormat,
         AudioInput,
         SpeechRequest,
         get_tts_models,
     )
-    from app.services.ai.service import AIService
 
     async def run_record() -> None:
         try:
@@ -138,11 +139,8 @@ async def record(
                     dtype="float32",
                 ):
                     while not stop_event.is_set():
-                        elapsed = time.time() - start_time
-                        minutes = int(elapsed // 60)
-                        seconds = int(elapsed % 60)
+                        timer_str = format_clock(time.time() - start_time)
                         # Use regular print with \r for proper carriage return
-                        timer_str = f"{minutes:02d}:{seconds:02d}"
                         print(
                             f"\r  \033[91m●\033[0m Recording: {timer_str}",
                             end="",
@@ -204,7 +202,7 @@ async def record(
             )
 
             with suppress_logs():
-                ai_service = AIService(settings)
+                ai_service = AIService(await speaking_settings())
 
             # Transcribe
             from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -243,6 +241,7 @@ async def record(
                         message=result.text,
                         conversation_id=conversation_id,
                         user_id=user_id,
+                        admin=True,  # the operator's own shell, as MCP's stdio
                     )
 
                 console.print(f"[bold]{t('ai.response_label')}[/bold]")
@@ -304,7 +303,9 @@ async def record(
                     # Save and play audio
                     # Created, not just named: mktemp leaves a window for
                     # another process to take the path first.
-                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=f".{speech_result.format.value}", delete=False
+                    ) as f:
                         f.write(speech_result.audio)
                     speech_path = Path(f.name)
 

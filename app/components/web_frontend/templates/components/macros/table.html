@@ -11,7 +11,9 @@
    ``int``, ``status`` (the value is
    ``{"label", "tone"}``, rendered as a ``badge``), ``avatar`` (the
    row's ``icon_url`` brand mark before the value), ``code`` (monospace,
-   wrapping: a key, a rule, a command) or ``link`` (the value is
+   wrapping: a key, a rule, a command), ``file`` (the value is ``{"path",
+   "url"}``: the path as code after its type's icon, ``file_icon``, linked
+   when it has a ``url``) or ``link`` (the value is
    ``{"label", "url"}``; the link replaces ``target``, default
    ``#app-content``, the way a list's row opens its item; ``mark`` puts
    the row's mark before it); ``render`` is a macro taking the value (the row, with ``row``), for
@@ -29,7 +31,8 @@
    can swap one row back; a ``{% call(row) data_table(...) %}`` block, or
    a macro passed as ``actions``, adds an actions column rendered per row.
    ``detail`` is a macro taking the row: each row then gets a toggle and a
-   hidden full-width row under it with that macro's output.
+   hidden full-width row under it with that macro's output, shown from
+   the start where the row says ``open``.
 
    Three parameters exist for the register, which is a table like any
    other until you look at a row: ``select`` adds the checkbox column and
@@ -45,20 +48,25 @@
    pull the table a further 1.25rem off the left of the page. #}
 {% from "components/macros/feedback.html" import empty_state %}
 {% from "components/macros/form.html" import control, action %}
+{% from "components/macros/icons.html" import file_icon %}
 {# A column that steps aside on a narrow screen: ``hide_below`` names
    the breakpoint it returns at. Looked up, never built - Tailwind only
    ships the classes it can read. #}
 {% set HIDE_BELOW = {"md": "hidden md:table-cell", "lg": "hidden lg:table-cell", "xl": "hidden xl:table-cell"} %}
 {% from "components/macros/layout.html" import avatar, badge, contact_link, doors, file_mark, mark %}
 
+{# A key, a rule, a path: monospace, wrapping anywhere so a long one
+   never pushes the columns after it out of view. #}
+{% macro _code(text) %}<code class="font-mono text-xs whitespace-normal [overflow-wrap:anywhere]">{{ text }}</code>{% endmacro %}
+
 {% macro _cell(row, col) -%}
-{%- set value = row[col.key] -%}
-{%- if value is undefined or value is none or value == "" -%}
+{%- set value = row[col.key] if row is mapping or col.key is number else row|attr(col.key) -%}
+{%- if value is not defined or value is none or value == "" -%}
 -
 {%- elif col.render -%}
 {{ col.render(row if col.row else value) }}
 {%- elif col.kind == "money" -%}
-{%- set currency = row.currency -%}
+{%- set currency = (row["currency"] if row is mapping and "currency" in row else row|attr("currency")) -%}
 {{ value|money(currency if currency is string else "USD", signed=col.signed) }}
 {%- elif col.kind == "status" -%}
 {{ badge(value.label, value.tone) }}
@@ -111,7 +119,9 @@
 {# Several places at once, each a door: where a document is filed. #}
 {{ doors(value, show=2) }}
 {%- elif col.kind == "code" -%}
-<code class="font-mono text-xs whitespace-normal break-words">{{ value }}</code>
+{{ _code(value) }}
+{%- elif col.kind == "file" -%}
+<span class="inline-flex items-start gap-2">{{ file_icon(value.path) }}{% if value.url %}<a href="{{ value.url }}" class="hover:text-aegis-teal">{{ _code(value.path) }}</a>{% else %}{{ _code(value.path) }}{% endif %}</span>
 {%- elif col.kind == "link" -%}
 {%- set link -%}{% if value.url %}<a href="{{ value.url }}" {{ hx_replace(value.url, col.target or "#app-content") }} class="text-aegis-text hover:text-aegis-teal">{{ value.label }}</a>{% else %}{{ value.label }}{% endif %}{%- endset -%}
 {%- if col.mark %}<span class="inline-flex items-center gap-2">{{ mark(row, value.label) }}{{ link }}</span>{% else %}{{ link }}{% endif -%}
@@ -127,7 +137,7 @@
 
 {# The text colour of one cell: signed money reads by sign. #}
 {% macro _tone(row, col) -%}
-{%- set value = row[col.key] -%}
+{%- set value = row[col.key] if row is mapping or col.key is number else row|attr(col.key) -%}
 {%- if col.kind == "money" and (col.signed or col.toned) and value is number and value != 0 -%}
 {{ "text-aegis-teal" if value > 0 else "text-error" }}
 {%- else -%}
@@ -176,6 +186,12 @@ text-aegis-text
    (a call block's ``caller``) rendering the trailing actions cell;
    ``expandable`` leads with the toggle of its ``detail`` row. #}
 {% macro table_row(columns, row, id=None, oob=False, actions=None, expandable=False) %}
+{# A row swapped out of band travels wrapped: a bare <tr> at the top
+   of a response bound for anything but a table is thrown away by the
+   HTML parser, and its cells spill into whatever was being swapped - a
+   stray row loose in a dialog. htmx unwraps a template before it swaps,
+   so this is the way to send one anywhere. #}
+{% if oob %}<template{% if id %} id="{{ id }}-oob"{% endif %}>{% endif %}
 {# Where a phone puts each cell (issue 465): the row's lead and its amount
    share the top line, every other cell is a labelled detail beneath.
    The lead is the column marked ``phone: "primary"``, else the first
@@ -210,6 +226,7 @@ text-aegis-text
   {% endfor %}
   {% if actions %}<td data-role="actions" class="px-2 py-2 text-right">{{ actions(row) }}</td>{% endif %}
 </tr>
+{% if oob %}</template>{% endif %}
 {% endmacro %}
 
 {# ``scroll`` caps the table's height and lets it scroll inside the card
@@ -217,9 +234,8 @@ text-aegis-text
    decade of monthly valuations - where the first rows are the answer and
    the rest is there to be checked. The header sticks, because a column
    of numbers with its labels scrolled away is a column of numbers. #}
-{% macro data_table(columns, rows, empty="Nothing here yet", row_id=None, scroll=False,
-                    select=False, sort=None, path=None, target=None, row=None,
-                    flush=True, detail=None, actions=None) %}
+{% macro data_table(columns, rows, empty="Nothing here yet", row_id=None, detail=None, actions=None, flush=True,
+                    scroll=False, select=False, sort=None, path=None, target=None, row=None) %}
 {% set actions = actions or (caller if caller is defined else None) %}
 {% if rows %}
 <div class="overflow-x-auto{{ " -mx-5" if flush }}{% if scroll %} max-h-80 overflow-y-auto{% endif %}">
@@ -257,7 +273,7 @@ text-aegis-text
     </thead>
     {% if detail %}
     {% for item in rows %}
-    <tbody x-data="{ open: false }" class="border-b border-aegis-border/60 last:border-0">
+    <tbody x-data="{ open: {{ 'true' if item is mapping and item.get('open') else 'false' }} }" class="border-b border-aegis-border/60 last:border-0">
       {{ table_row(columns, item, id=(row_id ~ "-" ~ item.id) if row_id else None, actions=actions, expandable=True) }}
       <tr data-detail x-show="open" x-cloak>
         <td colspan="{{ columns|length + 1 + (1 if actions else 0) }}" class="px-5 pb-4 pt-2 bg-aegis-border/10">{{ detail(item) }}</td>

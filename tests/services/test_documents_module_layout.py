@@ -15,16 +15,21 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 from pathlib import Path
 
 import pytest
 
 from app.services.system.service_parts import PIECES
+from tests._conformance import CONFORMANCE
+
+pytestmark = CONFORMANCE
 
 SPINE = {"service.py", "models.py", "queries.py", "health.py", "deps.py"}
 # What the service standard has a service hand the app at its root, found
 # there by name (its tools, its aggregates): not a domain.
 CONVENTIONS = {f"{name}.py" for name, (_, kind) in PIECES.items() if kind == "entry"}
+WORKER = "app.components.worker"
 
 # Public callable -> the module that must DEFINE it.
 OWNERS = {
@@ -40,7 +45,8 @@ OWNERS = {
     ],
     "app.services.documents.domains.extraction.jobs": [
         "run_extraction",
-        "run_extraction_job",
+        # The worker's entry, only where a worker runs it.
+        *(["run_extraction_job"] if importlib.util.find_spec(WORKER) else []),
     ],
 }
 

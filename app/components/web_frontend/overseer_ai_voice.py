@@ -1,82 +1,250 @@
-"""The Overseer AI page's Voice section: what speaks and what listens, as
-settings configure them (``TTS_*``/``STT_*`` in ``.env``), each provider's
-key state; every voice of the speaking provider with a play button; a
-sentence spoken in a chosen voice; and an audio file transcribed.
+"""The Overseer AI page's Voice section: the voice overview's rows
+(``voice_overview``, the one the Flet Overseer reads over the API) in one
+tight table on the canvas, each provider in its own color, narrowed by the
+page's filters with no request (``data-facets``), each heard on its own
+voice and model through the voice API's preview route.
 
-Playback is the voice API's preview route (an ``<audio>`` points at it);
-transcription is the speech API's own ``transcribe_audio``. Nothing here
-synthesizes or transcribes on its own. Offered wherever ``ai[...,voice]``
+Use puts a row on the active profile and Profile switches it
+(``use_voice``, ``switch_voice``), saved and applied at once; Edit opens
+the profile's own editor, the chat surface's voice dialog. Transcription is
+the speech API's ``transcribe_audio``. Offered wherever ``ai[...,voice]``
 installed the voice domain.
 """
 
-from typing import Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 from fastapi import UploadFile
 
-from app.core import secrets
-from app.core.config import settings
+from app.core import discovery
 
-from .overseer_ai_common import PARTIALS
+from .assets import static_url
+from .overseer_ai_common import PARTIALS, icon_url, section_url, tab_links
 
-PREVIEW = "/api/v1/voice/preview/"
+if TYPE_CHECKING:
+    # Only a stack with a database has it; a voice-only one does not.
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
+API = "/api/v1/voice"
+# A voice said: by the voice in the path, or as a field beside the line.
+SAY = f"{API}/preview"
+PREVIEW = f"{SAY}/"
+# The speech server's own page (Inference > Speech), where the inference
+# component tracks it: what it reports of itself, its model, its charts.
+SPEECH_PAGE = discovery.optional(
+    "app.components.web_frontend.overseer_inference", "SPEECH_PAGE"
+)
 
 
-async def _provider(providers: list[Any], provider_id: str) -> dict[str, Any]:
-    """A provider's name and whether its key is set (named when missing),
-    read through ``app.core.secrets`` (``.env``, then the secrets store)."""
-    info = next((p for p in providers if p.id == provider_id), None)
-    if info is None:
-        return {"name": provider_id, "key": None}
-    if not info.requires_api_key:
-        return {"name": info.name, "key": "Not needed"}
-    key = info.api_key_env_var
-    return {
-        "name": info.name,
-        "key": "Set" if key and await secrets.get(key) else f"{key} missing",
+def _shipped_marks() -> dict[str, str]:
+    """The mark of each provider that runs in the app, or a server of its
+    own, which no catalog org holds, as the static route serves it."""
+    from app.services.ai.service import TTSProvider
+
+    kokoro = static_url("marks/kokoro.png")
+    return {TTSProvider.KOKORO.value: kokoro, TTSProvider.LOCAL_SERVER.value: kokoro}
+
+
+def _speak(voice: str, model: str) -> str:
+    """Where ``voice`` is heard on ``model``: the voice API's preview."""
+    return f"{PREVIEW}{voice}?{urlencode({'model': model})}"
+
+
+def _row(row: Any, colors: dict[str, int]) -> dict[str, Any]:
+    """A row as the page draws it: its provider's color, the models a
+    filter matches, where it is heard, and the speech server's page for a
+    row of its."""
+    from app.services.ai.service import TTSProvider
+
+    served = row.provider == TTSProvider.LOCAL_SERVER.value
+    return row.model_dump() | {
+        "color": colors[row.provider],
+        "models": " ".join(row.models),
+        "speak": _speak(*row.sample) if row.sample else None,
+        "speech_page": SPEECH_PAGE if served else None,
     }
 
 
-async def voice_context() -> dict[str, Any]:
-    from app.services.ai.domains.voice import (
-        get_current_voice_config,
-        get_stt_providers,
-        get_tts_providers,
-        get_tts_voices,
-    )
+def _voice_groups(voices: list[Any]) -> list[dict[str, Any]]:
+    """The voices that can be heard here (a blocked one has no sample),
+    under their providers: the picker that says a line below the table."""
+    groups: dict[str, list[dict[str, str]]] = {}
+    for r in voices:
+        groups.setdefault(r.provider_name, []).append(
+            {"id": r.sample[0], "name": r.name, "detail": r.detail}
+        )
+    return [{"label": label, "voices": found} for label, found in groups.items()]
 
-    config = get_current_voice_config(settings)
-    speaker = await _provider(get_tts_providers(), config["tts_provider"])
-    listener = await _provider(get_stt_providers(), config["stt_provider"])
-    voices = get_tts_voices(config["tts_provider"])
+
+def _options(name: str, labels: dict[str, str]) -> list[dict[str, Any]]:
+    """A filter's choices (``checklist``), none ticked."""
+    return [{"name": name, "value": v, "label": label} for v, label in labels.items()]
+
+
+# The section's tabs: Profiles (its own address), then Models.
+TABS = {"profiles": "Profiles", "models": "Models"}
+
+
+def _ai() -> Any:
+    import app.services.ai.service as ai
+
+    return ai
+
+
+def _designs() -> Any:
+    """The voice designer, where the stack keeps voice profiles."""
+    return getattr(_ai(), "design", None)
+
+
+async def voice_context(db: AsyncSession, query: Mapping[str, str]) -> dict[str, Any]:
+    """The tab asked for (Models where nothing can be designed: no
+    profiles kept), under the tab row; Profiles is the list, or one
+    profile's editor when one is asked for."""
+    tab = query.get("tab") if query.get("tab") in TABS else "profiles"
+    if _designs() is None:
+        tab = "models"
+    frame = {
+        "tab": tab,
+        "tabs": tab_links(
+            "voice",
+            {k: v for k, v in TABS.items() if k == "models" or _designs() is not None},
+            tab,
+            "profiles",
+        ),
+    }
+    if tab == "models":
+        return frame | await _models(db)
+    if query.get("profile", "").isdigit():
+        return frame | await _editor(db, query)
+    return frame | await _profiles(db)
+
+
+async def _profiles(db: AsyncSession) -> dict[str, Any]:
+    """Every profile at a glance, each to hear, edit or put in use."""
+    summaries = await _designs().profile_summaries(db)
     return {
-        "speaking": [
-            ("Provider", speaker["name"]),
-            ("Key", speaker["key"]),
-            ("Model", config["tts_model"]),
-            ("Voice", config["tts_voice"]),
-            ("Speed", config["tts_speed"]),
-        ],
-        "listening": [
-            ("Provider", listener["name"]),
-            ("Key", listener["key"]),
-            ("Model", config["stt_model"]),
-            ("Language", config.get("stt_language") or "Detected"),
-        ],
-        "voices": [
-            {
-                "name": v.name,
-                "description": v.description,
-                "gender": (v.gender or "").title() or None,
-                "tone": v.category.value.title() if v.category else None,
-                "preview": f"{PREVIEW}{v.id}",
+        "editing": False,
+        "summaries": [
+            s.model_dump()
+            | {
+                "edit": section_url("voice", profile=str(s.id)),
+                "listen": f"{API}/design/profiles/{s.id}/preview",
             }
-            for v in voices
+            for s in summaries
         ],
-        "voice_options": [{"id": v.id, "name": v.name} for v in voices],
-        "current_voice": config["tts_voice"],
-        "preview_base": PREVIEW,
+        "new_url": f"{PARTIALS}/voice/profiles",
+        "profile_url": f"{PARTIALS}/voice/profile",
+    }
+
+
+async def _editor(db: AsyncSession, query: Mapping[str, str]) -> dict[str, Any]:
+    """One profile's editor at a step (``go``, a step button just pressed,
+    over ``step``, the one it was on), drawn from the designer's view
+    (``design_view``): the choices the form carries where it carries any,
+    the Voice step narrowed by the filters it sends."""
+    design = _designs()
+    step = next(
+        (s for s in (query.get("go"), query.get("step")) if s in design.STEPS), "voice"
+    )
+    picked = design.parse_design(query)[0] if "voice" in query else None
+    view = await design.design_view(db, int(query["profile"]), picked, query)
+    return {
+        "editing": True,
+        "view": view,
+        "step": step,
+        "chosen_listen": _speak(view.voice, view.model),
+        # Each provider's logo, served by the AI page's icon route; one
+        # that runs in the app has no catalog org, so its mark ships here.
+        "marks": _shipped_marks()
+        | {p: icon_url(logo.org) for p, logo in view.logos.items()},
+        # The accent checklist follows the other filters: a new id when its
+        # options change, so the page draws them (a checklist is preserved).
+        "accent_id": "ai-voice-accent-"
+        + str(abs(hash(tuple(o.value for o in view.find.options["accent"])))),
+        "sample_url": PREVIEW,
+        "back_url": section_url("voice"),
+        "save_url": f"{PARTIALS}/voice/design",
+        "listen_url": f"{API}/design/preview",
+        # Each style as it would be picked: its dials, the rest kept.
+        "style_listen": {
+            key: f"{API}/design/preview?"
+            + urlencode(view.form | style.dials | {"style": key, "was_style": key})
+            for key, style in view.styles.items()
+            if key
+        },
+    }
+
+
+async def _models(db: AsyncSession) -> dict[str, Any]:
+    """Every model and voice, as the voice overview has them."""
+    from app.services.ai.service import voice_overview
+
+    found = await voice_overview(db)
+    providers = {r.provider: r.provider_name for r in found.rows}
+    voices = [r for r in found.rows if r.kind == "voice" and r.sample]
+    names = {r.sample[0]: r.name for r in voices}
+    speaking = found.rows[0].sample
+    # The voice in use where it can be heard, else the first that can.
+    current = speaking[0] if speaking else next(iter(names), None)
+    colors = {p: i + 1 for i, p in enumerate(providers)}
+    return {
+        "rows": [_row(r, colors) for r in found.rows],
+        "kinds": _options("kind", found.kinds),
+        "providers": _options("provider", providers),
+        "models": _options(
+            "model", {m: m for r in found.rows if r.kind != "use" for m in r.models}
+        ),
+        "use_url": f"{PARTIALS}/voice/use",
+        "voice_groups": _voice_groups(voices),
+        "current_voice": current,
+        "current_voice_name": names.get(current or "", current),
+        "say_url": SAY,
         "transcribe_url": f"{PARTIALS}/voice/transcribe",
     }
+
+
+async def save(db: AsyncSession, form: Mapping[str, str]) -> tuple[str, int | None]:
+    """The designer's form saved onto its profile: what was said, and the
+    profile (None when the form was refused, and why)."""
+    from app.components.backend.api.ai.service import ai_service
+
+    design = _designs()
+    picked, errors = design.parse_design(form)
+    if picked is None:
+        return " ".join(errors), None
+    profile = form.get("profile", "")
+    saved = await design.save_design(
+        db, int(profile) if profile.isdigit() else None, picked, ai_service
+    )
+    return f"Saved {saved.name}.", saved.id
+
+
+async def make(db: AsyncSession, name: str) -> tuple[str, int | None]:
+    """A new profile from the active one: what was said, and the profile
+    (None when the name was refused, and why)."""
+    profiles = _ai().profiles
+    try:
+        made = await _designs().make_profile(db, name)
+    except profiles.VoiceProfileError as exc:
+        return str(exc), None
+    return f"Made {made.name}.", made.id
+
+
+async def use(db: AsyncSession, choice: dict[str, str]) -> str:
+    """A row's choice on the active profile; what it uses now."""
+    from app.components.backend.api.ai.service import ai_service
+    from app.services.ai.service import use_voice
+
+    return await use_voice(db, choice, ai_service)
+
+
+async def switch(db: AsyncSession, profile_id: int) -> str:
+    """Another profile made the active one; its name."""
+    from app.components.backend.api.ai.service import ai_service
+    from app.services.ai.service import switch_voice
+
+    return await switch_voice(db, profile_id, ai_service)
 
 
 async def transcribe(audio: UploadFile) -> Any:

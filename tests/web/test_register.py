@@ -191,6 +191,7 @@ class TestFilters:
         assert response.status_code == 200
         assert one(response.text, 'input[name="hide_transfers"]').get("checked")
 
+    @pytest.mark.real_clock  # seeded against the real clock
     @pytest.mark.queryspy(threshold=3)  # each request redraws rows
     def test_window_chips_start_at_all_and_narrow_the_listing(
         self, client: TestClient, ledger: Ledger

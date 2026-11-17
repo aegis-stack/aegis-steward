@@ -178,7 +178,7 @@ class TestWhatItRefuses:
 
 class TestItIsInTheOneQueue:
     def test_the_change_type_is_registered(self) -> None:
-        from app.services.finance.domains.writes.registry import executor_for
+        from app.services.change_queue import executor_for
 
         assert executor_for("document.metadata").title
 
@@ -205,11 +205,11 @@ class TestReadingADocumentProducesACard:
         return int(document.id)
 
     async def _cards(self, db: AsyncSession, document_id: int) -> list[Any]:
-        from app.services.finance.domains.writes.queue import list_changes
+        from app.services.change_queue import list_changes
 
         return [
             c
-            for c in await list_changes(db, status="pending")
+            for c in await list_changes(db, status="pending", owner_user_id=None)
             if c.change_type == "document.metadata"
             and c.payload["document_id"] == document_id
         ]

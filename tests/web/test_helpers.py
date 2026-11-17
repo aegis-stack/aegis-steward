@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 import pytest
 
-from tests.web.dom import none, one, select, text
+from tests.web.dom import location, none, one, oob, select, table_rows, text, triggers
 
 PAGE = """<!DOCTYPE html><html><head><title>t</title></head><body>
 <main id="app-content">
@@ -85,6 +85,27 @@ def app() -> FastAPI:
     return tiny
 
 
+class TestHxReplace:
+    def test_emits_the_self_replacing_recipe(self) -> None:
+        from app.components.web_frontend.rendering import hx_replace
+
+        attrs = one(f"<a {hx_replace('/items?page=2', '#items')}>n</a>", "a")
+        assert attrs.get("hx-get") == "/items?page=2"
+        assert attrs.get("hx-target") == attrs.get("hx-select") == "#items"
+        assert attrs.get("hx-swap") == "outerHTML"
+        assert attrs.get("hx-push-url") == "true"
+        assert attrs.get("hx-select-oob") is None
+
+    def test_oob_and_escaping(self) -> None:
+        from app.components.web_frontend.rendering import hx_replace
+
+        html = f"<a {hx_replace('/a?x=1&y=2', '#d', oob='#list')}>n</a>"
+        a = one(html, "a")
+        assert a.get("hx-select-oob") == "#list"
+        assert a.get("hx-get") == "/a?x=1&y=2"
+        assert "&amp;" in str(hx_replace("/a?x=1&y=2", "#d"))
+
+
 class TestHxClient:
     def test_hx_client_sends_the_htmx_request_header(self, hx: TestClient) -> None:
         assert hx.get("/echo").json() == {"hx": "true"}
@@ -95,47 +116,45 @@ class TestHxClient:
 
 class TestOob:
     def test_splits_primary_content_from_out_of_band_siblings(self) -> None:
-        from tests.web.dom import oob
-
         primary, siblings = oob(
-            '<tr id="txn-1"><td>a</td></tr>'
-            '<span id="count" hx-swap-oob="true">3</span>'
-            '<div id="other" hx-swap-oob="innerHTML">x</div>'
+            '<tr id="a"><td>x</td></tr><span id="n" hx-swap-oob="true">1</span>'
         )
-        assert [el.get("id") for el in primary] == ["txn-1"]
-        assert [el.get("id") for el in siblings] == ["count", "other"]
+        assert [el.get("id") for el in primary] == ["a"]
+        assert [el.get("id") for el in siblings] == ["n"]
 
     def test_empty_primary_when_only_siblings(self) -> None:
-        from tests.web.dom import oob
-
-        primary, siblings = oob('<span id="count" hx-swap-oob="true">0</span>')
+        primary, siblings = oob('<tr id="a" hx-swap-oob="outerHTML"><td>x</td></tr>')
         assert primary == [] and len(siblings) == 1
 
 
-def _form(source: str, **context: object) -> str:
-    """Render a form macro on its own, the way the layout suite does."""
-    from app.components.web_frontend.rendering import templates
+class TestTableRows:
+    def test_cells_by_header_label(self) -> None:
+        rows = table_rows(
+            "<table><thead><tr><th>Name</th><th>Amount</th></tr></thead>"
+            "<tbody><tr><td>Rent</td><td>$1</td></tr></tbody></table>"
+        )
+        assert text(rows[0]["Name"]) == "Rent" and text(rows[0]["Amount"]) == "$1"
 
-    head = '{% from "components/macros/form.html" import search_input %}'
-    return templates.env.from_string(head + source).render(**context)
+
+class TestTriggers:
+    def test_merges_the_three_trigger_headers(self) -> None:
+        class Response:
+            headers = {
+                "HX-Trigger": '{"toast": {"text": "ok"}}',
+                "HX-Trigger-After-Settle": '{"dialog:close": null}',
+            }
+
+        assert triggers(Response()) == {"toast": {"text": "ok"}, "dialog:close": None}
 
 
-class TestSearchInputKeepsTheCaret:
-    """htmx restores focus after a swap by ID. The register's filter form
-    swaps the whole ``#register`` on every keystroke, so a search box with
-    no id is destroyed and recreated mid-word: focus gone, caret gone, and
-    the next letter typed into nothing. Reported as the account search
-    feeling slow, 2026-09-11 - half of "slow" was this.
-    """
+class TestLocation:
+    def test_reads_where_a_navigating_response_sends_the_page(self) -> None:
+        class Response:
+            headers = {
+                "HX-Location": '{"path": "/accounts/3", "target": "#app-content"}'
+            }
 
-    def test_the_box_has_an_id_for_htmx_to_find_it_by(self) -> None:
-        box = one(_form("{{ search_input('q') }}"), "input[type=search]")
-        assert box.get("id") == "search-q"
-
-    def test_the_id_follows_the_field_name(self) -> None:
-        """Two searches on one page must not collide."""
-        box = one(_form("{{ search_input('payee') }}"), "input[type=search]")
-        assert box.get("id") == "search-payee"
+        assert location(Response()) == "/accounts/3"
 
 
 class TestWithQuery:
@@ -174,3 +193,29 @@ class TestFormNumber:
 
         with pytest.raises(ValueError, match="Priority must be a whole number"):
             form_number("high", "Priority")
+
+
+def _form(source: str, **context: object) -> str:
+    """Render a form macro on its own, the way the layout suite does."""
+    from app.components.web_frontend.rendering import templates
+
+    head = '{% from "components/macros/form.html" import search_input %}'
+    return templates.env.from_string(head + source).render(**context)
+
+
+class TestSearchInputKeepsTheCaret:
+    """htmx restores focus after a swap by ID. The register's filter form
+    swaps the whole ``#register`` on every keystroke, so a search box with
+    no id is destroyed and recreated mid-word: focus gone, caret gone, and
+    the next letter typed into nothing. Reported as the account search
+    feeling slow, 2026-09-11 - half of "slow" was this.
+    """
+
+    def test_the_box_has_an_id_for_htmx_to_find_it_by(self) -> None:
+        box = one(_form("{{ search_input('q') }}"), "input[type=search]")
+        assert box.get("id") == "search-q"
+
+    def test_the_id_follows_the_field_name(self) -> None:
+        """Two searches on one page must not collide."""
+        box = one(_form("{{ search_input('payee') }}"), "input[type=search]")
+        assert box.get("id") == "search-payee"

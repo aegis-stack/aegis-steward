@@ -1,9 +1,5 @@
-"""Handing an extraction to the worker, and what happens when that fails.
-
-The job record outlives the request that made it, so anything that goes
-wrong between creating it and the worker picking it up has to be written
-into the record. Nobody is watching this process's logs.
-"""
+"""Handing an extraction to the worker: the task it names, and the worker's
+entry narrating each page (``test_job_store`` covers the hand-off itself)."""
 
 from __future__ import annotations
 
@@ -13,173 +9,84 @@ import pytest
 
 from app.services.documents.domains.extraction import dispatch
 from app.services.documents.domains.extraction import jobs as extraction_job
+from app.services.system import job_store
 from app.services.system.jobs import JobSnapshot
 
 
-class _FakeStore:
-    def __init__(self) -> None:
-        self.created: list[tuple[str, str, str]] = []
-        self.labels: list[str] = []
-        self.failed: list[tuple[str, str]] = []
-        self.finished: list[dict[str, Any]] = []
-        self.closed = False
+async def test_an_extraction_is_queued_as_its_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued: list[tuple[Any, ...]] = []
 
-    async def create(self, job_id: str, name: str, label: str) -> None:
-        self.created.append((job_id, name, label))
+    async def queue_job(*args: Any) -> str:
+        queued.append(args)
+        return "job-1"
 
-    async def set_label(self, job_id: str, label: str) -> None:
-        assert not self.closed, "a label was written after the store closed"
-        self.labels.append(label)
+    monkeypatch.setattr(job_store, "queue_job", queue_job)
 
-    async def fail(self, job_id: str, error: str) -> None:
-        self.failed.append((job_id, error))
-
-    async def finish(self, job_id: str, result: dict[str, Any] | None) -> None:
-        self.finished.append(result or {})
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-    async def list_jobs(self) -> list[JobSnapshot]:
-        return [
-            JobSnapshot(
-                job_id=job_id,
-                name=name,
-                status="running",
-                label=label,
-                result=None,
-                error=None,
-            )
-            for job_id, name, label in self.created
-        ]
+    assert await dispatch.start_extraction(1, owner_user_id=None, force=True) == "job-1"
+    assert queued == [("documents-extract:1", "extract_document_task", 1, None, True)]
 
 
-@pytest.fixture
-def store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
-    fake = _FakeStore()
+async def test_a_document_already_being_read_is_not_read_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent that asks twice in three seconds joins the job already
+    reading the document rather than starting a second pass over the scan."""
+    queued: list[tuple[Any, ...]] = []
+
+    class _Store:
+        async def list_jobs(self) -> list[JobSnapshot]:
+            return [
+                JobSnapshot(
+                    job_id="job-running",
+                    name="documents-extract:7",
+                    status="running",
+                    label="Reading page 1 of 3...",
+                    result=None,
+                    error=None,
+                )
+            ]
+
+        async def aclose(self) -> None:
+            return None
 
     class _Factory:
         @staticmethod
-        def from_url(_url: str) -> _FakeStore:
-            return fake
+        def shared() -> _Store:
+            return _Store()
 
-        @staticmethod
-        def shared() -> _FakeStore:
-            return fake
+    async def queue_job(*args: Any) -> str:
+        queued.append(args)
+        return "job-new"
 
-    monkeypatch.setattr(
-        "app.services.system.job_store.RedisJobStore", _Factory, raising=True
+    monkeypatch.setattr(dispatch, "RedisJobStore", _Factory)
+    monkeypatch.setattr(job_store, "queue_job", queue_job)
+
+    assert (
+        await dispatch.start_extraction(7, owner_user_id=None, force=False)
+        == "job-running"
     )
-    return fake
+    assert queued == []
 
 
-@pytest.mark.asyncio
-async def test_an_enqueue_that_fails_marks_the_job_failed(
-    store: _FakeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def _boom(*_args: Any, **_kwargs: Any) -> None:
-        raise ConnectionError("no broker")
+async def test_the_worker_narrates_each_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    labels: list[str] = []
 
-    monkeypatch.setattr(dispatch, "_enqueue", _boom)
+    async def narrate(job_id: str, work: Any) -> dict[str, Any]:
+        return await work(labels.append)
 
-    with pytest.raises(ConnectionError):
-        await dispatch.start_extraction(1, owner_user_id=None, force=False)
-
-    assert store.created, "the job was never recorded"
-    assert store.failed, "a job nobody will run was left running"
-    assert "no broker" in store.failed[0][1]
-    assert store.closed
-
-
-@pytest.mark.asyncio
-async def test_progress_labels_are_flushed_before_the_store_closes(
-    store: _FakeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The labels are written without waiting; they still have to land."""
-
-    async def _run(
+    async def run(
         document_id: int, *, owner_user_id: int | None, force: bool, report: Any
     ) -> dict[str, int]:
         report("Reading page 1 of 2...")
         report("Reading page 2 of 2...")
         return {"read": 2, "unread": 0, "skipped": 0}
 
-    monkeypatch.setattr(extraction_job, "run_extraction", _run)
+    monkeypatch.setattr(extraction_job, "narrate", narrate)
+    monkeypatch.setattr(extraction_job, "run_extraction", run)
 
     result = await extraction_job.run_extraction_job("job", 1, None, False)
 
     assert result == {"read": 2, "unread": 0, "skipped": 0}
-    assert store.labels == ["Reading page 1 of 2...", "Reading page 2 of 2..."]
-    assert store.closed
-
-
-@pytest.mark.asyncio
-async def test_a_document_already_being_read_is_not_read_twice(
-    store: _FakeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An agent that asks twice in three seconds joins the job on the
-    worker rather than starting a second pass over the same scan."""
-    enqueued: list[int] = []
-
-    async def _enqueue(job_id: str, document_id: int, *_args: Any) -> None:
-        enqueued.append(document_id)
-
-    monkeypatch.setattr(dispatch, "_enqueue", _enqueue)
-
-    first = await dispatch.start_extraction(7, owner_user_id=None, force=False)
-    second = await dispatch.start_extraction(7, owner_user_id=None, force=False)
-
-    assert second == first
-    assert enqueued == [7]
-
-
-@pytest.mark.asyncio
-async def test_waiting_ends_when_the_job_does(
-    store: _FakeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    states = iter(["running", "running", "done"])
-
-    async def get(job_id: str) -> JobSnapshot:
-        return JobSnapshot(
-            job_id=job_id,
-            name="documents-extract:7",
-            status=next(states),
-            label="",
-            result=None,
-            error=None,
-        )
-
-    async def no_sleep(_seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(store, "get", get, raising=False)
-    monkeypatch.setattr(dispatch.asyncio, "sleep", no_sleep, raising=False) if hasattr(
-        dispatch, "asyncio"
-    ) else None
-    monkeypatch.setattr("asyncio.sleep", no_sleep)
-
-    assert await dispatch.wait_for_extraction("j") == "done"
-    assert store.closed
-
-
-@pytest.mark.asyncio
-async def test_waiting_gives_up_after_the_budget(
-    store: _FakeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def get(job_id: str) -> JobSnapshot:
-        return JobSnapshot(
-            job_id=job_id,
-            name="documents-extract:7",
-            status="running",
-            label="",
-            result=None,
-            error=None,
-        )
-
-    async def no_sleep(_seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(store, "get", get, raising=False)
-    monkeypatch.setattr("asyncio.sleep", no_sleep)
-
-    assert await dispatch.wait_for_extraction("j", budget=5.0) == "running"
+    assert labels == ["Reading page 1 of 2...", "Reading page 2 of 2..."]

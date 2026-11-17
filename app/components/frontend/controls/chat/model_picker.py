@@ -24,13 +24,12 @@ from app.components.frontend.controls.text import (
     SecondaryText,
 )
 from app.components.frontend.theme import AegisTheme as Theme
-from app.services.ai.service import (
+from app.core.model_picker import (
     display_title,
     filter_models,
     format_context_window,
     format_price,
     group_models,
-    is_local_model,
     lab_for_model,
     model_label,
     newest_first,
@@ -331,11 +330,7 @@ class ModelPickerDialog(StyledAlertDialog):
             part
             for part in (
                 format_context_window(model.get("context_window")),
-                format_price(
-                    model.get("input_price"),
-                    model.get("output_price"),
-                    local=is_local_model(model),
-                ),
+                format_price(model.get("input_price"), model.get("output_price")),
             )
             if part
         )

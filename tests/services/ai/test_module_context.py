@@ -1,4 +1,4 @@
-"""Tests for memory-module context rendering (priority, budget, hybrid)."""
+"""Tests for context-module context rendering (priority, budget, hybrid)."""
 
 from collections.abc import AsyncGenerator, Generator
 from dataclasses import dataclass
@@ -7,22 +7,27 @@ from unittest.mock import MagicMock
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.ai.domains.chat.context_modules import (
+    create_context_module,
+    set_context_entry,
+)
 from app.services.ai.domains.chat.fetchers import (
     FetchContext,
     register_fetcher,
     registered_fetcher_names,
     unregister_fetcher,
 )
-from app.services.ai.domains.chat.memory_modules import create_memory_module
 from app.services.ai.domains.chat.module_context import (
-    MemoryModuleContextProvider,
-    render_memory_modules,
+    ContextModuleProvider,
+    render_context_modules,
 )
+from app.services.ai.models.agents import ContextModuleEntry
 
 
 @dataclass
 class _Deps:
     user_id: str
+    subject: str | None = None
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +53,7 @@ class TestHybridRendering:
             return f"LIVE DATA for {ctx.user_id}"
 
         register_fetcher("live", live)
-        await create_memory_module(
+        await create_context_module(
             slug="diet",
             name="Diet",
             prompt_content="STATIC RULES",
@@ -56,7 +61,7 @@ class TestHybridRendering:
             session=session,
         )
 
-        block = await render_memory_modules(["diet"], user_id="u1", session=session)
+        block = await render_context_modules(["diet"], user_id="u1", session=session)
 
         assert block is not None
         assert block.index("STATIC RULES") < block.index("LIVE DATA for u1")
@@ -71,7 +76,7 @@ class TestHybridRendering:
             return "data"
 
         register_fetcher("live", live)
-        await create_memory_module(
+        await create_context_module(
             slug="orders",
             name="Orders",
             fetch_function="live",
@@ -80,19 +85,19 @@ class TestHybridRendering:
             session=session,
         )
 
-        await render_memory_modules(["orders"], user_id="u1", session=session)
+        await render_context_modules(["orders"], user_id="u1", session=session)
 
         assert seen["days_back"] == 14
 
     async def test_priority_orders_modules(self, session: AsyncSession) -> None:
-        await create_memory_module(
+        await create_context_module(
             slug="later",
             name="Later",
             prompt_content="SECOND",
             priority=200,
             session=session,
         )
-        await create_memory_module(
+        await create_context_module(
             slug="first",
             name="First",
             prompt_content="FIRST",
@@ -100,7 +105,7 @@ class TestHybridRendering:
             session=session,
         )
 
-        block = await render_memory_modules(
+        block = await render_context_modules(
             ["later", "first"], user_id="u1", session=session
         )
 
@@ -112,7 +117,7 @@ class TestTokenBudget:
     async def test_over_budget_drops_lowest_priority_first(
         self, session: AsyncSession
     ) -> None:
-        await create_memory_module(
+        await create_context_module(
             slug="core",
             name="Core",
             prompt_content="core rules",
@@ -120,7 +125,7 @@ class TestTokenBudget:
             token_estimate=100,
             session=session,
         )
-        await create_memory_module(
+        await create_context_module(
             slug="extra",
             name="Extra",
             prompt_content="extra rules",
@@ -128,7 +133,7 @@ class TestTokenBudget:
             token_estimate=100,
             session=session,
         )
-        await create_memory_module(
+        await create_context_module(
             slug="fluff",
             name="Fluff",
             prompt_content="fluff rules",
@@ -137,7 +142,7 @@ class TestTokenBudget:
             session=session,
         )
 
-        block = await render_memory_modules(
+        block = await render_context_modules(
             ["core", "extra", "fluff"],
             user_id="u1",
             token_budget=250,
@@ -161,7 +166,7 @@ class TestTokenBudget:
 
         register_fetcher("live", live)
         # No explicit token_estimate: estimated from rendered content.
-        await create_memory_module(
+        await create_context_module(
             slug="big-hybrid",
             name="Big Hybrid",
             prompt_content="y" * 400,
@@ -169,7 +174,7 @@ class TestTokenBudget:
             priority=1,
             session=session,
         )
-        await create_memory_module(
+        await create_context_module(
             slug="small",
             name="Small",
             prompt_content="z" * 40,
@@ -179,7 +184,7 @@ class TestTokenBudget:
 
         # ~200 tokens of hybrid (800 chars) exceeds a 150-token budget even
         # though the static half alone (100 tokens) would fit.
-        block = await render_memory_modules(
+        block = await render_context_modules(
             ["big-hybrid", "small"],
             user_id="u1",
             token_budget=150,
@@ -199,11 +204,11 @@ class TestDegradation:
 
         warned = MagicMock()
         monkeypatch.setattr(module_context_module.logger, "warning", warned)
-        await create_memory_module(
+        await create_context_module(
             slug="real", name="Real", prompt_content="REAL", session=session
         )
 
-        block = await render_memory_modules(
+        block = await render_context_modules(
             ["real", "ghost-module"], user_id="u1", session=session
         )
 
@@ -214,7 +219,7 @@ class TestDegradation:
 
     async def test_no_modules_renders_nothing(self, session: AsyncSession) -> None:
         """Empty scope = byte-identical pre-port context (no block at all)."""
-        assert await render_memory_modules([], user_id="u1", session=session) is None
+        assert await render_context_modules([], user_id="u1", session=session) is None
 
     async def test_owned_session_is_shared_with_fetchers(
         self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
@@ -232,10 +237,10 @@ class TestDegradation:
             return "data"
 
         register_fetcher("capture", capture)
-        await create_memory_module(
+        await create_context_module(
             slug="live-a", name="A", fetch_function="capture", session=session
         )
-        await create_memory_module(
+        await create_context_module(
             slug="live-b", name="B", fetch_function="capture", session=session
         )
 
@@ -248,32 +253,42 @@ class TestDegradation:
 
         monkeypatch.setattr(module_context_module, "get_async_session", fake_session)
 
-        block = await render_memory_modules(["live-a", "live-b"], user_id="u1")
+        block = await render_context_modules(["live-a", "live-b"], user_id="u1")
 
         assert block is not None
         assert opened["count"] == 1, "exactly one owned session per render"
         assert seen == [session, session], "fetchers reuse the owned session"
 
 
+@pytest.fixture
+def provider_session(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> AsyncSession:
+    """The session the provider's render opens: the test's own."""
+    from contextlib import asynccontextmanager
+
+    import app.services.ai.domains.chat.module_context as module_context_module
+
+    @asynccontextmanager
+    async def fake_session() -> AsyncGenerator[AsyncSession]:
+        yield session
+
+    monkeypatch.setattr(module_context_module, "get_async_session", fake_session)
+    return session
+
+
 class TestProvider:
     async def test_provider_builds_block_from_deps_user_id(
-        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+        self, provider_session: AsyncSession
     ) -> None:
-        from contextlib import asynccontextmanager
-
-        import app.services.ai.domains.chat.module_context as module_context_module
-
-        await create_memory_module(
-            slug="rules", name="Rules", prompt_content="THE RULES", session=session
+        await create_context_module(
+            slug="rules",
+            name="Rules",
+            prompt_content="THE RULES",
+            session=provider_session,
         )
 
-        @asynccontextmanager
-        async def fake_session() -> AsyncGenerator[AsyncSession]:
-            yield session
-
-        monkeypatch.setattr(module_context_module, "get_async_session", fake_session)
-
-        provider = MemoryModuleContextProvider(("rules",))
+        provider = ContextModuleProvider(("rules",))
         block = await provider.build(_Deps(user_id="u1"))
 
         assert block is not None
@@ -282,6 +297,134 @@ class TestProvider:
     async def test_provider_without_user_id_contributes_nothing(
         self, session: AsyncSession
     ) -> None:
-        provider = MemoryModuleContextProvider(("rules",))
+        provider = ContextModuleProvider(("rules",))
 
         assert await provider.build(object()) is None
+
+
+class TestTheCaller:
+    async def test_who_asks_is_settled_before_the_render_holds_a_session(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fetcher asking whether the caller is an admin (the app map)
+        finds it settled: looked up inside the render's session, it would
+        open a second one and wait out the first's write lock (SQLite)."""
+        from contextlib import asynccontextmanager
+
+        from app.core.tools import acting_as, current_admin
+        import app.services.ai.domains.chat.module_context as module_context_module
+
+        opened: list[str] = []
+        seen: list[bool | None] = []
+
+        @asynccontextmanager
+        async def fake_session() -> AsyncGenerator[AsyncSession]:
+            opened.append("render")
+            yield session
+
+        async def admin_lookup() -> bool:
+            opened.append("lookup")
+            return True
+
+        async def asks(ctx: FetchContext) -> str | None:
+            seen.append(current_admin.get())
+            return "MAP"
+
+        monkeypatch.setattr(module_context_module, "get_async_session", fake_session)
+        monkeypatch.setattr(module_context_module, "caller_is_admin", admin_lookup)
+        register_fetcher("asks", asks)
+        await create_context_module(
+            slug="map", name="Map", fetch_function="asks", session=session
+        )
+
+        with acting_as(1, "assistant"):
+            await render_context_modules(["map"], user_id="u1")
+            assert current_admin.get() is None  # put back as it was
+
+        assert opened == ["lookup", "render"]
+        assert seen == [True]
+
+
+class TestPerSubject:
+    async def test_a_subjects_text_renders_between_static_and_live(
+        self, session: AsyncSession
+    ) -> None:
+        async def live(ctx: FetchContext) -> str | None:
+            """Live half."""
+            return "LIVE DATA"
+
+        register_fetcher("live", live)
+        await create_context_module(
+            slug="notes",
+            name="Notes",
+            prompt_content="STATIC RULES",
+            fetch_function="live",
+            per_subject=True,
+            session=session,
+        )
+        await set_context_entry("notes", "3", "NOTES FOR 3", session=session)
+
+        block = await render_context_modules(
+            ["notes"], user_id="u1", session=session, subject="3"
+        )
+
+        assert block is not None
+        assert (
+            block.index("STATIC RULES")
+            < block.index("NOTES FOR 3")
+            < block.index("LIVE DATA")
+        )
+
+    async def test_each_subject_reads_only_its_own(self, session: AsyncSession) -> None:
+        notes = await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+        audience = await create_context_module(
+            slug="audience", name="Audience", per_subject=True, session=session
+        )
+        # Written as rows, so the render's own reads are all the gate sees.
+        for module, subject, text in (
+            (notes, "3", "NOTES FOR 3"),
+            (audience, "3", "AUDIENCE FOR 3"),
+            (notes, "8", "NOTES FOR 8"),
+        ):
+            session.add(
+                ContextModuleEntry(module_id=module.id, subject=subject, content=text)
+            )
+        await session.flush()
+
+        block = await render_context_modules(
+            ["notes", "audience"], user_id="u1", session=session, subject="3"
+        )
+
+        assert block is not None
+        assert "NOTES FOR 3" in block and "AUDIENCE FOR 3" in block
+        assert "NOTES FOR 8" not in block
+
+    async def test_a_turn_about_nothing_reads_no_subjects_text(
+        self, session: AsyncSession
+    ) -> None:
+        notes = await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+        session.add(ContextModuleEntry(module_id=notes.id, subject="3", content="x"))
+        await session.flush()
+
+        assert (
+            await render_context_modules(["notes"], user_id="u1", session=session)
+            is None
+        )
+
+    async def test_the_provider_renders_the_subject_its_deps_carry(
+        self, provider_session: AsyncSession
+    ) -> None:
+        await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=provider_session
+        )
+        await set_context_entry("notes", "3", "NOTES FOR 3", session=provider_session)
+
+        block = await ContextModuleProvider(("notes",)).build(
+            _Deps(user_id="u1", subject="3")
+        )
+
+        assert block is not None and "NOTES FOR 3" in block

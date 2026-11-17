@@ -5,14 +5,15 @@ auth it is admins only, and tests/web/test_overseer_admin_gate.py walks the
 same routes as a member."""
 
 from importlib.util import find_spec
-from pathlib import Path
 import re
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
+from app.components.web_frontend.assets import STATIC_DIR
 from app.services.shared.deps import NO_AUTH_REFUSAL
+from tests._audit import at_localhost
 from tests.web.dom import none, one, select, text
 from tests.web.overseer import overseer_calls, sign_in, status_with
 
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.queryspy(allow_n_plus_one=True)  # a walk over every endpoint
+@pytest.mark.queryspy(allow_n_plus_one=True)  # one request per route walked
 def test_nothing_refuses_the_local_dev_build(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -30,9 +31,7 @@ def test_nothing_refuses_the_local_dev_build(
     lets every page, partial and action through."""
     sign_in(app, monkeypatch, status_with(), admin=False)
     # A 500 is not a refusal; this walk asks only who may get in.
-    client = TestClient(
-        app, base_url="http://localhost:8000", raise_server_exceptions=False
-    )
+    client = at_localhost(app, raise_server_exceptions=False)
     calls = [(m, p) for m, p in overseer_calls(app) if "/events" not in p]
     assert ("GET", "/overseer") in calls
     refused = []
@@ -44,7 +43,7 @@ def test_nothing_refuses_the_local_dev_build(
     assert not refused, f"refused without auth: {refused}"
 
 
-@pytest.mark.queryspy(allow_n_plus_one=True)  # a walk over every endpoint
+@pytest.mark.queryspy(allow_n_plus_one=True)  # one request per route walked
 def test_nothing_fails_for_a_missing_component(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -83,14 +82,14 @@ def test_the_local_dev_build_keeps_them(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sign_in(app, monkeypatch, status_with())
-    html = TestClient(app, base_url="http://localhost:8000").get("/overseer").text
+    html = at_localhost(app).get("/overseer").text
     none(html, "[data-read-only]")
     none(html, "[data-operator-refusal]")
 
 
 def test_a_read_only_shell_hides_every_write_control() -> None:
     """Anywhere on the page, a dialog or drawer included."""
-    css = Path("app/components/web_frontend/static/input.css").read_text()
+    css = (STATIC_DIR / "input.css").read_text()
     assert re.search(
         r"body:has\(\[data-read-only\]\) \[data-write\]\s*\{\s*display:\s*none",
         css,

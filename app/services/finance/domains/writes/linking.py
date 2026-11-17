@@ -13,10 +13,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.domains.ledger import links
 from app.services.finance.domains.writes.display import txn_row
 from app.services.finance.domains.writes.filing import place
-from app.services.finance.schemas import ChangeDisplayRow
 
 
 class LinkTransactionPayload(BaseModel):

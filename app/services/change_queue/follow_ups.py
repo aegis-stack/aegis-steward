@@ -1,0 +1,67 @@
+"""After the commit: each landed approval's own follow-up.
+
+``approve`` runs inside the caller's transaction, so work that needs the
+change COMMITTED first (a job that must find the new row) cannot run
+there. The queue notes every row an approval lands on the session
+(``landed``); whoever commits calls ``after_commit`` once it has, which
+runs each row's ``ChangeExecutor.after_commit``, then tells each listener
+(``on_landed``) every row at once, and hands back the rows that landed -
+this action's, a vetoed or failed row never among them.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.log import logger
+from app.services.change_queue.models import PendingChange
+from app.services.change_queue.registry import executor_for
+
+# The card an executor is carrying out, while it runs (``_approve``): who
+# proposed it and in which batch, for a mutation that records on whose
+# behalf it acts. None outside an approval.
+approving: ContextVar[PendingChange | None] = ContextVar("approving", default=None)
+# Where the landed rows wait, in the session's own ``info``.
+LANDED = "change_queue.landed"
+
+Listener = Callable[[AsyncSession, list[PendingChange]], Awaitable[None]]
+# Who hears every approval once it lands, whatever its type: an app telling
+# the conversation that asked for the cards what it got, in one message.
+LISTENERS: list[Listener] = []
+
+
+def on_landed(listener: Listener) -> Listener:
+    """Have ``listener`` hear the rows each approval lands, after the commit
+    and their own follow-ups."""
+    LISTENERS.append(listener)
+    return listener
+
+
+def landed(db: AsyncSession, row: PendingChange) -> None:
+    """Note ``row`` as approved in this transaction."""
+    db.info.setdefault(LANDED, []).append(row)
+
+
+async def after_commit(db: AsyncSession) -> list[PendingChange]:
+    """Run the follow-up of every approval landed since the last call, once
+    each, and return those rows. Call it AFTER the commit. Never raises: an
+    approval that landed must not read as failed because what came after it
+    did."""
+    rows: list[PendingChange] = db.info.pop(LANDED, [])
+    for row in rows:
+        then = executor_for(row.change_type).after_commit
+        if then is None:
+            continue
+        try:
+            await then(row.result or {})
+        except Exception:
+            logger.exception(f"After-commit step for change {row.id} failed")
+    for listener in LISTENERS if rows else []:
+        try:
+            await listener(db, rows)
+        except Exception:
+            logger.exception("A listener to landed approvals failed")
+    return rows

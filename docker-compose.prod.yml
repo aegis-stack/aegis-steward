@@ -28,12 +28,15 @@ services:
       - "traefik.http.routers.webserver-upload.middlewares=upload-limit"
       - "traefik.http.middlewares.upload-limit.buffering.maxRequestBodyBytes=110100480"
       # Admin paths - IP restricted
-      - "traefik.http.routers.webserver-admin.rule=Host(`${DOMAIN}`) && (PathPrefix(`/dashboard`) || PathPrefix(`/docs`) || PathPrefix(`/redoc`) || PathPrefix(`/openapi.json`) || PathPrefix(`/health/detailed`))"
+      - "traefik.http.routers.webserver-admin.rule=Host(`${DOMAIN}`) && (PathPrefix(`/dashboard`) || PathPrefix(`/docs`) || PathPrefix(`/redoc`) || PathPrefix(`/openapi.json`) || PathPrefix(`/health/detailed`) || PathPrefix(`/health/dashboard`))"
       - "traefik.http.routers.webserver-admin.entrypoints=websecure"
       - "traefik.http.routers.webserver-admin.tls.certresolver=letsencrypt"
       - "traefik.http.routers.webserver-admin.service=webserver"
       - "traefik.http.routers.webserver-admin.middlewares=admin-ipallowlist"
       - "traefik.http.middlewares.admin-ipallowlist.ipallowlist.sourcerange=${ADMIN_IP_ALLOWLIST:-127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+    profiles:
+      - dev
+      - prod
 
   redis:
     environment:
@@ -47,14 +50,14 @@ services:
       - "443:443"
       # No 8080 dashboard port exposed in production
     environment:
-      - ACME_EMAIL=${ACME_EMAIL:?set ACME_EMAIL in .env.deploy}
+      - ACME_EMAIL=${ACME_EMAIL:-}
     # Traefik's static file cannot read the environment, and the Let's
     # Encrypt address stays out of this public repo: it is written into a
     # copy of traefik/traefik.yml as the container starts.
     entrypoint:
       - sh
       - -c
-      - sed "s|__ACME_EMAIL__|$$ACME_EMAIL|" /etc/traefik/traefik.yml > /tmp/traefik.yml && exec traefik --configFile=/tmp/traefik.yml
+      - '[ -n "$$ACME_EMAIL" ] || { echo "Set ACME_EMAIL in .env.deploy: the certificate needs it." >&2; exit 1; }; sed "s|__ACME_EMAIL__|$$ACME_EMAIL|" /etc/traefik/traefik.yml > /tmp/traefik.yml && exec traefik --configFile=/tmp/traefik.yml'
 
 # Pinned so TRUSTED_PROXIES (.env.deploy) can name it: the app believes
 # X-Forwarded-For from this network, Traefik's, and nowhere else.

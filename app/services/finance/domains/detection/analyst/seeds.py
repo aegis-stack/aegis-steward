@@ -1,16 +1,14 @@
-"""The database handoff: agent + memory-module seed rows and their loader."""
+"""The database handoff: agent + context-module seed rows and their loader."""
 
 from collections.abc import Sequence
 from typing import Any
 
 from sqlmodel import Session, col, select
 
-from app.core.log import logger
-from app.core.seed import missing_rows
+from app.core.tools import load_tools
 from app.services.ai.service import (
     Agent,
     AgentPromptChange,
-    seed_agent,
 )
 from app.services.finance.domains.detection.analyst.prompts import (
     ANALYST_MAX_TOKENS,
@@ -36,11 +34,16 @@ from app.services.finance.domains.detection.analyst.shared import (
     SNAPSHOT_MODULE_SLUG,
 )
 
+# A seeding process never builds a chat agent, so it registers the tools
+# itself: an unregistered tool gets no ``tool`` row, and every grant
+# below against it resolves to nothing.
+load_tools()
+
 SNAPSHOT_TOKEN_ESTIMATE = 1_200
 
 
 def snapshot_module_definition() -> dict[str, Any]:
-    """The seed row for the snapshot memory module."""
+    """The seed row for the snapshot context module."""
     return {
         "slug": SNAPSHOT_MODULE_SLUG,
         "name": "Finance snapshot",
@@ -106,9 +109,9 @@ def changes_module_definition() -> dict[str, Any]:
     }
 
 
-def memory_module_definitions() -> tuple[dict[str, Any], ...]:
-    """Every memory module the app seeds. Which agent reads one is the
-    agent definition's ``memory_modules``, not the module's concern."""
+def context_module_definitions() -> tuple[dict[str, Any], ...]:
+    """Every finance context module the app seeds. Which agent reads one is
+    the agent definition's ``context_modules``, not the module's concern."""
     return (
         snapshot_module_definition(),
         changes_module_definition(),
@@ -131,7 +134,7 @@ def analyst_agent_definition() -> dict[str, Any]:
         "system_prompt": ANALYST_SYSTEM_PROMPT,
         "temperature": ANALYST_TEMPERATURE,
         "max_tokens": ANALYST_MAX_TOKENS,
-        "memory_modules": [SNAPSHOT_MODULE_SLUG],
+        "context_modules": [SNAPSHOT_MODULE_SLUG],
         "knowledge_base_ids": [],
         "is_active": True,
     }
@@ -142,7 +145,7 @@ def deep_dive_agent_definition() -> dict[str, Any]:
 
     A SEPARATE agent row rather than a mode on the daily one, so it can be
     pointed at a bigger model and given a larger token budget without
-    changing what runs nightly. Both read the same memory module.
+    changing what runs nightly. Both read the same context module.
     """
     return {
         "slug": DEEP_DIVE_AGENT_SLUG,
@@ -153,7 +156,7 @@ def deep_dive_agent_definition() -> dict[str, Any]:
         "system_prompt": DEEP_DIVE_SYSTEM_PROMPT,
         "temperature": DEEP_DIVE_TEMPERATURE,
         "max_tokens": DEEP_DIVE_MAX_TOKENS,
-        "memory_modules": [SNAPSHOT_MODULE_SLUG],
+        "context_modules": [SNAPSHOT_MODULE_SLUG],
         "knowledge_base_ids": [],
         "is_active": True,
     }
@@ -208,8 +211,10 @@ FINANCE_CHAT_TOOL_NAMES = (
     "forget_memory",
     # The one LEDGER write, and it does not write: it files a pending
     # change the user approves in the app (FW-05). Registered
-    # as a proposal, so it surfaces as its own visible call.
+    # effect="proposes", so it surfaces as its own visible call.
     "propose",
+    # What each change type's payload holds, read from its model.
+    "change_types",
     # Same contract, many rows, one approval card with per-row veto.
     "propose_many",
     # Propose's cleanup half: see your OWN open cards, and retract the
@@ -270,10 +275,10 @@ FINANCE_CHAT_TOOL_NAMES = (
     # page comes back as text, public hosts only.
     "web_search",
     "read_page",
+    # What each table and change type is, read from the code, instead of
+    # a prompt restating the schema.
+    "ontology",
 )
-
-# The agents' tool grants, (slug, tool names), applied with every other agent's.
-FINANCE_TOOL_GRANTS = ((FINANCE_CHAT_AGENT_SLUG, FINANCE_CHAT_TOOL_NAMES),)
 
 
 def finance_chat_agent_definition() -> dict[str, Any]:
@@ -292,7 +297,7 @@ def finance_chat_agent_definition() -> dict[str, Any]:
         "system_prompt": FINANCE_CHAT_SYSTEM_PROMPT,
         "temperature": FINANCE_CHAT_TEMPERATURE,
         "max_tokens": FINANCE_CHAT_MAX_TOKENS,
-        "memory_modules": [
+        "context_modules": [
             SNAPSHOT_MODULE_SLUG,
             CHANGES_MODULE_SLUG,
             AMAZON_EXPORTS_MODULE_SLUG,
@@ -315,10 +320,10 @@ FINANCE_VOICE_MODEL: str | None = None
 
 def finance_voice_agent_definition() -> dict[str, Any]:
     """The seed row for Illiana when spoken to: she EXTENDS the chat agent,
-    so her prompt, tools and memory come from it at resolve time and an
-    edit there reaches both. Only the spoken section, the model and the
-    sampling are this row's own; tools and memory are left empty on
-    purpose so they are inherited."""
+    so her prompt, tools and context modules come from it at resolve time
+    and an edit there reaches both. Only the spoken section, the model and
+    the sampling are this row's own; tools and context modules are left
+    empty on purpose so they are inherited."""
     return {
         "slug": FINANCE_VOICE_AGENT_SLUG,
         "name": "Finance Assistant (voice)",
@@ -329,7 +334,7 @@ def finance_voice_agent_definition() -> dict[str, Any]:
         "system_prompt": FINANCE_VOICE_SYSTEM_PROMPT,
         "temperature": FINANCE_VOICE_TEMPERATURE,
         "max_tokens": FINANCE_VOICE_MAX_TOKENS,
-        "memory_modules": [],
+        "context_modules": [],
         "knowledge_base_ids": [],
         "is_active": True,
         "code_mode": True,
@@ -347,26 +352,27 @@ def finance_agent_definitions() -> tuple[dict[str, Any], ...]:
     )
 
 
-def _attach_memory_modules(
+def _attach_context_modules(
     session: Session, definitions: Sequence[dict[str, Any]]
 ) -> int:
     """Append to each existing agent the definition's modules it lacks.
 
     Additive only, like tool grants: what the row already lists stays, in
     order, so a module added to a definition reaches an agent seeded before
-    it. The caller commits. Returns how many grants were added.
+    it. One query for every agent (``attach_modules`` is one per agent).
+    The caller commits. Returns how many grants were added.
     """
     wanted = {
-        d["slug"]: d["memory_modules"] for d in definitions if d["memory_modules"]
+        d["slug"]: d["context_modules"] for d in definitions if d["context_modules"]
     }
     if not wanted:
         return 0
     added = 0
     for agent in session.exec(select(Agent).where(col(Agent.slug).in_(wanted))).all():
-        current = list(agent.memory_modules or [])
+        current = list(agent.context_modules or [])
         new = [slug for slug in wanted[agent.slug] if slug not in current]
         if new:
-            agent.memory_modules = current + new
+            agent.context_modules = current + new
             session.add(agent)
             added += len(new)
     return added
@@ -378,7 +384,7 @@ AFTER_CATALOG = "## MEMORY"
 
 
 def _let_go_of_seeded_catalog(session: Session) -> int:
-    """Strip the catalog a row was seeded with before it became a memory
+    """Strip the catalog a row was seeded with before it became a context
     module, once, recording it like any prompt change: otherwise every
     turn would carry the stale copy and the live one. The caller commits.
     Returns how many rows were trimmed."""
@@ -403,28 +409,32 @@ def _let_go_of_seeded_catalog(session: Session) -> int:
 
 
 def load_finance_agent_fixtures(session: Session) -> dict[str, int]:
-    """Seed the finance agents (see ``app.core.seed``). Memory-module grants
-    are additive by name, so one a definition gained since an agent was
-    seeded still reaches it; tools are granted from ``FINANCE_TOOL_GRANTS``
-    with every other agent's (``load_agent_registry_fixtures``)."""
-    definitions = finance_agent_definitions()
-    counts = {
-        "finance_agents": 0,
-        "finance_module_links": 0,
-        "finance_prompt_trims": 0,
-    }
-    missing = missing_rows(session, Agent, "slug", definitions)
-    for definition in missing:
-        seed_agent(session, definition)
-        counts["finance_agents"] += 1
-        logger.info(f"Seeded agent '{definition['slug']}'")
-    # A freshly seeded agent already lists its modules; only rows that
-    # were there before can lack one.
-    seeded = {d["slug"] for d in missing}
-    present = [d for d in definitions if d["slug"] not in seeded]
-    counts["finance_module_links"] = _attach_memory_modules(session, present)
-    counts["finance_prompt_trims"] = _let_go_of_seeded_catalog(session)
+    """Seed the finance agents and their context modules, skipping existing
+    rows, and never mutating a row that is already there: all of it is
+    editable from the dashboard. Module and tool grants are additive by
+    name, so one a definition gained since an agent was seeded still
+    reaches it."""
+    # Here, not at the top: the AI fixtures package loads finance's seeds.
+    from app.services.ai.fixtures.agent_fixtures import (
+        attach_tools,
+        seed_missing_agents,
+        seed_missing_modules,
+    )
 
+    definitions = list(finance_agent_definitions())
+    counts = {
+        "finance_context_modules": seed_missing_modules(
+            session, list(context_module_definitions())
+        ),
+        "finance_agents": seed_missing_agents(session, definitions),
+        # A freshly seeded agent already lists its modules: this only
+        # reaches rows that were there before.
+        "finance_module_links": _attach_context_modules(session, definitions),
+        "finance_prompt_trims": _let_go_of_seeded_catalog(session),
+        "finance_tool_links": attach_tools(
+            session, FINANCE_CHAT_AGENT_SLUG, FINANCE_CHAT_TOOL_NAMES
+        ),
+    }
     if any(counts.values()):
         session.commit()
     return counts

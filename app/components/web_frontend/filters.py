@@ -10,7 +10,7 @@ import re
 from statistics import median_low
 from typing import Any
 
-from app.core.formatting import counted, format_date_range
+from app.core.formatting import counted, format_date_range, format_value
 from app.core.money import dollars, format_money
 from app.core.time import short_date
 from app.core.time import today as utc_today
@@ -22,6 +22,7 @@ from app.services.finance.utils import period_label
 from app.services.system.models import ComponentStatusType
 from app.services.system.ui import get_status_color_name
 
+from .markup import LINE_ANCHOR as LINE_ANCHOR
 from .markup import code, docstring, highlight, markdown, message
 
 
@@ -78,6 +79,16 @@ def pct(ratio: float | None, digits: int = 0) -> str:
     if ratio is None:
         return ""
     return f"{ratio * 100:.{digits}f}%"
+
+
+def figure(value: float, unit: str) -> str:
+    """A chat card's figure in its unit: money from cents, a percent (0 to
+    100) as the charts read one, a count whole."""
+    if unit == "money":
+        return money(int(value))
+    if unit == "percent":
+        return format_value(value, "percent")
+    return f"{round(value):,}"
 
 
 def cents_to_input(cents: int | None) -> str:
@@ -356,6 +367,27 @@ def assistant(slug: str | None) -> str:
     return ASSISTANTS.get(slug or "", slug or "")
 
 
+# Tailwind classes for a block of rendered markdown. One string, because a
+# heading that looks different in chat than it does in a report is a bug
+# nobody files and everybody notices.
+PROSE_CLASSES = (
+    "text-sm leading-relaxed [&_p]:my-2 "
+    "[&_h1]:text-xl [&_h1]:font-semibold [&_h1]:mt-5 [&_h1]:mb-2 "
+    "[&_h2]:text-lg [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-2 "
+    "[&_h3]:font-semibold [&_h3]:mt-4 [&_h3]:mb-1 "
+    "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2 "
+    "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2 [&_li]:my-0.5 "
+    "[&_strong]:font-semibold "
+    "[&_code]:font-mono [&_code]:text-xs "
+    "[&_pre]:rounded [&_pre]:border [&_pre]:p-3 [&_pre]:my-2 "
+    "[&_pre]:overflow-x-auto "
+    "[&_table]:my-2 [&_th]:text-left [&_th]:font-medium [&_th]:pr-4 "
+    "[&_td]:pr-4 [&_td]:py-0.5 "
+    "[&_a]:underline "
+    "[&_blockquote]:border-l-2 [&_blockquote]:pl-3"
+)
+
+
 # The web's badge tones for the shared semantic colours
 # (``get_status_color_name``, ``ui_auth``), so a state reads the same here
 # as on the CLI and the Flet dashboard.
@@ -393,6 +425,15 @@ def answer_tone(status: int) -> str:
     return "error" if status >= 500 else "warn" if status >= 400 else "ok"
 
 
+def button_attrs(attrs: str) -> str:
+    """A button macro's extra attributes, refusing a ``type=``: the macro
+    writes the button's type itself, and a second one is ignored by the
+    browser, so a submit button would silently never submit."""
+    if re.search(r"(^|\s)type\s*=", attrs):
+        raise ValueError(f"pass type= as the macro's argument, not in attrs: {attrs!r}")
+    return attrs
+
+
 def health_tone(state: str) -> str:
     """The badge tone for a health status value."""
     try:
@@ -412,6 +453,7 @@ FILTERS: dict[str, Callable[..., Any]] = {
     "date_range": date_range,
     "period_label": period_label,
     "pct": pct,
+    "figure": figure,
     "markdown": markdown,
     "code": code,
     "assistant": assistant,
@@ -422,4 +464,5 @@ FILTERS: dict[str, Callable[..., Any]] = {
     "answer_tone": answer_tone,
     "counted": counted,
     "color_tone": color_tone,
+    "button_attrs": button_attrs,
 }

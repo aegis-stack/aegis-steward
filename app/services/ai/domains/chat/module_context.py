@@ -1,13 +1,12 @@
-"""Memory-module context assembly: priority order, token budget, hybrid.
+"""Context-module context assembly: priority order, token budget, hybrid.
 
-Turns an agent's ``memory_modules`` list into one labeled context block.
-Each module renders its static ``prompt_content`` first, then its
-``fetch_function`` output (live per-user data). Modules render in
+Turns an agent's ``context_modules`` list into one labeled context block,
+each module's sources in the order ``ContextModule`` documents. Modules render in
 priority order (lower number first); when a token budget is given,
 higher-priority modules claim it first and any module that does not fit
 the remaining budget is dropped - deterministic and logged.
 
-``MemoryModuleContextProvider`` adapts this into the chat_kit
+``ContextModuleProvider`` adapts this into the chat_kit
 ``ContextProvider`` protocol; ``build_chat_agent`` wires it in
 automatically when the agent config lists modules, so an agent with no
 modules produces context byte-identical to a module-less runtime.
@@ -20,9 +19,11 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.db import get_async_session
 from app.core.log import logger
+from app.core.tools import current_admin
 from app.services.ai.domains.chat import queries
 from app.services.ai.domains.chat.fetchers import FetchContext, run_fetcher
-from app.services.ai.models.agents import MemoryModule
+from app.services.ai.models.agents import ContextModule
+from app.services.shared.deps import caller_is_admin
 
 # Rough chars-per-token heuristic for modules without an explicit
 # token_estimate. Deliberately conservative and cheap; authors who care
@@ -38,7 +39,7 @@ class _RenderedModule:
     tokens: int
 
 
-def _estimate_tokens(module: MemoryModule, content: str) -> int:
+def _estimate_tokens(module: ContextModule, content: str) -> int:
     if module.token_estimate > 0:
         return module.token_estimate
     return max(1, len(content) // _CHARS_PER_TOKEN)
@@ -46,12 +47,12 @@ def _estimate_tokens(module: MemoryModule, content: str) -> int:
 
 async def _load_modules(
     session: AsyncSession, slugs: Sequence[str]
-) -> list[MemoryModule]:
-    modules = await queries.memory_modules_by_slugs(session, slugs)
+) -> list[ContextModule]:
+    modules = await queries.context_modules_by_slugs(session, slugs)
     missing = [slug for slug in slugs if slug not in modules]
     if missing:
         logger.warning(
-            "Agent references unknown memory modules; skipping",
+            "Agent references unknown context modules; skipping",
             module_slugs=missing,
         )
     active = [m for m in modules.values() if m.is_active]
@@ -59,17 +60,24 @@ async def _load_modules(
 
 
 async def _render_module(
-    module: MemoryModule, user_id: str, session: AsyncSession | None
+    module: ContextModule,
+    user_id: str,
+    session: AsyncSession | None,
+    subject: str | None = None,
+    entry: str | None = None,
 ) -> str | None:
-    """Static block first, then the live fetcher data."""
+    """One module's sources, in ``ContextModule``'s order."""
     parts: list[str] = []
     if module.prompt_content:
         parts.append(module.prompt_content.strip())
+    if entry:
+        parts.append(entry.strip())
     if module.fetch_function:
         dynamic = await run_fetcher(
             module.fetch_function,
             FetchContext(
                 user_id=user_id,
+                subject=subject,
                 days_back=(
                     module.default_days_back if module.supports_days_back else None
                 ),
@@ -103,7 +111,7 @@ def _apply_budget(
             remaining -= module.tokens
         else:
             logger.warning(
-                "Memory module dropped to fit token budget",
+                "Context module dropped to fit token budget",
                 module=module.context_key,
                 module_tokens=module.tokens,
                 token_budget=token_budget,
@@ -111,33 +119,53 @@ def _apply_budget(
     return kept
 
 
-async def render_memory_modules(
+async def render_context_modules(
     module_slugs: Sequence[str],
     *,
     user_id: str,
     token_budget: int | None = None,
     session: AsyncSession | None = None,
+    subject: str | None = None,
 ) -> str | None:
-    """Render an agent's memory modules into one labeled block, or None."""
+    """Render an agent's context modules into one labeled block, or None."""
     if not module_slugs:
         return None
 
     if session is None:
-        # Open ONE session for the whole render so every module's fetcher
-        # reuses it (via FetchContext.session) instead of opening its own.
-        async with get_async_session() as owned_session:
-            return await render_memory_modules(
-                module_slugs,
-                user_id=user_id,
-                token_budget=token_budget,
-                session=owned_session,
-            )
+        # Who is asking, settled before the render's session holds SQLite's
+        # write lock: a fetcher asking then (the app map) would open a
+        # second session and wait it out.
+        settled = None
+        if current_admin.get() is None:
+            settled = current_admin.set(await caller_is_admin())
+        try:
+            # ONE session for the whole render, so every module's fetcher
+            # reuses it (via FetchContext.session) instead of opening its own.
+            async with get_async_session() as owned_session:
+                return await render_context_modules(
+                    module_slugs,
+                    user_id=user_id,
+                    token_budget=token_budget,
+                    session=owned_session,
+                    subject=subject,
+                )
+        finally:
+            if settled is not None:
+                current_admin.reset(settled)
 
     modules = await _load_modules(session, module_slugs)
+    per_subject = [m.id for m in modules if m.per_subject and m.id is not None]
+    entries = (
+        await queries.context_entries_for(session, per_subject, subject)
+        if subject and per_subject
+        else {}
+    )
 
     rendered: list[_RenderedModule] = []
     for module in modules:
-        content = await _render_module(module, user_id, session)
+        content = await _render_module(
+            module, user_id, session, subject, entries.get(module.id or 0)
+        )
         if content is None:
             continue
         rendered.append(
@@ -158,14 +186,15 @@ async def render_memory_modules(
     )
 
 
-class MemoryModuleContextProvider:
-    """chat_kit ContextProvider over an agent's memory modules.
+class ContextModuleProvider:
+    """chat_kit ContextProvider over an agent's context modules.
 
-    Reads ``user_id`` off the agent deps (duck-typed); deps without one
-    contribute nothing, so the provider is safe on any deps shape.
+    Reads ``user_id``, and ``subject`` where the app set one, off the agent
+    deps (duck-typed); deps without a user contribute nothing, so the
+    provider is safe on any deps shape.
     """
 
-    name = "memory-modules"
+    name = "context-modules"
 
     def __init__(
         self,
@@ -179,12 +208,13 @@ class MemoryModuleContextProvider:
         user_id = getattr(deps, "user_id", None)
         if not user_id:
             logger.debug(
-                "Memory module provider needs deps.user_id; skipping",
+                "Context module provider needs deps.user_id; skipping",
                 provider=self.name,
             )
             return None
-        return await render_memory_modules(
+        return await render_context_modules(
             self._module_slugs,
             user_id=str(user_id),
             token_budget=self._token_budget,
+            subject=getattr(deps, "subject", None),
         )

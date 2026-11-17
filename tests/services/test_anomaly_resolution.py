@@ -19,8 +19,8 @@ from datetime import date
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import approve, propose, reject
 from app.services.finance.domains.detection.insights.rules import create_insight_if_new
-from app.services.finance.domains.writes.queue import approve, propose, reject
 from app.services.finance.models import FinanceInsight
 
 OWNER = 1
@@ -105,7 +105,7 @@ class TestTheAssistantProposesAReading:
     async def test_the_card_names_the_anomaly_and_the_reading(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains.writes import describe_change
+        from app.services.change_queue import describe_change
 
         db = async_db_session
         insight = await _raised(db)

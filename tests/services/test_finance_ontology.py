@@ -1,0 +1,106 @@
+"""What the finance assistant can answer about the data from the
+``ontology`` tool rather than its prompt: each question's fact is in the
+tool's answer, and what the prompt used to restate of it is gone. The
+measure of meaning moving out of prompt text and into the model."""
+
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+import pytest
+
+from app.core.config import settings
+from app.core.ontology import system_model
+from app.core.tools import result_data
+from app.services.ai.domains.chat.prompts import build_system_prompt
+from app.services.finance.domains.detection.analyst import prompts
+from app.services.system import tools
+
+Ask = Callable[..., Awaitable[dict[str, Any]]]
+
+
+@pytest.fixture
+def ask(app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Ask:
+    """``tools.ontology`` over this app's whole model, as a chat user
+    (not an admin) asks it."""
+    model = system_model(app)
+    monkeypatch.setattr("app.core.ontology.system.current", lambda _=None: model)
+    monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+
+    async def asked(**kwargs: Any) -> dict[str, Any]:
+        return result_data(await tools.ontology(**kwargs))
+
+    return asked
+
+
+# What the finance prompt said of the data before the model said it: each
+# now the model's to say, and gone from every prompt.
+RESTATED = (
+    "integer cents; convert",
+    # Steward's playbook still says it beside ``accounts()``; a prompt edit
+    # is hers to verify in a real turn, so it stays until then.
+    '"transaction_id": int',
+    "ORTHOGONAL",
+    "POSITIVE cents",
+)
+
+
+def test_no_prompt_restates_the_data() -> None:
+    told = _prompts()
+    assert [phrase for phrase in RESTATED if phrase in told] == []
+
+
+def _prompts() -> str:
+    return "\n".join(
+        [
+            prompts.FINANCE_CHAT_SYSTEM_PROMPT,
+            prompts.ANALYST_SYSTEM_PROMPT,
+            prompts.DEEP_DIVE_SYSTEM_PROMPT,
+            build_system_prompt(),
+        ]
+    )
+
+
+def _field(node: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(f for f in node["fields"] if f["name"] == name)
+
+
+async def test_the_unit_and_sign_of_an_amount(ask: Ask) -> None:
+    node = (await ask(node="object:finance_transaction"))["node"]
+    fact = _field(node, "amount")["description"]
+    assert "cents" in fact and "negative" in fact
+
+
+async def test_what_a_split_belongs_to(ask: Ask) -> None:
+    split = "object:finance_transaction_split"
+    found = await ask(node=split)
+    links = {(e["source"], e["target"]) for e in found["edges"] if e["kind"] == "link"}
+    assert (split, "object:finance_transaction") in links
+
+
+@pytest.mark.skip(
+    reason="46 Steward change types (finance_type) set no object, description "
+    "or payload field descriptions yet"
+)
+async def test_which_changes_change_a_transaction(ask: Ask) -> None:
+    found = await ask(kind="change")
+    full = [await ask(node=n["id"]) for n in found["nodes"]]
+    on_transaction = {
+        f["node"]["name"]
+        for f in full
+        if f["node"]["object"] == "object:finance_transaction"
+    }
+    assert {"transaction.categorize", "transaction.split"} <= on_transaction
+
+
+async def test_the_values_a_status_may_take(ask: Ask) -> None:
+    node = (await ask(node="object:finance_transaction"))["node"]
+    allowed = _field(node, "status")["allowed"]
+    assert set(allowed) == {"pending", "posted", "removed"}
+
+
+async def test_who_owns_a_table(ask: Ask) -> None:
+    node = (await ask(node="object:finance_tag"))["node"]
+    assert node["owner"] == "service:finance"
+    assert "orthogonal" in node["description"].lower()

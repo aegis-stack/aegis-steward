@@ -1,18 +1,14 @@
 """An agent's tools: its ``agent_tool`` rows' names, resolved from the
-core registry (``app.core.tools``) and wrapped for the tool-call ledger.
-
-A database row naming a tool with no registered callable is skipped with
-a warning, never an error: a stale row must not brick chat.
-"""
+core registry (``app.core.tools``) and wrapped for the tool-call ledger."""
 
 from collections.abc import Iterable
 import functools
 import inspect
 from typing import Any
 
+from app.core import steps
 from app.core.log import logger
-from app.core.money import with_dollars
-from app.core.tools import ADMIN_ONLY, ToolFunc, get_tool
+from app.core.tools import ADMIN_ONLY, Refused, ToolFunc, get_tool
 from app.services.ai.domains.chat.tool_telemetry import instrument
 from app.services.shared.deps import caller_is_admin
 
@@ -24,11 +20,14 @@ def resolve_tools(names: Iterable[str]) -> list[ToolFunc]:
     callable was renamed or removed degrades that one tool, not the
     whole agent.
 
-    Every callable is wrapped for the per-call ledger on the way out, and
-    returns its money in dollars beside the cents. This is the one seam an
-    agent's tools all pass through, so a new tool is measured - and read -
-    by existing rather than by remembering a decorator. An ``admin`` tool
-    answers only an admin (``_admins_only``).
+    Every callable is wrapped for the per-call ledger on the way out. This
+    is the one seam an agent's tools all pass through, so a new tool is
+    measured by existing rather than by remembering a decorator. Outside
+    that, each call is heard as a step by whoever is watching the turn,
+    native or inside a code-mode script, and a refused argument is answered
+    (``_told``) rather than raised. Each is the registry's ``served``
+    callable, money in dollars beside its cents, as MCP serves it, so a
+    script reads what the model is shown.
     """
     resolved: list[ToolFunc] = []
     for name in names:
@@ -36,9 +35,42 @@ def resolve_tools(names: Iterable[str]) -> list[ToolFunc]:
         if entry is None:
             logger.warning("Tool has no registered callable; skipping", tool_name=name)
             continue
-        func = _admins_only(entry.func) if entry.admin else entry.func
-        resolved.append(instrument(entry.name, _in_dollars(func)))
+        func = _admins_only(entry.served) if entry.admin else entry.served
+        resolved.append(_told(entry.name, instrument(entry.name, func)))
     return resolved
+
+
+def _told(name: str, func: ToolFunc) -> ToolFunc:
+    """``func`` (the tool ``name``) heard as a step (``steps.heard``), and
+    answering its ``ValueError`` (a tool refusing an argument, naming what
+    it knows) as the model's to correct, as a LangChain turn does: raised,
+    Pydantic AI ends the turn, a live call with it. The ledger beneath has
+    recorded it as failed."""
+
+    def told(exc: ValueError) -> Refused:
+        return Refused(error=f"{type(exc).__name__}: {exc}")
+
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def answer(*args: Any, **kwargs: Any) -> Any:
+            steps.heard(name)
+            try:
+                return await func(*args, **kwargs)
+            except ValueError as exc:
+                return told(exc)
+
+        return answer
+
+    @functools.wraps(func)
+    def answer_sync(*args: Any, **kwargs: Any) -> Any:
+        steps.heard(name)
+        try:
+            return func(*args, **kwargs)
+        except ValueError as exc:
+            return told(exc)
+
+    return answer_sync
 
 
 def _admins_only(func: ToolFunc) -> ToolFunc:
@@ -48,26 +80,8 @@ def _admins_only(func: ToolFunc) -> ToolFunc:
     @functools.wraps(func)  # the schema the model sees is func's
     async def guarded(*args: Any, **kwargs: Any) -> Any:
         if not await caller_is_admin():
-            return ADMIN_ONLY
+            return Refused(error=ADMIN_ONLY)
         result = func(*args, **kwargs)
         return await result if inspect.isawaitable(result) else result
 
     return guarded
-
-
-def _in_dollars(func: ToolFunc) -> ToolFunc:
-    """``func`` with each ``*_cents`` joined by its ``*_usd`` (``with_dollars``),
-    so a ``run_code`` script reads what the model is shown (#460)."""
-    if inspect.iscoroutinefunction(func):
-
-        @functools.wraps(func)
-        async def run(*args: Any, **kwargs: Any) -> Any:
-            return with_dollars(await func(*args, **kwargs))
-
-        return run
-
-    @functools.wraps(func)
-    def run_sync(*args: Any, **kwargs: Any) -> Any:
-        return with_dollars(func(*args, **kwargs))
-
-    return run_sync

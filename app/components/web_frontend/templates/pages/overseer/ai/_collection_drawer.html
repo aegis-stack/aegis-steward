@@ -1,15 +1,34 @@
-{# One collection in the drawer: the files it indexed and the chunks each
-   became, and deleting it. #}
-{% from "components/macros/layout.html" import card, dialog_title %}
+{# One collection in the drawer: its indexing job (followed as it runs,
+   pushed, or how the last one ended), each file it indexed (its type,
+   chunks and when; opened in Overseer > Code, re-indexed or removed from
+   its row's menu); sources to add (the steps, in the dialog), and the
+   whole collection re-indexed or deleted, behind "...". #}
+{% from "components/macros/layout.html" import card, dialog_title, dropdown, menu_item %}
 {% from "components/macros/table.html" import data_table %}
 {% from "components/macros/form.html" import action %}
-<div class="space-y-4">
+{% macro file_actions(row) -%}
+{% call dropdown(options=True) %}
+    {% if row.source.url %}{{ menu_item("Open in Code", url=row.source.url) }}{% endif %}
+    {{ menu_item("Re-index", row.reindex) }}
+    {{ menu_item("Remove", row.remove, danger=True) }}
+{% endcall %}
+{%- endmacro %}
+<div class="space-y-4" data-wide>
   {{ dialog_title(name, facts=(files|length) ~ " files") }}
-  <div>{{ action("Delete collection", delete, "danger") }}</div>
+  <div id="ai-collection-actions" class="flex flex-wrap items-center gap-2">
+    {{ action("Add sources", add, "primary") }}
+    {% call dropdown(options=True) %}
+      {{ menu_item("Re-index", reindex) }}
+      {{ menu_item("Delete collection", delete, danger=True) }}
+    {% endcall %}
+  </div>
+  {% if job %}{% with card_id = "ai-collection-job" %}{% include "pages/overseer/ai/_job_card.html" %}{% endwith %}{% endif %}
   {% call card("Files", id="ai-collection-files") %}
     {{ data_table([
-      {"key": "source", "label": "Source", "kind": "code"},
+      {"key": "source", "label": "Source", "kind": "file"},
+      {"key": "type", "label": "Type"},
       {"key": "chunks", "label": "Chunks", "kind": "int", "align": "right"},
-    ], files, empty="No files in this collection") }}
+      {"key": "indexed", "label": "Indexed", "kind": "date"},
+    ], files, empty="No files in this collection", actions=file_actions) }}
   {% endcall %}
 </div>

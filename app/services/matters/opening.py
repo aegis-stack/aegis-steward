@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import before_and_after
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.change_queue import ChangeDisplayRow
 
 
 class OpenMatterPayload(BaseModel):

@@ -54,6 +54,7 @@ async def retry(
     """Match every waiting scan against the ledger again, one card per
     row found as one batch per download; put the ones done waiting in
     front of a person. Returns how many cards were made."""
+    from app.services.change_queue import propose_many
     from app.services.documents.domains.reading.checks import (
         CHECK,
         PROPOSED_BY,
@@ -62,7 +63,6 @@ async def retry(
         renamed_rows,
         the_ledger,
     )
-    from app.services.finance.service import propose_many
     from app.services.finance.utils import current_date
 
     today = today or current_date()

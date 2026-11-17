@@ -51,11 +51,18 @@ if TYPE_CHECKING:
     )
     from app.services.finance.constants import INCOME_KINDS
     from app.services.finance.domains import imports_job
+    from app.services.finance.domains.detection import (
+        declare_recurring,
+        detect_recurring,
+        generate_insights,
+        plan_recurring,
+        promote_curated_streams,
+    )
     from app.services.finance.domains.detection import queries as detection_queries
     from app.services.finance.domains.detection.analyst import (
-        FINANCE_TOOL_GRANTS,
+        existing_note,
         load_finance_agent_fixtures,
-        memory_module_definitions,
+        run_analyst_note,
     )
     from app.services.finance.domains.detection.analyst.live_engines import ENGINE_SEEDS
     from app.services.finance.domains.detection.analyst.prompts import LIVE_SIGN_OFF
@@ -64,8 +71,10 @@ if TYPE_CHECKING:
         STANDALONE_USER_ID,
     )
     from app.services.finance.domains.detection.insights.commitments import (
+        commitment_rollup,
         is_commitment,
         is_paused,
+        stream_staleness,
     )
     from app.services.finance.domains.detection.insights.formatting import (
         format_apr,
@@ -83,6 +92,19 @@ if TYPE_CHECKING:
         decline_offer,
     )
     from app.services.finance.domains.imports_job import NEEDS_ACCOUNT, run_import_job
+    from app.services.finance.domains.investments import queries as investments_queries
+    from app.services.finance.domains.investments.activity import replay_positions
+    from app.services.finance.domains.investments.loader import (
+        import_investment_activities,
+    )
+    from app.services.finance.domains.investments.optum import (
+        UnknownActivityTypeError,
+        parse_optum_settled_transactions,
+    )
+    from app.services.finance.domains.investments.securities import (
+        list_current_holdings,
+        market_value_cents,
+    )
     from app.services.finance.domains.ledger import (
         changelog,
         links,
@@ -90,21 +112,26 @@ if TYPE_CHECKING:
         reimbursements,
         views,
     )
-    from app.services.finance.domains.ledger import (
-        queries as ledger_queries,
-    )
+    from app.services.finance.domains.ledger import queries as ledger_queries
     from app.services.finance.domains.ledger.accounts import (
+        account_transaction_totals,
         effective_balance,
         liability_details,
         register_balance_as_of,
         statement_balance,
     )
-    from app.services.finance.domains.ledger.categories import list_categories
+    from app.services.finance.domains.ledger.cash_flow import monthly_cashflow
+    from app.services.finance.domains.ledger.categories import (
+        list_categories,
+        spending_by_category,
+    )
     from app.services.finance.domains.ledger.hydrate import hydrate_transactions
     from app.services.finance.domains.ledger.institutions import websites
     from app.services.finance.domains.ledger.merchant_icon import (
         ICON_PATH,
         Icon,
+        domain_from_website,
+        fund_family_domain,
         icon_url,
         icons_for_names,
         institution_icons,
@@ -116,6 +143,7 @@ if TYPE_CHECKING:
         counts_in_net_worth,
         net_of,
     )
+    from app.services.finance.domains.ledger.networth import recompute_snapshots
     from app.services.finance.domains.ledger.numbers import (
         aba_ok,
         reveal_number,
@@ -124,8 +152,10 @@ if TYPE_CHECKING:
     )
     from app.services.finance.domains.ledger.packet import receipts_packet
     from app.services.finance.domains.ledger.properties import (
+        PROPERTY_ACCOUNT_TYPE,
         PROPERTY_KINDS,
         VALUATION_SOURCES,
+        property_metadata,
         secured_position,
     )
     from app.services.finance.domains.ledger.queries import (
@@ -155,6 +185,7 @@ if TYPE_CHECKING:
     from app.services.finance.domains.ledger.queries.transactions import (
         newest_transaction_date,
     )
+    from app.services.finance.domains.ledger.series_parsing import parse_series_lines
     from app.services.finance.domains.ledger.subjects import (
         get_subject,
         institution_for_party,
@@ -163,30 +194,42 @@ if TYPE_CHECKING:
         subject_for_party,
         subject_of,
     )
-    from app.services.finance.domains.ledger.valuations import list_valuations
-    from app.services.finance.domains.planning import (
-        budgets as planning_budgets,
+    from app.services.finance.domains.ledger.transactions import transaction_tags
+    from app.services.finance.domains.ledger.valuations import (
+        list_valuations,
+        preferred_valuation_row,
     )
+    from app.services.finance.domains.planning import budgets as planning_budgets
     from app.services.finance.domains.planning import plan as plans
-    from app.services.finance.domains.planning import (
-        queries as planning_queries,
+    from app.services.finance.domains.planning import queries as planning_queries
+    from app.services.finance.domains.planning.allocation import (
+        MonthlyFigures,
+        resolved_meta,
+        target_for_rule,
     )
     from app.services.finance.domains.planning.budgets import strip
     from app.services.finance.domains.planning.budgets.closing import ClosedMonth
-    from app.services.finance.domains.planning.debts import (
-        METHODS as PAYOFF_METHODS,
-    )
-    from app.services.finance.domains.planning.debts import (
-        Debt,
-        amortize,
-        extra_buys,
-    )
+    from app.services.finance.domains.planning.debts import METHODS as PAYOFF_METHODS
+    from app.services.finance.domains.planning.debts import Debt, amortize, extra_buys
     from app.services.finance.domains.planning.debts import plan as payoff_plan
     from app.services.finance.domains.planning.envelope_tags import tag_name
     from app.services.finance.domains.planning.envelopes import envelope_metadata
-    from app.services.finance.domains.planning.goals import goal_metadata
+    from app.services.finance.domains.planning.goals import (
+        GOAL_ACCOUNT_TYPE,
+        goal_auto_contribute,
+        goal_balance,
+        goal_eta,
+        goal_landing,
+        goal_metadata,
+        goal_progress,
+        set_auto_contribute,
+        set_goal_metadata,
+    )
     from app.services.finance.domains.planning.insights import resolve_insight
     from app.services.finance.domains.planning.plan import plan_row
+    from app.services.finance.domains.planning.recurring import (
+        queries as recurring_queries,
+    )
     from app.services.finance.domains.planning.recurring import streams
     from app.services.finance.domains.planning.recurring.forecast import (
         bill_reminder,
@@ -209,33 +252,14 @@ if TYPE_CHECKING:
     from app.services.finance.domains.planning.retirement import (
         LABELS as PLAN_TYPE_LABELS,
     )
-    from app.services.finance.domains.planning.retirement import (
-        TYPES as PLAN_TYPES,
-    )
+    from app.services.finance.domains.planning.retirement import TYPES as PLAN_TYPES
     from app.services.finance.domains.planning.retirement import Assumptions
-    from app.services.finance.domains.planning.retirement import (
-        label as plan_label,
-    )
+    from app.services.finance.domains.planning.retirement import label as plan_label
     from app.services.finance.domains.writes.curation import (
         AssignPayeePayload,
         assign_payee_execute,
     )
     from app.services.finance.domains.writes.display import txn_row
-    from app.services.finance.domains.writes.queue import (
-        MAX_BATCH_SIZE,
-        get_change,
-        list_changes,
-        propose,
-        propose_many,
-        revise_fields,
-        withdrawn,
-    )
-    from app.services.finance.domains.writes.registry import (
-        ChangeExecutor,
-        current_payload,
-        editable_fields,
-        executor_for,
-    )
     from app.services.finance.domains.writes.terms import (
         EXTRA_PAYMENT,
         PREPAYMENT,
@@ -247,15 +271,20 @@ if TYPE_CHECKING:
     )
     from app.services.finance.models import (
         FinanceAccount,
+        FinanceCategory,
         FinanceConnection,
         FinanceInsight,
-        FinancePendingChange,
         FinancePlan,
         FinanceRecurringStream,
         FinanceSubject,
         FinanceTag,
         FinanceTransaction,
         FinanceTransactionChangelog,
+        FinanceTransactionSplit,
+    )
+    from app.services.finance.models.accounts import (
+        FinanceLiabilityDetail,
+        FinanceValuation,
     )
     from app.services.finance.models.imports import FinanceImportBatch
     from app.services.finance.models.planning import INSIGHT_RESOLUTIONS

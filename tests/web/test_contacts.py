@@ -348,8 +348,8 @@ class TestLookingItUpByHand:
         # The card comes to the reader: the dialog opens on it, drawn by
         # the one card route the chat uses, not a second rendering.
         assert answer.status_code == 200
-        loader = one(answer.text, "[data-component-load='pending_change']")
-        assert loader.get("hx-get").startswith("/chat/components/change/")
+        loader = one(answer.text, "[data-card-load]")
+        assert loader.get("hx-get").startswith("/partials/changes/")
         assert button.get("hx-target") == "#dialog-body"
 
     def test_the_page_redraws_when_its_card_is_decided(
@@ -384,24 +384,3 @@ class TestLookingItUpByHand:
         # Nothing to decide, so no dialog: a 204 swaps nothing.
         assert answer.status_code == 204
         assert "Nothing new" in triggers(answer)["toast"]["text"]
-
-
-def test_a_rows_note_is_drawn_under_it(add_template) -> None:
-    """The one macro every card draws with puts a row's note on a line
-    of its own."""
-    from app.components.web_frontend.rendering import templates
-
-    add_template(
-        "probe_note.html",
-        '{% from "components/macros/changes.html" import display %}{{ display(change) }}',
-    )
-    html = templates.get_template("probe_note.html").render(
-        change={
-            "display": [
-                {"label": "Contact", "value": "Maple"},
-                {"label": "Phone", "value": "- → 555", "note": "read at https://x"},
-            ]
-        }
-    )
-    note = one(html, "li [data-note]")
-    assert text(note) == "read at https://x"

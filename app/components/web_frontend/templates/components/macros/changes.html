@@ -1,250 +1,156 @@
-{# Pending-change macros: the one set of parts every surface that shows a
-   proposal uses. ``display`` and ``verbs`` came from the approvals page;
-   the chat cards below render the STORED queue row, the same row approval
-   executes, so what the user sees and what runs cannot diverge.
-#}
-{% from "components/macros/icons.html" import icon %}
-{% from "components/macros/form.html" import action, control %}
-{% from "components/macros/layout.html" import avatar, badge %}
+{# Approval cards (#1368): the change queue's confirmation surface, defined
+   once and shown in the chat (a reply carries the cards its tools proposed)
+   and in the review list. The rows are the queue's own description of the
+   change, resolved from the database, never the model's words. Approve and
+   Reject swap the card for its new state; Edit (a type that lets the reader
+   put their own words on it first) opens the one dialog, and a saved edit
+   redraws the card wherever it is up (``refresh``). #}
+{% from "components/macros/form.html" import action, checkbox %}
+{% from "components/macros/feedback.html" import error_banner %}
+{% from "components/macros/layout.html" import avatar, badge, facts %}
 
-{# A proposal's value with teal on exactly the part that will change:
-   an arrow's target, or the leading amount of a "$3.99 · memo" line.
-   The subject line never gets it; teal means "will happen". #}
-{% macro fact(value) -%}
-{%- if " → " in value -%}
-{%- set before, _sep, target = value.rpartition(" → ") -%}
-{{ before }} → <span class="text-aegis-teal font-medium">{{ target }}</span>
-{%- elif " · " in value -%}
-{%- set head, _sep, tail = value.partition(" · ") -%}
-<span class="text-aegis-teal font-medium">{{ head }}</span> · {{ tail }}
-{%- else -%}
-<span class="text-aegis-teal font-medium">{{ value }}</span>
-{%- endif -%}
-{%- endmacro %}
-
-{# What a proposal says, the way a person reads it: the subject on its
-   own line (every executor puts it first, by convention), then each
-   proposed fact as a short sentence. The labels stay for the reader who
-   wants them, quieter than the values. #}
-{# The page a card's claim was READ OFF, drawn beside it.
-
-   A citation proves where text came from, not that the reading was
-   right, and the moment somebody is deciding is the one moment they
-   could check it - "page 2" on a card asks for trust in something
-   nobody can see. Lazy-loaded: a queue of forty cards must not fetch
-   forty page images to show the first screen. #}
-{% macro cited_page(rows) %}
-{% set cited = rows | selectattr("page") | first %}
-{% if cited %}
-{#- Clickable, because a thumbnail answers "which paper is this" and
-    the next question is always "what else does it say". The document
-    dialog has the original beside the text read off every page, so the
-    preview is the door to it rather than a picture of one. -#}
-<button type="button" {{ hx_dialog("/documents/" ~ cited.document_id ~ "?reading=1") }}
-        aria-label="Open the document at page {{ cited.page }}"
-        class="block w-full text-left">
-{#- The intrinsic size is the RENDERED page's, so the box holds its
-    place before the image lands; the CSS still governs what is drawn. -#}
-<img data-page loading="lazy" width="1275" height="1650"
-     src="/api/v1/documents/{{ cited.document_id }}/pages/{{ cited.page }}/image"
-     alt="Page {{ cited.page }}, the page this was read from"
-     class="mt-2 w-full max-h-64 object-contain object-top rounded border border-aegis-border bg-aegis-bg hover:border-aegis-teal transition-colors">
-</button>
-{% endif %}
+{# The frame both cards share: a title line, its right-hand side as the
+   caller's body, then ``rows``. A batch is a form so its "skip" boxes ride
+   along: htmx sends the enclosing form's fields with a button's POST. A
+   decided card (``decided``) folds to that line: history, not homework.
+   ``refresh`` is how a revised card fetches itself again. #}
+{% macro _card(tag, id, data, title, side, by=none, decided=False, refresh="") %}
+{% set head %}
+    <span class="font-medium text-aegis-text">{{ title }}</span>
+    <span class="text-xxs">{{ side }}</span>
+{% endset %}
+<{{ tag }} id="{{ id }}" {{ data }} {{ refresh }} class="my-2 border border-aegis-border rounded-lg p-3 text-sm bg-aegis-card">
+  {% if decided %}<details><summary class="list-none cursor-pointer flex items-center justify-between gap-3">{{ head }}</summary>
+  {% else %}<div class="flex items-center justify-between gap-3">{{ head }}</div>{% endif %}
+  {% if by %}<div class="text-xs text-aegis-muted">{{ by }}</div>{% endif %}
+  {{ caller() }}
+  {% if decided %}</details>{% endif %}
+</{{ tag }}>
 {% endmacro %}
 
-{# A proposal's subject line: the row's face (logo, glyph or initial),
-   then what the caller says of it. #}
-{% macro subject_line(name, icon_url, category) %}
-<p class="flex items-baseline gap-2 text-sm font-medium text-aegis-text">
-  <span class="shrink-0 self-center">{{ avatar(name, icon_url, category=category) }}</span>
-  <span data-subject>{{ caller() }}</span>
-</p>
+{# Approve and Reject swap the card they sit on, found by its ``data``
+   mark: the same card can be up twice (the thread and the waiting list),
+   so an id would find the first copy, not this one. #}
+{% macro _actions(url, mark, reject, edit=none) %}
+{% set swap = 'hx-target="closest [' ~ mark ~ ']" hx-swap="outerHTML"' %}
+<div class="mt-3 flex gap-2">
+  {{ action("Approve", 'hx-post="' ~ url ~ '/approve" ' ~ swap, tone="primary") }}
+  {{ action(reject, 'hx-post="' ~ url ~ '/reject" ' ~ swap, tone="danger") }}
+  {{ _edit(edit) }}
+</div>
 {% endmacro %}
 
-{# One labelled fact under the subject, with its note when asked. #}
-{% macro fact_row(row, notes=True) %}<li><span class="text-aegis-muted/80">{{ row.label }}</span> {{ fact(row.value) }}{% if notes and row.note %}<span class="block pl-2 text-xxs text-aegis-muted/70 break-all" data-note>{{ row.note }}</span>{% endif %}</li>{% endmacro %}
+{# The reader's own words on a card first, where its type allows: the form
+   opens in the one dialog, so every surface's card opens the same one. #}
+{% macro _edit(url) %}{% if url %}{{ action("Edit", hx_dialog(url, "data-edit")) }}{% endif %}{% endmacro %}
 
-{% macro display(change) %}
-{% set rows = change.display %}
-{% if rows %}
-{# The same face the register gives this transaction: the payee's logo,
-   else its category's glyph, else its initial. A proposal is about a
-   row, and the row is recognisable. #}
-{% call subject_line(change.payee or rows[0].value, change.icon_url, change.category) %}{{ rows[0].value }}{% endcall %}
-{% if rows|length > 1 %}
-<ul class="mt-0.5 space-y-0.5 text-xs text-aegis-muted">
-  {% for row in rows[1:] %}{{ fact_row(row) }}{% endfor %}
-</ul>
-{% endif %}
-{% if change.scans %}
-{#- A card that carries its own pictures shows them, not the page they
-    were cut from: a check's front (issue 420), a photo (issue 430), each
-    page of a combined document in order (issue 439). -#}
+{# The pictures a card carries (a scanned page, a photo), drawn from where
+   its type says they are stored. #}
+{% macro _pictures(row) %}
+{% if row.pictures %}
 <div class="mt-2 flex flex-wrap gap-2">
-  {% for n in range(change.scans) %}
-  <img data-scan loading="lazy" width="1800" height="830" src="/review/changes/{{ change.id }}/scan{%- if n -%}?page={{ n }}{%- endif -%}"
-       alt="Picture {{ n + 1 }} of {{ change.scans }} this card files"
-       class="{{ 'w-full' if change.scans == 1 else 'w-36' }} max-h-40 object-contain object-left rounded border border-aegis-border bg-aegis-bg">
+  {% for src in row.pictures %}
+  <img data-scan loading="lazy" width="144" height="160" src="{{ src }}" alt="Picture {{ loop.index }} of {{ loop.length }} on this card"
+       class="{{ 'w-full' if loop.length == 1 else 'w-36' }} max-h-40 object-contain object-left rounded border border-aegis-border bg-aegis-bg">
   {% endfor %}
 </div>
-{% else %}
-{{ cited_page(rows) }}
 {% endif %}
-{% endif %}
-{% if change.error %}<p class="text-xs text-error">{{ change.error }}</p>{% endif %}
 {% endmacro %}
 
-{% macro verbs(approve_url, reject_url, target, include=None, edit_url=None) %}
-<div class="flex items-center gap-2 text-xs">
-  {{ action("Approve all" if include else "Approve", 'hx-post="' ~ approve_url ~ '" hx-target="' ~ target ~ '" hx-swap="outerHTML"' ~ (' hx-include="' ~ include ~ '"' if include else ""), tone="primary") }}
-  {{ action("Reject all" if include else "Reject", 'hx-post="' ~ reject_url ~ '" hx-target="' ~ target ~ '" hx-swap="outerHTML"') }}
-  {#- Your own words on it first, for the types that allow it. Opens
-      the one dialog: an approve is a click, an edit is a form. -#}
-  {% if edit_url %}{{ edit_button(edit_url) }}{% endif %}
-</div>
+{# The page a card's claim was read off (``cited``), drawn where it is
+   decided: the one moment someone could check the reading. Lazy: a queue
+   of forty cards must not fetch forty pages to show the first screen.
+   The intrinsic size is a rendered page's, so the box holds its place. #}
+{% macro _cited(cited) %}
+{% if cited %}
+{% set page %}<img data-page loading="lazy" width="1275" height="1650" src="{{ cited.src }}" alt="Page {{ cited.page }}, the page this was read from"
+     class="w-full max-h-64 object-contain object-top rounded border border-aegis-border bg-aegis-bg hover:border-aegis-teal transition-colors">{% endset %}
+{% set label = "Open the document at page " ~ cited.page %}
+{% if cited.reader %}<button type="button" {{ hx_dialog(cited.reader) }} aria-label="{{ label }}" class="block w-full mt-2 text-left">{{ page }}</button>
+{% else %}<a href="{{ cited.src }}" target="_blank" rel="noopener" aria-label="{{ label }}" class="block mt-2">{{ page }}</a>{% endif %}
+{% endif %}
 {% endmacro %}
-{% macro edit_button(url) %}{{ action("Edit", hx_dialog(url) ~ ' data-edit') }}{% endmacro %}
 
-{#- Where an editable card's form lives, whichever surface drew the
-    card: the dialog is global, so chat's card and Review's open the
-    same one. -#}
-{% macro edit_url(change) -%}
-{%- if change.editable %}/review/changes/{{ change.id }}/edit{% endif -%}
-{%- endmacro %}
+{# What a card is about: the face its service gives it, then ``caller``. #}
+{% macro _subject(face) %}
+<p class="mt-2 flex items-center gap-2 text-sm font-medium text-aegis-text">{% if face %}{{ avatar(**face) }}{% endif %}{{ caller() }}</p>
+{% endmacro %}
 
-{# A single proposal in the transcript. ``card`` is the route's shaping:
-   the change, its status word and tone, and a withdrawal note. Decided
-   cards fold to their one line: history, not homework. #}
-{% macro pending_change_card(card) %}
-{% set change = card.change %}
-{% set target = "chat-change-" ~ change.id %}
-{% set title = change.title or change.change_type %}
-<div id="{{ target }}" data-component="pending_change" class="raised p-4 max-w-md">
-  {% if card.pending %}
-  <div class="flex items-center justify-between gap-3 mb-3">
-    <h3 class="text-sm font-semibold text-aegis-text">{{ title }}</h3>
-    {{ badge(card.status, card.tone) }}
+{# A card's reading: its subject, the lines that will change, the page it
+   cites or the pictures it files, and its error. #}
+{% macro _body(row) %}
+{{ _note(row) }}
+{% if row.subject %}{% call _subject(row.face) %}<span data-subject>{{ row.subject }}</span>{% endcall %}{% endif %}
+<div class="mt-2">{{ facts(row.display) }}</div>
+{{ _pictures(row) }}
+{{ _cited(row.cited) }}
+{% if row.error %}<div class="mt-2">{{ error_banner([row.error]) }}</div>{% endif %}
+{% endmacro %}
+
+{# Why a decided row went the way it did: a withdrawal's reason, a veto. #}
+{% macro _note(row) %}{% if row.note and row.status != "pending" %}<p class="mt-2 text-xs text-aegis-muted" data-note>{{ row.note }}</p>{% endif %}{% endmacro %}
+
+{% macro change_card(change) %}
+{% call _card("div", "change-" ~ change.id, "data-change", change.title, badge(change.label, change.tone), change.by, decided=change.status != "pending", refresh=change.refresh) %}
+  {{ _body(change) }}
+  {% if change.status == "pending" %}{{ _actions(change.url, "data-change", "Reject", change.edit) }}{% endif %}
+{% endcall %}
+{% endmacro %}
+
+{# One row of a batch: its skip while it waits, its outcome after. #}
+{% macro _batch_row(row) %}
+<li class="border-t border-aegis-border/50 pt-2 first:border-0 first:pt-0">
+  <div class="flex items-center justify-between gap-3">
+    {% if row.status == "pending" %}{{ checkbox("exclude_ids", label="Skip this one", value=row.id) }}{% endif %}
+    <span class="ml-auto flex items-center gap-2 text-xxs">{{ _edit(row.edit) }}{{ badge(row.label, row.tone) }}</span>
   </div>
-  {{ display(change) }}
-  <div class="mt-3">{{ verbs(card.url ~ "/approve", card.url ~ "/reject", "#" ~ target, edit_url=edit_url(change) or none) }}</div>
-  {% else %}
-  <details>
-    <summary class="list-none cursor-pointer flex items-center justify-between gap-3">
-      <span class="text-sm font-semibold text-aegis-text">{{ title }}</span>
-      {{ badge(card.status, card.tone) }}
-    </summary>
-    {% if card.note %}<p class="mt-2 text-xs text-aegis-muted">{{ card.note }}</p>{% endif %}
-    <div class="mt-3">{{ display(change) }}</div>
-  </details>
-  {% endif %}
-</div>
-{% endmacro %}
-
-{# A batch: every proposal as a row with a per-row veto while pending, the
-   bulk verbs saying how many will land, and an outcome summary once
-   decided. #}
-{# One proposal in a batch: its veto, or the outcome it already got. #}
-{% macro change_row(row) %}
-<li class="flex items-start gap-3 py-2 {{ 'opacity-60' if not row.pending }}">
-  {% if row.pending %}
-  <label class="inline-flex items-center gap-1 text-xxs text-aegis-muted mt-0.5" title="Leave this one out">
-    <input type="checkbox" name="exclude_ids" value="{{ row.change.id }}" class="{{ control('checkbox') }}"> skip
-  </label>
-  {% else %}
-  <span class="text-xxs mt-0.5">{{ badge(row.status, row.tone) }}</span>
-  {% endif %}
-  <div class="flex-1">{{ display(row.change) }}</div>
+  {{ _body(row) }}
 </li>
 {% endmacro %}
 
-{# What a group of identical changes says instead of saying it N times:
-   who, how many, what they come to, over what span - then the change
-   itself, once. #}
-{% macro group_summary(group) %}
-{% call subject_line(group.change.payee, group.change.icon_url, group.change.category) %}
-    {{ group.change.payee or "These" }}
-    <span class="text-aegis-muted font-normal">× {{ group.count }}</span>
-    {% if group.total %}<span class="tabular-nums">· {{ group.total|money }}</span>{% endif %}
-{% endcall %}
-<ul class="mt-0.5 space-y-0.5 text-xs text-aegis-muted">
-  {% for row in group.change.display[1:] %}{{ fact_row(row, notes=False) }}{% endfor %}
-  {% if group.span %}<li data-span>{{ group.span[0]|date_range(group.span[1]) }}</li>{% endif %}
-</ul>
-{% endmacro %}
-
-{% macro pending_change_batch_card(card) %}
-{% set target = "chat-batch-" ~ card.batch_id %}
-{% set heading %}{{ card.title }} <span class="text-aegis-muted font-normal">× {{ card.rows|length }}</span>{% endset %}
-<div id="{{ target }}" data-component="pending_change_batch" class="raised p-4">
-  {% if card.pending %}
-  <div class="flex items-center justify-between gap-3 mb-2">
-    <h3 class="text-sm font-semibold text-aegis-text">{{ heading }}</h3>
-    {{ badge(card.status, card.tone) }}
-  </div>
-  <ul class="divide-y divide-aegis-border/60">
-    {% for group in card.groups %}
-    {% if group.single %}
-    {{ change_row(group.rows[0]) }}
-    {% else %}
-    {# Identical changes read as one: what they have in common, what
-       they add up to, and the span they cover. The per-row veto lives
-       inside the expander - what collapses is the reading, never the
-       control. #}
-    <li class="py-2">
-      <div class="flex items-start gap-3">
-        <label class="inline-flex items-center gap-1 text-xxs text-aegis-muted mt-0.5" title="Leave all of these out">
-          <input type="checkbox" data-skip-group class="{{ control('checkbox') }}"> skip
-        </label>
-        <div class="flex-1 min-w-0">{{ group_summary(group) }}</div>
+{# A batch: every row with its own skip, rows that say the same thing
+   (``groups``) read once - what they share, how many, what they come to
+   and over what span - with one skip for
+   all of them (app.js ticks the rows' own boxes, which are all the form
+   reads) and the rows behind a fold: what folds is the reading, never the
+   control. #}
+{% macro batch_card(batch) %}
+{% set count = batch.rows|length %}
+{% set side = count ~ (" change" if count == 1 else " changes") if batch.pending else batch.outcome %}
+{% call _card("form", "batch-" ~ batch.batch_id, "data-change-batch", batch.title, side, batch.by, decided=not batch.pending, refresh=batch.refresh) %}
+  <ul class="mt-2 space-y-2">
+    {% for group in batch.groups %}
+    {% if group.rows|length == 1 %}{{ _batch_row(group.rows[0]) }}{% else %}
+    <li class="border-t border-aegis-border/50 pt-2 first:border-0 first:pt-0" data-change-group>
+      <div class="flex items-center justify-between gap-3">
+        {% if batch.pending %}{{ checkbox("", label="Skip all " ~ group.rows|length, attrs="data-skip-group") }}{% endif %}
+        <span class="text-xxs ml-auto text-aegis-muted">× {{ group.rows|length }}{% if group.total is not none %} · <span data-total class="tabular-nums">{{ group.total|money }}</span>{% endif %}</span>
       </div>
-      {# The same fold the tool trail uses: the control says which way it
-         goes next, because a label that still reads "Show" while the
-         rows are showing reads as a button that did nothing. #}
-      <details class="group/rows mt-1 ml-14">
+      {% if group.face %}{% call _subject(group.face) %}{{ group.face.name }}{% endcall %}{% endif %}
+      {% if group.span %}<p data-span class="mt-1 text-xxs text-aegis-muted">{{ group.span }}</p>{% endif %}
+      <div class="mt-2">{{ facts(group.shared) }}</div>
+      <details class="group/rows mt-2">
         <summary class="list-none cursor-pointer inline-flex items-center gap-1 text-xxs text-aegis-muted hover:text-aegis-text transition-colors">
-          <span class="group-open/rows:hidden">Show all {{ group.count }}</span>
+          <span class="group-open/rows:hidden">Show all {{ group.rows|length }}</span>
           <span class="hidden group-open/rows:inline">Hide</span>
-          {{ icon("chevron-down", "w-3 h-3 group-open/rows:rotate-180 transition", 2) }}
         </summary>
-        <ul class="mt-1 divide-y divide-aegis-border/60">
-          {% for row in group.rows %}{{ change_row(row) }}{% endfor %}
-        </ul>
+        <ul class="mt-2 space-y-2">{% for row in group.rows %}{{ _batch_row(row) }}{% endfor %}</ul>
       </details>
     </li>
     {% endif %}
     {% endfor %}
   </ul>
-  <div class="mt-3">{{ verbs(card.url ~ "/approve", card.url ~ "/reject", "#" ~ target, include="#" ~ target) }}</div>
-  {% else %}
-  <details>
-    <summary class="list-none cursor-pointer flex items-center justify-between gap-3">
-      <span class="text-sm font-semibold text-aegis-text">{{ heading }}</span>
-      <span class="text-xs text-aegis-muted" data-outcome>{{ card.outcome }}</span>
-    </summary>
-    <ul class="mt-3 divide-y divide-aegis-border/60">
-      {% for row in card.rows %}{{ change_row(row) }}{% endfor %}
-    </ul>
-  </details>
-  {% endif %}
-</div>
+  {% if batch.pending %}{{ _actions(batch.url, "data-change-batch", "Reject all") }}{% endif %}
+{% endcall %}
 {% endmacro %}
 
-{# The registry's one door: a placeholder that loads the card for a known
-   kind from the queue; an unknown kind renders nothing. #}
-{% macro component(marker) %}
-{% set url = component_url(marker.kind, marker.id) %}
-{% if url %}<div {{ hx_load(url) }} data-component-load="{{ marker.kind }}"></div>{% endif %}
-{% endmacro %}
-
-{# Redraws ``target`` from ``url`` when a card is decided (change:resolved,
-   from the card routes), so what was approved shows on the page behind
-   the chat at once. An element of its OWN, hidden and childless: put on
-   the section itself, its hx-select and hx-target were inherited by the
-   lazy blocks inside, and loading a contact's sign-ins swapped the whole
-   contact away (2026-09-24). ``include`` carries a form's fields along -
-   a register's filters. #}
+{# Redraws ``target`` from ``url`` when a card is decided anywhere on the
+   page (``change_resolved``, from the card routes), so what was approved
+   shows on the page behind at once. An element of its OWN, hidden and
+   childless: put on the section itself, its hx-select and hx-target are
+   inherited by the lazy blocks inside it. ``include`` carries a form's
+   fields along (a list's filters). #}
 {% macro redraws_on_decision(url, target, include=None) -%}
-<div hidden data-redraws hx-get="{{ url }}" hx-trigger="change:resolved from:body"
+<div hidden data-redraws hx-get="{{ url }}" hx-trigger="{{ change_resolved }} from:body"
      hx-target="{{ target }}" hx-select="{{ target }}" hx-swap="outerHTML"{% if include %} hx-include="{{ include }}"{% endif %}></div>
 {%- endmacro %}

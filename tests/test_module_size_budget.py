@@ -37,6 +37,9 @@ DECLARATION_LIMIT = 900
 
 # Lists rather than logic: read by grep, never end to end.
 DECLARATION_PARTS = ("models", "schemas", "i18n", "seeds", "fixtures", "locales")
+# Written whole by a generator, one record per part (``make parts``): a list
+# by construction, whatever its name.
+DECLARATION_FILES = ("core/parts.py",)
 
 # path -> line count when recorded. The refactoring backlog, largest first.
 BUDGET: dict[str, int] = {
@@ -49,7 +52,8 @@ BUDGET: dict[str, int] = {
     "i18n/locales/ru.py": 1270,
     "i18n/locales/ko.py": 1269,
     "i18n/locales/zh_hant.py": 1266,
-    "components/frontend/controls/data_table/table.py": 746,
+    # The template's file, at the template's own recorded size.
+    "components/frontend/controls/data_table/table.py": 750,
     "components/web_frontend/routes/finance/transactions.py": 790,
     "services/finance/adapters/importers/imports.py": 735,
     "cli/finance.py": 652,
@@ -62,12 +66,13 @@ BUDGET: dict[str, int] = {
     # template's own growth in shared modules, recorded rather than split
     # so the next update merges cleanly.
     "components/web_frontend/rendering.py": 612,
-    "services/ai/domains/llm/queries.py": 556,
     "core/config.py": 829,  # #481 upload caps, #482 encryption-key guard, #486 code mode limits, #479 hosts + auth-off guard, #488 Traefik API, deploy DOMAIN, #508 push key, #519 off-site backup
 }
 
 
 def _is_declaration(rel: str) -> bool:
+    if rel in DECLARATION_FILES:
+        return True
     return any(part in rel.split("/") for part in DECLARATION_PARTS)
 
 

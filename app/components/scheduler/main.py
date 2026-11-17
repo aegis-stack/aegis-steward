@@ -16,8 +16,11 @@ from apscheduler.events import (
     EVENT_JOB_MISSED,
     EVENT_JOB_SUBMITTED,
 )
+from apscheduler.job import Job
+from apscheduler.jobstores.base import ConflictingIdError
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import select
 
 from app.components.worker.pools import enqueue_task
 from app.core import edges, run_log
@@ -111,6 +114,20 @@ async def scheduled_run(job_id: str, task_name: str) -> Any:
         return await enqueue_task(task_name, QueueName.SYSTEM)
 
 
+class StoredJobs(SQLAlchemyJobStore):
+    """The jobs kept in the database. A job added that is kept already
+    conflicts before any INSERT (the scheduler then updates it, as
+    ``replace_existing`` asks): Postgres logs each INSERT that fails on its
+    key as an ERROR, one for every job on every start."""
+
+    def add_job(self, job: Job) -> None:
+        kept = select(self.jobs_t.c.id).where(self.jobs_t.c.id == job.id)
+        with self.engine.begin() as connection:
+            if connection.execute(kept).first() is not None:
+                raise ConflictingIdError(job.id)
+        super().add_job(job)
+
+
 def register_service_jobs(scheduler: AsyncIOScheduler) -> None:
     """Schedule every service job (``service_jobs``) as a ``scheduled_run``.
 
@@ -158,7 +175,7 @@ def create_scheduler() -> AsyncIOScheduler:
     _cleanup_stale_jobs()
 
     # Configure SQLAlchemy jobstore for persistence
-    jobstore = SQLAlchemyJobStore(engine=engine, tablename="apscheduler_jobs")
+    jobstore = StoredJobs(engine=engine, tablename="apscheduler_jobs")
     jobstores = {"default": jobstore}
     # misfire_grace_time=None: always run missed jobs when the scheduler wakes
     # (host sleep, container pause, deploy gap). Assumes jobs are idempotent.

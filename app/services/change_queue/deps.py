@@ -1,0 +1,48 @@
+"""Route dependencies for the change queue: a card or batch the signed-in
+user owns, or a 404 (``found_*``: or None, for a route that says so
+another way). One home for "not found or not yours", shared by the JSON
+routes (``api/changes.py``) and the htmx cards (``routes/partials/changes.py``),
+so neither confirms another user's card exists.
+"""
+
+from fastapi import Depends, HTTPException, status
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.db import get_async_db
+from app.services.change_queue.models import PendingChange
+from app.services.change_queue.queries import batch_rows, get_change
+from app.services.shared.deps import get_owner_user_id
+
+
+async def found_change(
+    change_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    owner_user_id: int | None = Depends(get_owner_user_id),
+) -> PendingChange | None:
+    """The card, or None: gone and not yours read the same."""
+    return await get_change(db, change_id, owner_user_id=owner_user_id)
+
+
+async def found_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    owner_user_id: int | None = Depends(get_owner_user_id),
+) -> list[PendingChange] | None:
+    """The batch's rows, or None: gone and not yours read the same."""
+    return await batch_rows(db, batch_id, owner_user_id=owner_user_id) or None
+
+
+async def owned_change(
+    row: PendingChange | None = Depends(found_change),
+) -> PendingChange:
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Change not found")
+    return row
+
+
+async def owned_batch(
+    rows: list[PendingChange] | None = Depends(found_batch),
+) -> list[PendingChange]:
+    if rows is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Batch not found")
+    return rows

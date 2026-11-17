@@ -45,23 +45,23 @@ class TestFiledFromChat:
     async def test_an_attachment_is_filed_on_its_transaction(
         self, svc: FinanceService, async_db_session: AsyncSession
     ) -> None:
-        from app.services.ai.domains.chat.pastes import store_document
         from app.services.documents.service import DocumentService
         from app.services.finance.domains.writes.filing import (
             FileDocumentPayload,
             file_document_describe,
             file_document_execute,
         )
+        from tests._pastes import keep_document
 
         txn_id = await _check(svc)
         documents = DocumentService(async_db_session)
         document = await documents.ingest(
             b"%PDF-1.4 check 1524", title="check-1524.pdf"
         )
-        paste = await store_document(
-            "0", int(document.id), "check-1524.pdf", 20, async_db_session
+        paste = await keep_document(
+            async_db_session, "0", int(document.id), "check-1524.pdf", 20
         )
-        payload = FileDocumentPayload(paste_id=str(paste["id"]), transaction_id=txn_id)
+        payload = FileDocumentPayload(paste_id=paste.id, transaction_id=txn_id)
 
         rows = {
             r.label: r.value
@@ -91,21 +91,21 @@ class TestWaitingOnTheShelf:
     async def test_a_receipt_with_no_charge_yet_is_filed_to_wait(
         self, svc: FinanceService, async_db_session: AsyncSession
     ) -> None:
-        from app.services.ai.domains.chat.pastes import store_document
         from app.services.documents.service import DocumentService
         from app.services.finance.domains.writes.filing import (
             FileDocumentPayload,
             file_document_describe,
             file_document_execute,
         )
+        from tests._pastes import keep_document
 
         documents = DocumentService(async_db_session)
         document = await documents.ingest(b"%PDF-1.4 cvs", title="IMG_6611.jpeg")
-        paste = await store_document(
-            "0", int(document.id), "IMG_6611.jpeg", 20, async_db_session
+        paste = await keep_document(
+            async_db_session, "0", int(document.id), "IMG_6611.jpeg", 20
         )
         payload = FileDocumentPayload(
-            paste_id=str(paste["id"]), kind="receipt", title="CVS receipt"
+            paste_id=paste.id, kind="receipt", title="CVS receipt"
         )
 
         rows = {

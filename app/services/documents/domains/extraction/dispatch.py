@@ -7,8 +7,18 @@ same endpoints.
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
+from app.core.log import logger
 from app.services.documents.domains.extraction.jobs import run_extraction
+from app.services.system.job_store import RedisJobStore, start_job
 from app.services.system.jobs import JobHandle, get_job_runner
+
+# How long a reader that needs the pages now waits on their job.
+# ponytail: one bound for every document; a long scan read with vision can
+# take longer, so raise it if real ones time out.
+WAIT_SECONDS = 300
 
 
 async def start_extraction_in_process(
@@ -32,54 +42,55 @@ async def start_extraction_in_process(
 async def start_extraction(
     document_id: int, *, owner_user_id: int | None, force: bool
 ) -> str:
-    """Record the job in the shared store, then hand it to the worker;
+    """Start the extraction as a job: on the worker where the stack has one;
     or return the job already reading this document."""
-    import uuid
-
-    from app.core.log import logger
-    from app.services.system.job_store import RedisJobStore
-
     name = f"documents-extract:{document_id}"
-    store = RedisJobStore.shared()
-    try:
-        # One reading at a time per document. A second ask while the
-        # first is still on the worker (an agent calling twice in three
-        # seconds, a page refreshed) joins that job rather than starting
-        # another pass over the same scan.
-        for job in await store.list_jobs():
-            if job.name == name and job.status == "running" and not force:
-                return job.job_id
-        job_id = uuid.uuid4().hex
-        await store.create(job_id, name, "Queued...")
+    if not force:
+        # One reading at a time per document. A second ask while the first
+        # is still running (an agent calling twice in three seconds, a page
+        # refreshed) joins that job rather than starting another pass over
+        # the same scan.
+        store = RedisJobStore.shared()
         try:
-            await _enqueue(job_id, document_id, owner_user_id, force)
-        except Exception as exc:
-            # The record outlives this function, so a failed hand-off has to
-            # be written into it: otherwise the job sits "Queued..." until it
-            # expires, with the reason only in this process's logs.
-            await store.fail(job_id, f"Could not queue the extraction: {exc}")
-            raise
-    finally:
-        await store.aclose()
-    logger.info("documents.extract.enqueued", job_id=job_id, document_id=document_id)
+            for job in await store.list_jobs():
+                if job.name == name and job.status == "running":
+                    return job.job_id
+        finally:
+            await store.aclose()
+    job_id = await start_job(
+        name,
+        "extract_document_task",
+        (document_id, owner_user_id, force),
+        lambda report: run_extraction(
+            document_id, owner_user_id=owner_user_id, force=force, report=report
+        ),
+        label="Opening the document...",
+    )
+    logger.info("documents.extract.started", job_id=job_id, document_id=document_id)
     return job_id
 
 
-async def _enqueue(
-    job_id: str, document_id: int, owner_user_id: int | None, force: bool
-) -> None:
-    from app.components.worker.pools import get_queue_pool
-    from app.core.constants import QueueName
-
-    pool, queue_name = await get_queue_pool(QueueName.SYSTEM)
-    await pool.enqueue_job(
-        "extract_document_task",
-        job_id,
-        document_id,
-        owner_user_id,
-        force,
-        _queue_name=queue_name,
+async def extract_and_wait(
+    document_id: int, *, owner_user_id: int | None, force: bool
+) -> dict[str, Any]:
+    """``start_extraction``, waited on: for a reader that needs the pages
+    now (a chat turn), so the webserver still renders none where there is
+    a worker. The job's result; RuntimeError when it failed or cannot be
+    followed from here, TimeoutError past ``WAIT_SECONDS``."""
+    job_id = await start_extraction(
+        document_id, owner_user_id=owner_user_id, force=force
     )
+    runner = get_job_runner()
+    queue = await runner.subscribe_any(job_id)
+    if queue is None:
+        raise RuntimeError(f"Extraction job {job_id} cannot be followed from here")
+    last: dict[str, Any] = {}
+    async with asyncio.timeout(WAIT_SECONDS):
+        async for snapshot in runner.follow(job_id, queue):
+            last = snapshot
+    if last.get("status") != "done":
+        raise RuntimeError(last.get("error") or "The extraction did not finish")
+    return last.get("result") or {}
 
 
 # How long a caller may sit on a reading before it gives the job id back

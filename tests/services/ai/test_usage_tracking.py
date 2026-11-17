@@ -24,18 +24,10 @@ class TestExtractUsage:
     """Tests for the _extract_usage method."""
 
     def test_extract_usage_response(self, ai_service: AIService) -> None:
-        """Test extracting usage from a PydanticAI-style response.
-
-        LangChain ``response_metadata`` was the old shape but the service
-        now only reads PydanticAI's ``result.usage`` attribute
-        (``request_tokens`` / ``response_tokens``). The LangChain branch
-        was removed when PydanticAI became the sole AI framework, so the
-        test now exercises the supported shape only.
-        """
+        """Token counts come out of the framework's own result shape."""
         # ``_extract_usage`` requires ``result.usage`` to be non-callable
         # (PydanticAI exposes usage as a data object, not a method). A bare
-        # ``MagicMock()`` is callable, so we use ``SimpleNamespace`` to get
-        # a plain attribute bag.
+        # ``MagicMock()`` is callable, so use a plain attribute bag.
         from types import SimpleNamespace
 
         mock_result = MagicMock()
@@ -45,6 +37,23 @@ class TestExtractUsage:
 
         assert usage["input_tokens"] == 100
         assert usage["output_tokens"] == 50
+
+    # Deprecations only: a bare "error" also failed the test on a
+    # ResourceWarning from a connection an earlier test left for gc.
+    @pytest.mark.filterwarnings("error::DeprecationWarning")
+    def test_today_usage_is_read_as_the_property_it_is(
+        self, ai_service: AIService
+    ) -> None:
+        """``RunUsage`` still answers a call, with a deprecation warning."""
+        from types import SimpleNamespace
+
+        from pydantic_ai.usage import RunUsage
+
+        result = SimpleNamespace(usage=RunUsage(input_tokens=7, output_tokens=3))
+
+        usage = ai_service._extract_usage(result)
+
+        assert (usage["input_tokens"], usage["output_tokens"]) == (7, 3)
 
     def test_extract_usage_missing_metadata(self, ai_service: AIService) -> None:
         """Test extracting usage when metadata is missing."""
@@ -317,7 +326,6 @@ class TestWhatTheLedgerKeeps:
         assert row.cache_read_tokens is None
         assert row.cache_write_tokens is None
 
-    @pytest.mark.queryspy(threshold=3)  # reads back each user's row
     async def test_a_turn_that_used_no_tools_records_zero_not_null(
         self,
         async_db_session: AsyncSession,
@@ -563,12 +571,12 @@ class TestGetUsageStats:
         with _store_session(async_db_session):
             stats = await service.get_usage_stats()
 
-        assert stats["total_tokens"] == 0
-        assert stats["total_requests"] == 0
-        assert stats["total_cost"] == 0.0
-        assert stats["success_rate"] == 100.0
-        assert stats["models"] == []
-        assert stats["recent_activity"] == []
+        assert stats.total_tokens == 0
+        assert stats.total_requests == 0
+        assert stats.total_cost == 0.0
+        assert stats.success_rate == 100.0
+        assert stats.models == []
+        assert stats.recent_activity == []
 
     async def test_get_usage_stats_with_data(
         self,
@@ -603,12 +611,12 @@ class TestGetUsageStats:
         with _store_session(async_db_session):
             stats = await service.get_usage_stats()
 
-        assert stats["total_tokens"] == 450  # 100+50+200+100
-        assert stats["input_tokens"] == 300
-        assert stats["output_tokens"] == 150
-        assert stats["total_requests"] == 2
-        assert abs(stats["total_cost"] - 0.003) < 0.0001
-        assert stats["success_rate"] == 100.0
+        assert stats.total_tokens == 450  # 100+50+200+100
+        assert stats.input_tokens == 300
+        assert stats.output_tokens == 150
+        assert stats.total_requests == 2
+        assert abs(stats.total_cost - 0.003) < 0.0001
+        assert stats.success_rate == 100.0
 
     async def test_get_usage_stats_model_breakdown(
         self,
@@ -634,12 +642,12 @@ class TestGetUsageStats:
         with _store_session(async_db_session):
             stats = await service.get_usage_stats()
 
-        assert len(stats["models"]) == 1
-        model_stats = stats["models"][0]
-        assert model_stats["model_id"] == "gpt-4o"
-        assert model_stats["vendor"] == "openai"
-        assert model_stats["requests"] == 1
-        assert model_stats["percentage"] == 100.0
+        assert len(stats.models) == 1
+        model_stats = stats.models[0]
+        assert model_stats.model_id == "gpt-4o"
+        assert model_stats.vendor == "openai"
+        assert model_stats.requests == 1
+        assert model_stats.percentage == 100.0
 
     async def test_get_usage_stats_recent_activity(
         self,
@@ -664,20 +672,20 @@ class TestGetUsageStats:
         with _store_session(async_db_session):
             stats = await service.get_usage_stats(recent_limit=5)
 
-        assert len(stats["recent_activity"]) == 1
-        activity = stats["recent_activity"][0]
+        assert len(stats.recent_activity) == 1
+        activity = stats.recent_activity[0]
         # Recent activity reports the raw ``model_id`` (the stable
         # catalog key), not the display title. When the FK was dropped
         # and usage decoupled from the catalog, the join that pulled
         # display names went with it — orphan usage rows can outlive
         # their catalog entry, so the usable stable value is ``model_id``.
-        assert activity["model"] == llm.model_id
+        assert activity.model == llm.model_id
         # ``tokens`` was split into ``input_tokens`` + ``output_tokens``
         # so the UI can render prompt vs completion spend separately.
-        assert activity["input_tokens"] == 100
-        assert activity["output_tokens"] == 50
-        assert activity["success"] is True
-        assert activity["action"] == "chat"
+        assert activity.input_tokens == 100
+        assert activity.output_tokens == 50
+        assert activity.success is True
+        assert activity.action == "chat"
 
     async def test_get_usage_stats_user_filter(
         self,
@@ -712,8 +720,8 @@ class TestGetUsageStats:
         with _store_session(async_db_session):
             stats = await service.get_usage_stats(user_id="user-1")
 
-        assert stats["total_requests"] == 1
-        assert stats["total_tokens"] == 150
+        assert stats.total_requests == 1
+        assert stats.total_tokens == 150
 
     async def test_get_usage_stats_success_rate(
         self,
@@ -749,8 +757,8 @@ class TestGetUsageStats:
         with _store_session(async_db_session):
             stats = await service.get_usage_stats()
 
-        assert stats["total_requests"] == 2
-        assert stats["success_rate"] == 50.0
+        assert stats.total_requests == 2
+        assert stats.success_rate == 50.0
 
 
 class TestTheLedgerRowIsStoredNaive:

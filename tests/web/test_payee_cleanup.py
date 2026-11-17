@@ -114,7 +114,7 @@ class TestIllianaCanProposeIt:
         finance: FinanceService,
         async_db_session: AsyncSession,
     ) -> None:
-        from app.services.finance.domains.writes import executor_for
+        from app.services.change_queue import executor_for
         from app.services.finance.domains.writes.payees import (
             PayeeMergePayload,
             PayeeRenamePayload,
@@ -123,7 +123,7 @@ class TestIllianaCanProposeIt:
         twin = await _second_payee(finance, async_db_session)
         rename = executor_for("payee.rename")
         payload = PayeeRenamePayload(payee="shell oil", name="Shell")
-        rows = await rename.describe(async_db_session, payload, None)
+        (rows,) = await rename.describe(async_db_session, [payload], None)
         assert [(r.label, r.value) for r in rows] == [("Payee", "SHELL OIL → Shell")]
 
         merge = executor_for("payee.merge")
@@ -133,7 +133,11 @@ class TestIllianaCanProposeIt:
             None,
         )
 
-        assert done == {"merchant_id": merchant, "merged": [twin], "moved": 1}
+        assert done.model_dump() == {
+            "merchant_id": merchant,
+            "merged": [twin],
+            "moved": 1,
+        }
         with pytest.raises(ValueError, match="itself"):
             await merge.execute(
                 async_db_session,

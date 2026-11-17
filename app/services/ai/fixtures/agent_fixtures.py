@@ -4,72 +4,133 @@ Seeds the default ``assistant`` agent so a fresh project behaves exactly
 like pre-registry chat: same system prompt, same sampling defaults. The
 agent loader resolves this row on DB backends and falls back to the same
 in-code definition on the memory backend, so this seed is the single DB
-source of the default agent.
+source of the default agent. Beside it, the ``sentiment`` agent the batch
+scorer runs as, so its model is picked in Agents, and the app map, the
+context module the default agent always has (``app_map``).
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, col, select
 
 from app.core.log import logger
-from app.core.seed import seed_rows
 from app.core.tools import get_tool, load_tools, registered_tool_names
 from app.services.ai.domains.chat.agent_loader import (
     DEFAULT_AGENT_SLUG,
     default_agent_config,
 )
 from app.services.ai.domains.chat.agent_registry import seed_agent
-from app.services.ai.models.agents import Agent, AgentTool, Tool
+from app.services.ai.domains.chat.builtin_fetchers import APP_MAP
+from app.services.ai.domains.chat.sentiment import (
+    SENTIMENT_AGENT_SLUG,
+    SENTIMENT_MAX_TOKENS,
+    SENTIMENT_SYSTEM_PROMPT,
+    SENTIMENT_TEMPERATURE,
+)
+from app.services.ai.models.agents import Agent, ContextModule, Tool
+from app.services.system.pattern_review import REVIEWER, reviewer_prompt
 
 # The registry only holds tools whose module was imported, and seeding runs
 # in processes that never build a chat agent (a CLI, a startup hook):
-# without this the sync writes no rows and every later grant silently no-ops.
+# without this the sync writes no rows and every later grant silently
+# no-ops.
 load_tools()
 
 __all__ = [
     "DEFAULT_AGENT_SLUG",
+    "attach_modules",
     "attach_tools",
+    "built_in_agents",
     "default_agent_definition",
+    "grant_knowledge",
     "load_agent_fixtures",
+    "seed_missing_agents",
 ]
 
 
-def attach_tools(session: Session, grants: Iterable[tuple[str, Sequence[str]]]) -> int:
-    """Grant each agent (``(slug, tool names)``, a slug named twice gets
-    both lists) the tools it lacks, every agent's in one pass, and say how
-    many: additive and by name (``seed_rows``), so a re-seed grants what a
-    newer definition added and never takes back what someone else attached.
-    A tool with no row (not registered here) is skipped with a warning. The
-    caller commits."""
-    grants = list(grants)
-    agents = dict(
+def attach_tools(session: Session, slug: str, names: Sequence[str]) -> int:
+    """Grant agent ``slug`` the tools ``names`` it lacks, by their rows,
+    and say how many: additive and by name, so a re-seed grants what a
+    newer seed added and never takes back what someone else attached. A
+    missing row (its tool not registered here) is skipped with a warning.
+    The caller commits."""
+    agent = session.exec(
+        select(Agent).where(Agent.slug == slug).options(selectinload(Agent.tools))
+    ).first()
+    if agent is None or agent.id is None:
+        return 0
+    have = {tool.name for tool in agent.tools}
+    missing = [name for name in names if name not in have]
+    if not missing:
+        return 0  # a re-seed: nothing to look up
+    rows = {
+        t.name: t for t in session.exec(select(Tool).where(col(Tool.name).in_(missing)))
+    }
+    attached = 0
+    for name in missing:
+        tool = rows.get(name)
+        if tool is None or tool.id is None:
+            logger.warning(f"Tool row missing, not granted to {slug}: {name}")
+            continue
+        agent.tools.append(tool)
+        attached += 1
+    return attached
+
+
+def _extend(session: Session, slug: str, field: str, names: Sequence[str]) -> int:
+    """Add to agent ``slug``'s list ``field`` the ``names`` it lacks, and say
+    how many: additive by name, as ``attach_tools``. The caller commits."""
+    agent = session.exec(select(Agent).where(Agent.slug == slug)).first()
+    if agent is None:
+        return 0
+    held: list[str] = getattr(agent, field)
+    missing = [name for name in names if name not in held]
+    if not missing:
+        return 0  # a re-seed: nothing to look up
+    setattr(agent, field, [*held, *missing])  # a new list: tracked
+    session.add(agent)
+    return len(missing)
+
+
+def attach_modules(session: Session, slug: str, names: Sequence[str]) -> int:
+    """Give agent ``slug`` the context modules ``names`` it lacks."""
+    return _extend(session, slug, "context_modules", names)
+
+
+def grant_knowledge(session: Session, slug: str, names: Sequence[str]) -> int:
+    """Grant agent ``slug`` the knowledge bases ``names`` it lacks."""
+    return _extend(session, slug, "knowledge_base_ids", names)
+
+
+def seed_missing_modules(session: Session, definitions: list[dict[str, Any]]) -> int:
+    """Seed each of ``definitions`` whose slug has no row yet, and say how
+    many: an existing (possibly edited) row is never touched. The caller
+    commits."""
+    slugs = [definition["slug"] for definition in definitions]
+    present = set(
         session.exec(
-            select(Agent.slug, Agent.id).where(
-                col(Agent.slug).in_({s for s, _ in grants})
-            )
-        ).all()
+            select(ContextModule.slug).where(col(ContextModule.slug).in_(slugs))
+        )
     )
-    wanted = {name for _, names in grants for name in names}
-    tools = dict(
-        session.exec(select(Tool.name, Tool.id).where(col(Tool.name).in_(wanted))).all()
-    )
-    for name in sorted(wanted - tools.keys()):
-        logger.warning(f"Tool row missing, not granted: {name}")
-    links = [
-        {"agent_id": agents[slug], "tool_id": tools[name]}
-        for slug, names in grants
-        if slug in agents
-        for name in names
-        if name in tools
-    ]
-    return seed_rows(
-        session,
-        AgentTool,
-        ("agent_id", "tool_id"),
-        links,
-        col(AgentTool.agent_id).in_(agents.values()),
-    )
+    missing = [d for d in definitions if d["slug"] not in present]
+    session.add_all(ContextModule(**definition) for definition in missing)
+    return len(missing)
+
+
+def app_map_module_definition() -> dict[str, Any]:
+    """The seed row for the app map: no text of its own, its fetcher's."""
+    return {
+        "slug": APP_MAP,
+        "name": "App map",
+        "description": "What the app is, read from its code: its parts, "
+        "tables and the changes to them",
+        "category": "app",
+        "fetch_function": APP_MAP,
+        "context_key": APP_MAP,
+        "priority": 10,
+    }
 
 
 def default_agent_definition() -> dict[str, Any]:
@@ -89,52 +150,125 @@ def default_agent_definition() -> dict[str, Any]:
         "system_prompt": config.system_prompt,
         "temperature": config.temperature,
         "max_tokens": config.max_tokens,
-        "memory_modules": list(config.memory_modules),
+        "context_modules": list(config.context_modules),
         "knowledge_base_ids": list(config.knowledge_base_ids),
         "is_active": True,
         "code_mode": config.code_mode,
     }
 
 
-def load_agent_fixtures(session: Session) -> dict[str, int]:
-    """Seed the default agent and the registry's tool rows, skipping rows
-    that already exist. Its tools are granted with every other agent's
-    (``load_agent_registry_fixtures``).
+def sentiment_agent_definition() -> dict[str, Any]:
+    """The seed row for the batch sentiment scorer, shaped as the default
+    agent's: the active model until someone picks a faster one, and no
+    memory, knowledge or code of the chat's."""
+    return default_agent_definition() | {
+        "slug": SENTIMENT_AGENT_SLUG,
+        "name": "Sentiment",
+        "description": "Scores finished conversations (the sentiment job)",
+        "category": "analysis",
+        "model_id": None,
+        "system_prompt": SENTIMENT_SYSTEM_PROMPT,
+        "temperature": SENTIMENT_TEMPERATURE,
+        "max_tokens": SENTIMENT_MAX_TOKENS,
+        "context_modules": [],
+        "knowledge_base_ids": [],
+        "code_mode": False,
+    }
 
-    Idempotent: re-running against a seeded database adds nothing. An
-    existing (possibly user-edited) row is never rewritten.
+
+def reviewer_agent_definition() -> dict[str, Any]:
+    """The seed row for Illiana reviewing a pull request (``patterns
+    review``): her persona and the reviewing, the active model, and room
+    for a note on each of fifty findings; no memory, knowledge or code."""
+    return default_agent_definition() | {
+        "slug": REVIEWER,
+        "name": "Illiana, reviewing",
+        "description": "Writes a pull request's review from its new findings",
+        "category": "analysis",
+        "model_id": None,
+        "system_prompt": reviewer_prompt(default_agent_config().system_prompt),
+        "max_tokens": 8000,
+        "context_modules": [],
+        "knowledge_base_ids": [],
+        "code_mode": False,
+    }
+
+
+def built_in_agents() -> list[dict[str, Any]]:
+    """Every agent the AI service seeds."""
+    return [
+        default_agent_definition(),
+        sentiment_agent_definition(),
+        reviewer_agent_definition(),
+    ]
+
+
+def seed_missing_agents(session: Session, definitions: list[dict[str, Any]]) -> int:
+    """Seed each of ``definitions`` whose slug has no row yet, and say how
+    many: an existing (possibly user-edited) row is never touched."""
+    slugs = [definition["slug"] for definition in definitions]
+    present = set(session.exec(select(Agent.slug).where(col(Agent.slug).in_(slugs))))
+    missing = [d for d in definitions if d["slug"] not in present]
+    for definition in missing:
+        seed_agent(session, definition)
+        session.commit()
+        logger.info(f"Seeded agent '{definition['slug']}'")
+    return len(missing)
+
+
+def load_agent_fixtures(session: Session) -> dict[str, int]:
+    """Seed the built-in agents, skipping rows that already exist.
+
+    Idempotent: re-running against a seeded database adds nothing and
+    never mutates an existing (possibly user-edited) agent row.
 
     Args:
         session: Database session
 
     Returns:
-        dict with counts: {"agents", "tools": N added}
+        dict with counts: agents, tools and the tools, knowledge bases and
+        context modules granted the default agent (``tool_links``,
+        ``knowledge_links``, ``module_links``)
     """
-    added = 0
-    definition = default_agent_definition()
-    existing = session.exec(
-        select(Agent).where(Agent.slug == definition["slug"])
-    ).first()
-    if existing is None:
-        seed_agent(session, definition)
-        session.commit()
-        added = 1
-        logger.info(f"Seeded default agent '{definition['slug']}'")
-    else:
-        logger.debug(f"Default agent '{definition['slug']}' already present")
+    added = seed_missing_agents(session, built_in_agents())
 
     # Sync registered tools into grantable rows: every callable in the
     # Python registry gets a matching ``tool`` row (by name) so the agent
-    # CRUD can attach it. A stale row is never deleted; it degrades to a
-    # skipped-name warning at resolve time.
-    tool_rows = []
+    # CRUD can attach it. Rows are never mutated or deleted here - a
+    # stale row degrades to a skipped-name warning at resolve time.
+    tools_added = 0
+    present = set(session.exec(select(Tool.name)).all())
     for name in registered_tool_names():
+        if name in present:
+            continue
         entry = get_tool(name)
-        tool_rows.append(
-            {"name": name, "description": entry.description if entry else None}
-        )
-    tools_added = seed_rows(session, Tool, "name", tool_rows)
+        session.add(Tool(name=name, description=entry.description if entry else None))
+        tools_added += 1
     if tools_added:
         session.commit()
         logger.info(f"Seeded {tools_added} tool row(s) from the registry")
-    return {"agents": added, "tools": tools_added}
+
+    tool_links = attach_tools(
+        session, DEFAULT_AGENT_SLUG, default_agent_config().tool_names
+    )
+    knowledge_links = grant_knowledge(
+        session, DEFAULT_AGENT_SLUG, default_agent_config().knowledge_base_ids
+    )
+    if tool_links or knowledge_links:
+        session.commit()
+
+    module_links = attach_modules(
+        session, DEFAULT_AGENT_SLUG, default_agent_config().context_modules
+    )
+    # Its row, looked up only when this seed added an agent or a grant, so
+    # a re-seed looks nothing up.
+    if added or module_links:
+        seed_missing_modules(session, [app_map_module_definition()])
+        session.commit()
+    return {
+        "agents": added,
+        "tools": tools_added,
+        "tool_links": tool_links,
+        "knowledge_links": knowledge_links,
+        "module_links": module_links,
+    }

@@ -1,0 +1,500 @@
+"""The queue itself: propose, approve, reject, and the reads over them.
+
+Approval is the ONLY execution path: no tool and no route runs an
+executor except through ``approve``, which re-validates the payload and
+runs it in the caller's transaction, so the status flip and the mutation
+land or fail together; a failing execution leaves the row PENDING with
+the error in ``result`` - the user rejects it with full information,
+nothing half-lands. The card renders the stored payload, so what the user
+sees is what executes.
+
+Every public call names its owner (``owner_user_id`` has no default): a
+caller that forgot it would otherwise act on every user's rows.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Collection
+from typing import Any
+from uuid import uuid4
+
+from pydantic import ValidationError
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.chat_transcript import WITHDRAWN, card_outcome
+from app.core.time import utcnow
+from app.services.change_queue.follow_ups import approving, landed
+from app.services.change_queue.models import PendingChange
+from app.services.change_queue.queries import batch_rows, get_change, list_changes
+from app.services.change_queue.registry import (
+    ChangeExecutor,
+    editable_fields,
+    executor_for,
+    known_executor,
+)
+from app.services.change_queue.schemas import (
+    BatchResolveResponse,
+    ChangeDisplayRow,
+    PendingChangeResponse,
+)
+
+
+def _freeze(display: list[ChangeDisplayRow]) -> list[dict[str, str]]:
+    """Typed rows -> the plain dicts the JSON audit column stores."""
+    return [line.model_dump() for line in display]
+
+
+MAX_BATCH_SIZE = 100
+# The validation context a payload is filed under (``_file``), apart from
+# the re-validation of a stored one: a payload model that takes something
+# from the filing call (whose memory, from the turn) does it only here.
+FILING = {"filing": True}
+
+
+async def _for_an_admin(
+    db: AsyncSession, executor: ChangeExecutor, owner_user_id: int | None
+) -> None:
+    """ValueError where ``executor`` is an admin's and the owner is not
+    one. A queue with no owners (None) is one tenant's, theirs to run."""
+    if not executor.admin or owner_user_id is None:
+        return
+    from app.services.shared.deps import owner_is_admin
+
+    if not await owner_is_admin(db, owner_user_id):
+        raise ValueError(f"Only an admin can propose or approve {executor.change_type}")
+
+
+async def _file(
+    db: AsyncSession,
+    change_type: str,
+    payloads: list[dict[str, Any]],
+    *,
+    owner_user_id: int | None,
+    proposed_by_agent: str | None,
+    conversation_id: str | None,
+    batch_id: str | None,
+) -> list[PendingChange]:
+    """Validate every payload against the change type's contract, then
+    write the rows. Nothing moves here: a malformed proposal dies at the
+    door instead of becoming a card the user cannot safely approve, and a
+    batch with one bad member dies whole."""
+    executor = executor_for(change_type)
+    await _for_an_admin(db, executor, owner_user_id)
+    models = []
+    for index, payload in enumerate(payloads):
+        try:
+            models.append(
+                executor.payload_model.model_validate(payload, context=FILING)
+            )
+        except ValidationError as e:
+            where = f" at index {index}" if batch_id else ""
+            raise ValueError(f"invalid {change_type} payload{where}: {e}") from None
+    rows = [
+        PendingChange(
+            owner_user_id=owner_user_id,
+            change_type=change_type,
+            payload=model.model_dump(mode="json"),
+            proposed_by_agent=proposed_by_agent,
+            conversation_id=conversation_id,
+            batch_id=batch_id,
+        )
+        for model in models
+    ]
+    db.add_all(rows)
+    await db.flush()
+    return rows
+
+
+async def propose(
+    db: AsyncSession,
+    change_type: str,
+    payload: dict[str, Any],
+    *,
+    owner_user_id: int | None,
+    proposed_by_agent: str | None = None,
+    conversation_id: str | None = None,
+) -> PendingChange:
+    """Record one proposed mutation."""
+    (row,) = await _file(
+        db,
+        change_type,
+        [payload],
+        owner_user_id=owner_user_id,
+        proposed_by_agent=proposed_by_agent,
+        conversation_id=conversation_id,
+        batch_id=None,
+    )
+    return row
+
+
+async def propose_many(
+    db: AsyncSession,
+    change_type: str,
+    payloads: list[dict[str, Any]],
+    *,
+    owner_user_id: int | None,
+    proposed_by_agent: str | None = None,
+    conversation_id: str | None = None,
+) -> list[PendingChange]:
+    """One decision over many rows: N ordinary proposals sharing a batch
+    id. Every row still resolves individually and keeps its own audit
+    trail - a batch is a grouping, not a different kind of thing."""
+    if not payloads:
+        raise ValueError("a batch needs at least one change")
+    if len(payloads) > MAX_BATCH_SIZE:
+        raise ValueError(
+            f"batch of {len(payloads)} exceeds the {MAX_BATCH_SIZE}-change cap"
+        )
+    return await _file(
+        db,
+        change_type,
+        payloads,
+        owner_user_id=owner_user_id,
+        proposed_by_agent=proposed_by_agent,
+        conversation_id=conversation_id,
+        batch_id=str(uuid4()),
+    )
+
+
+async def approve_rows(
+    db: AsyncSession,
+    rows: list[PendingChange],
+    *,
+    exclude_ids: list[int] | None = None,
+) -> BatchResolveResponse:
+    """Approve the still-pending rows the caller already read, except the
+    vetoed ones, which are rejected (a veto is a decision, not a
+    deferral). One failing row stays pending with its error; the rest
+    land. No row is read again."""
+    excluded = set(exclude_ids or [])
+    approved = rejected = failed = 0
+    pending = _pending(rows)
+    # Every card is frozen as the user saw it: described together, before
+    # any of them executes.
+    for row, display in zip(pending, await _describe_rows(db, pending)):
+        if row.id in excluded:
+            await _reject(db, row, display, note="vetoed")
+            rejected += 1
+            continue
+        try:
+            await _approve(db, row, display)
+            approved += 1
+        except Exception:
+            failed += 1
+    return BatchResolveResponse(approved=approved, rejected=rejected, failed=failed)
+
+
+async def reject_rows(
+    db: AsyncSession, rows: list[PendingChange]
+) -> BatchResolveResponse:
+    """Reject the still-pending rows the caller already read."""
+    pending = _pending(rows)
+    for row, display in zip(pending, await _describe_rows(db, pending)):
+        await _reject(db, row, display)
+    return BatchResolveResponse(approved=0, rejected=len(pending), failed=0)
+
+
+def _found(row: PendingChange | None) -> PendingChange:
+    if row is None:
+        raise ValueError("pending change not found")
+    return row
+
+
+def _require_pending(row: PendingChange) -> PendingChange:
+    if row.status != "pending":
+        raise ValueError(f"change already {row.status}")
+    return row
+
+
+def _pending(rows: list[PendingChange]) -> list[PendingChange]:
+    """The rows still waiting for a decision; decided ones are left be."""
+    return [row for row in rows if row.status == "pending"]
+
+
+async def _describe_rows(
+    db: AsyncSession, rows: list[PendingChange]
+) -> list[list[ChangeDisplayRow]]:
+    """Live card bodies for stored rows, in order: one ``describe`` call
+    per change type and owner, however many rows share it.
+
+    Tolerant of tightened rules and a moved world: validation guards the
+    DOOR (propose); a stored payload that no longer validates, or that
+    ``describe`` now refuses (its target deleted, locked), is exactly what
+    reject/withdraw exist to clean up, so it renders why instead of
+    raising."""
+    bodies: dict[int, list[ChangeDisplayRow]] = {}
+    groups: dict[tuple[str, int | None], list[tuple[int, Any]]] = {}
+    for index, row in enumerate(rows):
+        executor = known_executor(row.change_type)
+        if executor is None:
+            bodies[index] = _unusable(row.change_type, "Type gone", str(row.payload))
+            continue
+        try:
+            model = executor.payload_model(**row.payload)
+        except ValidationError:
+            bodies[index] = _unusable(
+                executor.title, "Payload (no longer valid)", str(row.payload)
+            )
+            continue
+        groups.setdefault((row.change_type, row.owner_user_id), []).append(
+            (index, model)
+        )
+    for (change_type, owner), members in groups.items():
+        models = [model for _, model in members]
+        executor = executor_for(change_type)
+        try:
+            described = await executor.describe(db, models, owner)
+        except ValueError:
+            # One refused row would take its group down: describe the
+            # group a row at a time, so only that one says why.
+            described = [
+                await _describe_alone(db, executor, model, owner) for model in models
+            ]
+        bodies.update(zip((index for index, _ in members), described))
+    return [bodies[index] for index in range(len(rows))]
+
+
+async def _describe_alone(
+    db: AsyncSession, executor: Any, model: Any, owner: int | None
+) -> list[ChangeDisplayRow]:
+    """One stored row's card, or why it no longer applies."""
+    try:
+        (body,) = await executor.describe(db, [model], owner)
+    except ValueError as e:
+        return _unusable(executor.title, "No longer applies", str(e))
+    return body
+
+
+def _unusable(title: str, label: str, why: str) -> list[ChangeDisplayRow]:
+    """The card of a stored row that can no longer be carried out: what it
+    was, and why not."""
+    return [
+        ChangeDisplayRow(label="Change", value=title),
+        ChangeDisplayRow(label=label, value=why),
+    ]
+
+
+async def approve(
+    db: AsyncSession, change_id: int, *, owner_user_id: int | None
+) -> PendingChange:
+    """Execute the stored mutation."""
+    return await approve_row(
+        db, _found(await get_change(db, change_id, owner_user_id=owner_user_id))
+    )
+
+
+async def approve_row(db: AsyncSession, row: PendingChange) -> PendingChange:
+    """``approve`` for a row the caller already read."""
+    (display,) = await _describe_rows(db, [_require_pending(row)])
+    return await _approve(db, row, display)
+
+
+async def _approve(
+    db: AsyncSession, row: PendingChange, display: list[ChangeDisplayRow]
+) -> PendingChange:
+    """Execute ``row``, freezing ``display`` - the card described BEFORE
+    executing: after the mutation the world reflects it, and
+    re-resolving read "Groceries -> Groceries". Resolution freezes the
+    record; only pending cards track the world."""
+    executor = executor_for(row.change_type)
+    model = executor.payload_model(**row.payload)
+    try:
+        # A savepoint per row: a write that fails at flush is undone alone,
+        # never the batch's approvals before it.
+        async with db.begin_nested():
+            await _for_an_admin(db, executor, row.owner_user_id)
+            token = approving.set(row)
+            try:
+                result = await executor.execute(db, model, row.owner_user_id)
+            finally:
+                approving.reset(token)
+    except Exception as e:
+        # The row stays PENDING: the error is audit, the decision is
+        # still the user's (reject it, or fix the world and re-approve).
+        row.result = {"error": str(e)}
+        row.updated_at = utcnow()
+        db.add(row)
+        await db.flush()
+        raise
+    row.status = "approved"
+    row.result = {**result.model_dump(mode="json"), "display": _freeze(display)}
+    row.resolved_at = utcnow()
+    row.updated_at = row.resolved_at
+    db.add(row)
+    await db.flush()
+    landed(db, row)
+    return row
+
+
+async def reject(
+    db: AsyncSession,
+    change_id: int,
+    *,
+    owner_user_id: int | None,
+    note: str | None = None,
+) -> PendingChange:
+    return await reject_row(
+        db,
+        _found(await get_change(db, change_id, owner_user_id=owner_user_id)),
+        note=note,
+    )
+
+
+async def reject_row(
+    db: AsyncSession, row: PendingChange, *, note: str | None = None
+) -> PendingChange:
+    """``reject`` for a row the caller already read."""
+    (display,) = await _describe_rows(db, [_require_pending(row)])
+    return await _reject(db, row, display, note=note)
+
+
+async def _reject(
+    db: AsyncSession,
+    row: PendingChange,
+    display: list[ChangeDisplayRow],
+    *,
+    note: str | None = None,
+    status: str = "rejected",
+) -> PendingChange:
+    """Decide ``row`` without running it (rejected, or ``status``), its card
+    frozen as ``display``."""
+    row.status = status
+    row.result = {"display": _freeze(display), **({"note": note} if note else {})}
+    row.resolved_at = utcnow()
+    row.updated_at = row.resolved_at
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def expire_naming(
+    db: AsyncSession,
+    field: str,
+    values: Collection[Any],
+    *,
+    owner_user_id: int | None,
+    note: str,
+) -> int:
+    """Set aside every waiting card whose payload's ``field`` names one of
+    ``values`` - the things about to go: approved later, it would apply to
+    nothing, or fail. Expired, saying why (``note``), its card frozen while
+    the thing is still there to describe. Returns how many."""
+    gone = set(values)
+    rows = [
+        row
+        for row in await list_changes(db, owner_user_id=owner_user_id)
+        if (row.payload or {}).get(field) in gone
+    ]
+    for row, display in zip(rows, await _describe_rows(db, rows)):
+        await _reject(db, row, display, note=note, status="expired")
+    return len(rows)
+
+
+async def withdraw(
+    db: AsyncSession,
+    change_id: int,
+    *,
+    agent_slug: str | None,
+    owner_user_id: int | None,
+    reason: str | None = None,
+) -> PendingChange:
+    """An agent retracting ITS OWN pending proposal - propose's cleanup
+    half. Guarded to the proposer, so one agent (or a slug-less caller)
+    can never sweep another's cards, and it lands as a rejection with a
+    note: the audit trail keeps the mistake visible, the user just
+    never has to clean it up by hand."""
+    row = _require_pending(
+        _found(await get_change(db, change_id, owner_user_id=owner_user_id))
+    )
+    _require_proposer(row, agent_slug)
+    return await reject_row(db, row, note=_withdrawn_note(agent_slug, reason))
+
+
+def _require_proposer(row: PendingChange, agent_slug: str | None) -> None:
+    if not agent_slug or row.proposed_by_agent != agent_slug:
+        raise ValueError("only the proposing agent can withdraw a change")
+
+
+def _withdrawn_note(agent_slug: str | None, reason: str | None) -> str:
+    # The reason rides on the card: a retracted proposal the user can
+    # still see needs to say why, or it reads as the agent flailing.
+    return f"{WITHDRAWN} by {agent_slug}." + (f" {reason.strip()}" if reason else "")
+
+
+async def withdraw_batch(
+    db: AsyncSession,
+    batch_id: str,
+    *,
+    agent_slug: str | None,
+    owner_user_id: int | None,
+    reason: str | None = None,
+) -> int:
+    """Withdraw every still-pending row of one of the agent's OWN batches,
+    in one transaction. Twelve separate withdrawals were twelve commits
+    racing the chat run's own connection, which is how SQLite reported
+    "database is locked" halfway through a cleanup. Returns how many rows
+    went; rows already decided are left as they are."""
+    pending = _pending(await batch_rows(db, batch_id, owner_user_id=owner_user_id))
+    for row in pending:
+        _require_proposer(row, agent_slug)
+    note = _withdrawn_note(agent_slug, reason)
+    for row, display in zip(pending, await _describe_rows(db, pending)):
+        await _reject(db, row, display, note=note)
+    return len(pending)
+
+
+async def cards(
+    db: AsyncSession, rows: list[PendingChange]
+) -> list[PendingChangeResponse]:
+    """The cards every confirmation surface renders (the JSON routes and
+    the htmx cards alike), built from the stored rows in a fixed number
+    of queries."""
+    return [
+        PendingChangeResponse.from_row(
+            row,
+            title=executor.title if executor else row.change_type,
+            display=display,
+            editable=row.status == "pending" and bool(editable_fields(executor)),
+        )
+        for row, display in zip(rows, await describe_changes(db, rows))
+        for executor in [known_executor(row.change_type)]
+    ]
+
+
+async def card(db: AsyncSession, row: PendingChange) -> PendingChangeResponse:
+    (one,) = await cards(db, [row])
+    return one
+
+
+def outcome_of(row: PendingChange) -> str:
+    """The row's status as a person reads it (``card_outcome``)."""
+    return card_outcome(row.status, (row.result or {}).get("note"))
+
+
+async def describe_changes(
+    db: AsyncSession, rows: list[PendingChange]
+) -> list[list[ChangeDisplayRow]]:
+    """The cards' body lines, in order: system truth, never model copy.
+
+    Pending rows resolve from the database at read time (the world may
+    have moved since the proposal); resolved rows read the snapshot
+    frozen at resolution - history does not re-resolve.
+    """
+    bodies: dict[int, list[ChangeDisplayRow]] = {}
+    live: list[tuple[int, PendingChange]] = []
+    for index, row in enumerate(rows):
+        frozen = (row.result or {}).get("display")
+        if row.status != "pending" and isinstance(frozen, list):
+            bodies[index] = [ChangeDisplayRow(**line) for line in frozen]
+        else:
+            live.append((index, row))
+    described = await _describe_rows(db, [row for _, row in live])
+    bodies.update(zip((index for index, _ in live), described))
+    return [bodies[index] for index in range(len(rows))]
+
+
+async def describe_change(
+    db: AsyncSession, row: PendingChange
+) -> list[ChangeDisplayRow]:
+    (body,) = await describe_changes(db, [row])
+    return body

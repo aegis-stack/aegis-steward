@@ -2,7 +2,7 @@
 replay plays it (the ``path`` card kind).
 
 She names its source, never its layout: a kept request (``request_id``,
-as ``server_requests`` lists them: its replay), a route (``route``: its code
+as ``requests`` lists them: its replay), a route (``route``: its code
 path, every hop its code can take, read without running it), a flow's
 stops (``stops``, model node ids, joined along the lines the running
 model declares) or a node (``node``: its wiring, the edges the ontology
@@ -69,7 +69,7 @@ async def prepare(ask: PathAsk) -> PathCard:
         if found is None:
             raise ValueError(
                 f"Request {ask.request_id!r} is no longer kept; "
-                "the server_requests tool lists the ones that are."
+                "the requests tool lists the ones that are."
             )
         return PathCard(title=ask.title, path=found)
     if ask.node is not None:

@@ -126,15 +126,16 @@ class TestApprovingFilesIt:
     ) -> None:
         """Proposing is not writing: until somebody approves, the matter
         has no request on it."""
-        from app.services.finance.domains.writes.queue import propose, reject
+        from app.services.change_queue import propose, reject
 
         matter_id, document_id = await _letter(async_db_session)
         row = await propose(
             async_db_session,
             "document.request",
             _payload(matter_id, document_id).model_dump(mode="json"),
+            owner_user_id=None,
         )
-        await reject(async_db_session, row.id)
+        await reject(async_db_session, row.id, owner_user_id=None)
         await async_db_session.commit()
 
         assert await RequestService(async_db_session).for_matter(matter_id) == []
@@ -168,7 +169,7 @@ class TestWhatItRefuses:
             await request_execute(async_db_session, _payload(matter_id, 999_999), None)
 
     def test_it_is_in_the_one_queue(self) -> None:
-        from app.services.finance.domains.writes.registry import executor_for
+        from app.services.change_queue import executor_for
 
         assert executor_for("document.request").title
 
@@ -194,11 +195,11 @@ class TestALetterOnAMatterProposesItsDemands:
         await db.flush()
 
     async def _cards(self, db: AsyncSession, document_id: int) -> list:
-        from app.services.finance.domains.writes.queue import list_changes
+        from app.services.change_queue import list_changes
 
         return [
             c
-            for c in await list_changes(db, status="pending")
+            for c in await list_changes(db, status="pending", owner_user_id=None)
             if c.change_type == "document.request"
             and c.payload["document_id"] == document_id
         ]
@@ -316,9 +317,9 @@ class TestALetterOnAMatterProposesItsDemands:
     ) -> None:
         """A stack without the AI service files its metadata as before;
         only the demands go unread."""
+        from app.services.change_queue import list_changes
         from app.services.documents.domains.reading import propose_reading
         from app.services.documents.service import DocumentService
-        from app.services.finance.domains.writes.queue import list_changes
         from app.services.matters.models import matter_tag
 
         matter_id, document_id = await _letter(async_db_session)
@@ -334,7 +335,9 @@ class TestALetterOnAMatterProposesItsDemands:
         assert await self._cards(async_db_session, document_id) == []
         assert [
             c.change_type
-            for c in await list_changes(async_db_session, status="pending")
+            for c in await list_changes(
+                async_db_session, status="pending", owner_user_id=None
+            )
             if c.payload.get("document_id") == document_id
         ] == ["document.metadata"]
 

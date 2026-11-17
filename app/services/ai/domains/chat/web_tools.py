@@ -1,4 +1,4 @@
-"""Her way onto the web (#593): a search, and a page read as text.
+"""The assistant's way onto the web (#1997): a search, and a page read as text.
 
 Both ride what the contact lookup already had: ``app.core.search``
 (Brave, keyed, cached, budgeted per day) and the guarded fetch of

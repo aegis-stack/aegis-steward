@@ -125,6 +125,11 @@ To bring in real accounts, see [Bring your data](#bring-your-data).
 
 Steward deploys from GitHub Actions: open **Actions, Deploy, Run workflow**. Set `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_CONFIG` as repository secrets. Put the server's environment in a `DEPLOY_ENV` secret, starting from `.env.deploy.example`: it needs `DOMAIN`, `ACME_EMAIL`, `REDIS_PASSWORD`, `ENCRYPTION_KEY` and `APP_ENV=prod`. `scripts/server-setup.sh` prepares a fresh Ubuntu, Debian or Fedora box. HTTPS comes from Traefik.
 
+## What It Is Made Of
+
+<!-- what-it-has -->
+<!-- /what-it-has -->
+
 ## License
 
 [MIT](LICENSE)

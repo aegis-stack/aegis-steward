@@ -18,7 +18,6 @@ from jinja2 import ChoiceLoader, DictLoader
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.components.backend.api.ai.router import ai_service
 from app.components.web_frontend.rendering import templates
 from app.core.db import get_async_db
 from app.integrations.main import create_integrated_app
@@ -66,7 +65,10 @@ def _no_icon_fetches(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _bind_session(async_db_session: AsyncSession) -> Generator[None]:
+def _bind_session(app: FastAPI, async_db_session: AsyncSession) -> Generator[None]:
+    # Set per test: the root conftest clears every override around each test
+    # (``_clear_dependency_overrides``), this module's app included.
+    app.dependency_overrides[get_async_db] = _test_db
     _SESSION["current"] = async_db_session
     yield
     _SESSION.pop("current", None)
@@ -430,6 +432,8 @@ def follow(client: TestClient, follower: str) -> tuple[object, str]:
 @pytest.fixture
 async def stored() -> tuple[str, str]:
     """A conversation with one answered turn, the way a stream leaves it."""
+    from app.components.backend.api.ai.service import ai_service
+
     conversation = await ai_service.conversation_manager.create_conversation(
         provider=AIProvider.OLLAMA,
         model="gpt-5.6-luna",
@@ -457,3 +461,14 @@ async def stored() -> tuple[str, str]:
     )
     await ai_service.conversation_manager.save_conversation(conversation)
     return conversation.id, reply.id
+
+
+@pytest.fixture
+def shell(client: TestClient) -> str:
+    """A page in the framework's own shell (``base.html``): the landing,
+    or, where the project's site owns the root, the Overseer's door."""
+    from tests.shell import shell_path
+
+    response = client.get(shell_path())
+    assert response.status_code == 200, (shell_path(), response.status_code)
+    return response.text

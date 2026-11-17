@@ -1,33 +1,34 @@
 """Per-user agent memory: storage, dedup, and guarded prompt injection.
 
-The built-in ``save_memory`` tool lets the model persist durable facts
-about a user mid-conversation. Facts are stored one JSON document per
+The model asks to keep, rewrite or drop facts through the memory tools
+(``memory_tools``). Facts are stored one JSON document per
 user (``agent_user_memory``) as ``structured_facts`` entries of
 ``{category, fact, saved_at}``, deduplicated by substring within a
 category, and injected into later chats inside a ``<user_memory>`` guard
 block that frames the content as data, never instructions.
 
-User identity reaches the tool through ``current_user_id`` (a
-ContextVar): the chat runtime sets it for the duration of a turn, and
-the tool reads it when the model calls ``save_memory``. Without it the
-tool declines politely instead of guessing.
+The turn's user is ``current_user_id`` (a ContextVar), bound by
+``memory_user`` for the duration of a turn.
 """
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any
 
-from sqlmodel import select
+from pydantic import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.db import get_async_session
+from app.core.figures import FIGURES
 from app.core.log import logger
+from app.core.time import utcnow
+from app.core.tools import acting_as, current_subject
+from app.services.ai.domains.chat import queries
+from app.services.ai.domains.chat.readings import Reading, kept_readings
+from app.services.ai.domains.chat.tool_telemetry import tool_turn
 from app.services.ai.models.agents import AgentUserMemory
-from app.services.ai.models.agents.timestamps import utcnow_naive
-
-T = TypeVar("T")
 
 MEMORY_CATEGORIES = (
     "family",
@@ -41,15 +42,6 @@ MEMORY_CATEGORIES = (
 )
 
 current_user_id: ContextVar[str | None] = ContextVar("current_user_id", default=None)
-# Attribution for writes made mid-turn (queue proposals): which agent
-# asked, in which conversation. Set by the same runtimes that bind the
-# user - a write with no author cannot be audited.
-current_agent_slug: ContextVar[str | None] = ContextVar(
-    "current_agent_slug", default=None
-)
-current_conversation_id: ContextVar[str | None] = ContextVar(
-    "current_conversation_id", default=None
-)
 
 # The user a single-tenant install writes memory for. Chat turns without an
 # authenticated user (the dashboard's own surfaces) resolve to this, so the
@@ -61,25 +53,38 @@ DEFAULT_MEMORY_USER_ID = "0"
 def memory_user(
     user_id: str,
     *,
+    owner_user_id: int | None = None,
     agent_slug: str | None = None,
     conversation_id: str | None = None,
+    subject: str | None = None,
+    admin: bool | None = None,
 ) -> Iterator[None]:
-    """Bind the turn's identity: whose turn, which agent, which chat.
+    """Bind the turn's identity: whose turn, whose cards
+    (``current_owner_user_id``), which agent, which chat, what it is about
+    (``current_subject``), and whether it is an admin's, where the runner
+    knows (``current_admin``).
 
     Every chat runtime wraps its model call in this. Without it a
     memory write has no owner (the tool declines and the model reads
-    the refusal as success), and a queue proposal has no author for
-    the audit trail.
+    the refusal as success), a queue proposal has no author for the
+    audit trail, and a tool call lands in the ledger as nobody's
+    (``tool_turn``).
     """
     token = current_user_id.set(user_id)
-    agent_token = current_agent_slug.set(agent_slug)
-    conversation_token = current_conversation_id.set(conversation_id)
+    about = current_subject.set(subject)
     try:
-        yield
+        with (
+            acting_as(owner_user_id, agent_slug, conversation_id, admin),
+            tool_turn(
+                user_id=user_id,
+                agent_slug=agent_slug,
+                conversation_id=conversation_id,
+            ),
+        ):
+            yield
     finally:
+        current_subject.reset(about)
         current_user_id.reset(token)
-        current_agent_slug.reset(agent_token)
-        current_conversation_id.reset(conversation_token)
 
 
 SAVE_MEMORY_GUIDANCE = (
@@ -95,19 +100,35 @@ async def get_user_memory(
     session: AsyncSession, user_id: str
 ) -> AgentUserMemory | None:
     """Fetch the memory row for a user, or None if none saved yet."""
-    result = await session.exec(
-        select(AgentUserMemory).where(AgentUserMemory.user_id == user_id)
-    )
-    return result.first()
+    return await queries.user_memory_for(session, user_id)
+
+
+class UserFact(BaseModel):
+    """A fact saved about the user, by the ``index`` that addresses it: the
+    facts are one JSON list, so position is the identity."""
+
+    model_config = FIGURES
+
+    index: int
+    category: str
+    fact: str
+    saved_at: datetime | None
 
 
 def _facts(row: AgentUserMemory) -> list[dict[str, Any]]:
-    # Copies: an entry edited in place would edit the loaded value too,
-    # and the flush would see nothing to write.
-    return [dict(entry) for entry in row.memory.get("structured_facts", [])]
+    return list(row.memory.get("structured_facts", []))
 
 
-def is_duplicate(existing: str, candidate: str) -> bool:
+def _kept(fact: UserFact) -> dict[str, Any]:
+    """A fact as the row keeps it: no index, its position is one."""
+    return fact.model_dump(mode="json", exclude={"index"})
+
+
+def _stored(facts: list[UserFact]) -> list[dict[str, Any]]:
+    return [_kept(f) for f in facts]
+
+
+def _is_duplicate(existing: str, candidate: str) -> bool:
     """Substring match either direction, case-insensitive. A blank is a
     duplicate of nothing (it is a substring of everything)."""
     a = existing.casefold().strip()
@@ -115,16 +136,27 @@ def is_duplicate(existing: str, candidate: str) -> bool:
     return bool(a and b) and (a in b or b in a)
 
 
-def find_fact(facts: list[dict[str, Any]], words: str) -> int | None:
-    """The one saved fact ``words`` picks out, or None. A quote of the fact
-    (either direction, case-insensitive) is enough; two matches is a
-    question back to the model rather than a guess."""
-    hits = [
-        i
-        for i, entry in enumerate(facts)
-        if is_duplicate(str(entry.get("fact", "")), words)
-    ]
-    return hits[0] if len(hits) == 1 else None
+def fact_matching(facts: list[UserFact], quote: str) -> UserFact:
+    """The one saved fact ``quote`` picks out (a quote of it, either way,
+    case-insensitive); ValueError when none or several do - a question
+    back to the model, never a guess."""
+    hits = [fact for fact in facts if _is_duplicate(fact.fact, quote)]
+    if len(hits) != 1:
+        raise ValueError(
+            f"No single saved fact matches {quote!r}; quote it more exactly."
+        )
+    return hits[0]
+
+
+def _index_of(facts: list[UserFact], at: int | str, user_id: str) -> int:
+    """Where ``at`` points: an index (the dashboard's), or a quote of the
+    fact (the assistant's: positions move between a card and its
+    approval)."""
+    if isinstance(at, str):
+        return fact_matching(facts, at).index
+    if not 0 <= at < len(facts):
+        raise IndexError(f"No fact at index {at} for user {user_id}")
+    return at
 
 
 def _normalize_category(category: str) -> str:
@@ -146,39 +178,39 @@ async def save_user_fact(
 
     facts = _facts(row)
     for entry in facts:
-        if entry.get("category") == category and is_duplicate(
+        if entry.get("category") == category and _is_duplicate(
             str(entry.get("fact", "")), fact
         ):
             return f"Already known ({category}): {entry['fact']}"
 
-    facts.append(
-        {
-            "category": category,
-            "fact": fact.strip(),
-            "saved_at": datetime.now(UTC).isoformat(),
-        }
+    saved = UserFact(
+        index=len(facts),
+        category=category,
+        fact=fact.strip(),
+        saved_at=datetime.now(UTC),
     )
+    facts.append(_kept(saved))
     row.memory = {**row.memory, "structured_facts": facts}
-    row.updated_at = utcnow_naive()
+    row.updated_at = utcnow()
     session.add(row)
-    # The change queue's approval owns the commit (#484).
+    # Flush only: the caller's session commits (a route's, or the change
+    # queue's approval, with the card's own status).
     await session.flush()
     logger.info("Saved user fact", user_id=user_id, category=category)
     return f"Saved ({category}): {fact.strip()}"
 
 
-async def load_user_readings(
-    session: AsyncSession, user_id: str
-) -> list[dict[str, Any]]:
+def _readings(row: AgentUserMemory | None) -> list[Reading]:
+    return kept_readings(row.memory.get("readings", [])) if row else []
+
+
+async def load_user_readings(session: AsyncSession, user_id: str) -> list[Reading]:
     """The readings this user has recorded, oldest first."""
-    row = await get_user_memory(session, user_id)
-    if row is None:
-        return []
-    return list(row.memory.get("readings", []))
+    return _readings(await get_user_memory(session, user_id))
 
 
 async def store_user_readings(
-    session: AsyncSession, user_id: str, readings: list[dict[str, Any]]
+    session: AsyncSession, user_id: str, readings: list[Reading]
 ) -> None:
     """Replace the user's recorded readings.
 
@@ -189,62 +221,10 @@ async def store_user_readings(
     row = await get_user_memory(session, user_id)
     if row is None:
         row = AgentUserMemory(user_id=user_id)
-    row.memory = {**row.memory, "readings": readings}
-    row.updated_at = utcnow_naive()
+    row.memory = {**row.memory, "readings": [r.model_dump() for r in readings]}
+    row.updated_at = utcnow()
     session.add(row)
     await session.commit()
-
-
-@asynccontextmanager
-async def session_or(session: AsyncSession | None) -> AsyncIterator[AsyncSession]:
-    """The caller's session, or one opened for the length of the call.
-
-    Callers come from both sides: a TOOL runs inside a model call with
-    no session of its own, while a change type's describe or execute
-    already holds the request's. Opening a second one inside the first
-    is not merely wasteful - every transaction takes the write lock now
-    (see ``emit_begin``), so the inner session waits on a
-    lock its own caller is holding and spends the entire busy timeout
-    doing it. That reads as a hang, and it cost two of them.
-    """
-    if session is not None:
-        yield session
-        return
-    async with get_async_session() as opened:
-        yield opened
-
-
-async def load_user_pastes(
-    user_id: str, session: AsyncSession | None = None
-) -> list[dict[str, Any]]:
-    """The pastes this user has on file, oldest first."""
-    async with session_or(session) as db:
-        row = await get_user_memory(db, user_id)
-        return list(row.memory.get("pastes", [])) if row else []
-
-
-async def store_user_pastes(
-    user_id: str,
-    pastes: list[dict[str, Any]],
-    session: AsyncSession | None = None,
-) -> None:
-    """Replace the user's paste index.
-
-    Same document as the facts and the readings, a different key: the
-    index is a line per paste, and the text itself lives in the object
-    store under the key each line names.
-    """
-    async with session_or(session) as db:
-        row = await get_user_memory(db, user_id)
-        if row is None:
-            row = AgentUserMemory(user_id=user_id)
-        row.memory = {**row.memory, "pastes": pastes}
-        row.updated_at = utcnow_naive()
-        db.add(row)
-        # A caller that brought its own session owns the commit: the
-        # change queue commits the whole approval at once.
-        if session is None:
-            await db.commit()
 
 
 async def replace_user_memory(
@@ -254,19 +234,21 @@ async def replace_user_memory(
     session: AsyncSession,
 ) -> str:
     """Replace the user's facts wholesale, one fact per non-empty line."""
-    now = datetime.now(UTC).isoformat()
-    facts = [
-        {"category": "general", "fact": line.strip(), "saved_at": now}
-        for line in memory_text.splitlines()
-        if line.strip()
-    ]
+    now = datetime.now(UTC)
+    lines = [line.strip() for line in memory_text.splitlines() if line.strip()]
+    facts = _stored(
+        [
+            UserFact(index=i, category="general", fact=line, saved_at=now)
+            for i, line in enumerate(lines)
+        ]
+    )
     row = await get_user_memory(session, user_id)
     if row is None:
         row = AgentUserMemory(user_id=user_id)
     row.memory = {**row.memory, "structured_facts": facts}
-    row.updated_at = utcnow_naive()
+    row.updated_at = utcnow()
     session.add(row)
-    await session.flush()
+    await session.flush()  # as in save_user_fact
     logger.info("Replaced user memory", user_id=user_id, fact_count=len(facts))
     return f"Memory replaced with {len(facts)} fact(s)."
 
@@ -275,60 +257,49 @@ async def list_user_facts(
     user_id: str,
     *,
     session: AsyncSession,
-) -> list[dict[str, Any]]:
+) -> list[UserFact]:
     """Saved facts for a user, each carrying the ``index`` that addresses it.
 
     Facts live in one JSON list, so position IS the identity: the dashboard
     edits and deletes by it.
     """
-    row = await get_user_memory(session, user_id)
+    return facts_of(await get_user_memory(session, user_id))
+
+
+def facts_of(row: AgentUserMemory | None) -> list[UserFact]:
+    """A memory row's saved facts (``list_user_facts``), for a caller that
+    read the row itself."""
     if row is None:
         return []
-    return [{**entry, "index": i} for i, entry in enumerate(_facts(row))]
-
-
-async def _locate(
-    session: AsyncSession, user_id: str, at: int | str
-) -> tuple[AgentUserMemory, list[dict[str, Any]], int]:
-    """The user's row, its facts, and where ``at`` points, in one read.
-
-    ``at`` is an index (the dashboard's) or a quote of the fact (the
-    assistant's: found by its words, because facts are addressed by
-    position and the list may have moved since the card was filed).
-    """
-    row = await get_user_memory(session, user_id) or AgentUserMemory(user_id=user_id)
-    facts = _facts(row)
-    if isinstance(at, str):
-        index = find_fact(facts, at)
-        if index is None:
-            raise ValueError(
-                f"No single saved fact matches {at!r}; quote it more exactly."
-            )
-        return row, facts, index
-    if not 0 <= at < len(facts):
-        raise IndexError(f"No fact at index {at} for user {user_id}")
-    return row, facts, at
-
-
-async def saved_fact(
-    user_id: str, quote: str, *, session: AsyncSession | None = None
-) -> dict[str, Any]:
-    """The one saved fact ``quote`` picks out; ValueError when none or
-    several do."""
-    async with session_or(session) as db:
-        _, facts, index = await _locate(db, user_id, quote)
-        return facts[index]
+    return [
+        UserFact(
+            index=i,
+            category=entry.get("category") or "general",
+            fact=entry["fact"],
+            saved_at=entry.get("saved_at"),
+        )
+        for i, entry in enumerate(_facts(row))
+    ]
 
 
 async def _rewrite_facts(
-    row: AgentUserMemory, facts: list[dict[str, Any]], *, session: AsyncSession
+    user_id: str,
+    facts: list[dict[str, Any]],
+    *,
+    session: AsyncSession,
 ) -> None:
-    # Flush only: every caller's session commits on exit (a route's,
-    # own_write's, the change queue's approval).
+    row = await get_user_memory(session, user_id)
+    if row is None:
+        raise IndexError(f"No saved memory for user {user_id}")
     row.memory = {**row.memory, "structured_facts": facts}
-    row.updated_at = utcnow_naive()
+    row.updated_at = utcnow()
     session.add(row)
-    await session.flush()
+    await session.flush()  # as in save_user_fact
+
+
+async def saved_fact(user_id: str, quote: str, *, session: AsyncSession) -> UserFact:
+    """The one saved fact ``quote`` picks out (``fact_matching``)."""
+    return fact_matching(await list_user_facts(user_id, session=session), quote)
 
 
 async def update_user_fact(
@@ -338,17 +309,20 @@ async def update_user_fact(
     fact: str | None = None,
     category: str | None = None,
     session: AsyncSession,
-) -> dict[str, Any]:
-    """Rewrite one saved fact in place (``at`` as in ``_locate``);
+) -> UserFact:
+    """Rewrite one saved fact in place (``at`` as in ``_index_of``);
     returns the updated entry."""
-    row, facts, index = await _locate(session, user_id, at)
+    facts = await list_user_facts(user_id, session=session)
+    index = _index_of(facts, at, user_id)
+    changes: dict[str, str] = {}
     if fact is not None and fact.strip():
-        facts[index]["fact"] = fact.strip()
+        changes["fact"] = fact.strip()
     if category is not None:
-        facts[index]["category"] = _normalize_category(category)
-    await _rewrite_facts(row, facts, session=session)
+        changes["category"] = _normalize_category(category)
+    facts[index] = facts[index].model_copy(update=changes)
+    await _rewrite_facts(user_id, _stored(facts), session=session)
     logger.info("Updated user fact", user_id=user_id, index=index)
-    return {**facts[index], "index": index}
+    return facts[index]
 
 
 async def delete_user_fact(
@@ -356,12 +330,12 @@ async def delete_user_fact(
     at: int | str,
     *,
     session: AsyncSession,
-) -> dict[str, Any]:
-    """Forget one saved fact (``at`` as in ``_locate``); returns it."""
-    row, facts, index = await _locate(session, user_id, at)
-    gone = facts.pop(index)
-    await _rewrite_facts(row, facts, session=session)
-    logger.info("Deleted user fact", user_id=user_id, index=index)
+) -> UserFact:
+    """Forget one saved fact (``at`` as in ``_index_of``); returns it."""
+    facts = await list_user_facts(user_id, session=session)
+    gone = facts.pop(_index_of(facts, at, user_id))
+    await _rewrite_facts(user_id, _stored(facts), session=session)
+    logger.info("Deleted user fact", user_id=user_id, index=gone.index)
     return gone
 
 
@@ -390,29 +364,28 @@ def format_user_memory(row: AgentUserMemory | None) -> str | None:
     )
 
 
+class UserContext(BaseModel):
+    """What a turn knows of its user, from the one row that keeps it: the
+    guarded block of saved facts (None when nothing is saved), and the
+    readings recorded from images, oldest first."""
+
+    model_config = FIGURES
+
+    memory: str | None
+    readings: list[Reading]
+
+
+def _known(row: AgentUserMemory | None) -> UserContext:
+    return UserContext(memory=format_user_memory(row), readings=_readings(row))
+
+
 async def build_user_memory_context(
     user_id: str,
     *,
     session: AsyncSession | None = None,
-) -> str | None:
-    """The guarded memory block for a user, or None when nothing saved."""
+) -> UserContext:
+    """The user's ``UserContext``, read once for the turn."""
     if session is not None:
-        return format_user_memory(await get_user_memory(session, user_id))
+        return _known(await get_user_memory(session, user_id))
     async with get_async_session() as owned_session:
-        return format_user_memory(await get_user_memory(owned_session, user_id))
-
-
-async def own_write(work: Callable[[AsyncSession], Awaitable[T]]) -> T:
-    """A memory write in a session of its OWN.
-
-    Every memory tool reads the row and writes it back, and doing that
-    inside the turn's session would tie a cleanup to whether the answer
-    committed. It used to retry the lock-upgrade failure as well, which
-    it had to: under another writer - the worker's health check, an
-    extraction landing a page - the upgrade failed at once and a turn's
-    cleanup silently did nothing (2026-09-16: two forget_memory calls,
-    both lost). The engine takes the write lock up front now, so the
-    session is all this has to provide.
-    """
-    async with get_async_session() as session:
-        return await work(session)
+        return _known(await get_user_memory(owned_session, user_id))

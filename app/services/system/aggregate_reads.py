@@ -53,6 +53,7 @@ register_tool(
     aggregate,
     description="What each part holds: counts and sums by label, never rows",
     effect="read",
+    doing="Counting what each part holds",
     admin=True,
 )
 

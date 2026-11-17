@@ -19,6 +19,7 @@ from app.components.web_frontend import (
 from app.core import edges, runtime, secrets, series
 from app.core.config import settings
 from app.core.ontology import calls
+from app.core.ontology import system as ontology_system
 from app.core.ontology.model import Edge, EdgeKind
 from app.core.runtime import Instance
 from app.services.system import topology, ui_runtime
@@ -161,9 +162,7 @@ async def test_after_its_first_frame_a_chart_sends_only_its_new_points(
     points, not the whole window again; a new line sends it all."""
     readings = iter([["a"], ["a"], ["a", "b"]])
 
-    async def section(
-        page: str, window: int, wait: bool = True, draw: bool = True
-    ) -> tuple:
+    async def section(*_: object, **__: object) -> tuple:
         names = next(readings)
         data = series.chart(
             {name: [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)] for name in names}, str
@@ -404,7 +403,9 @@ def _failing(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         target="component:database",
         kind=EdgeKind.DEPENDS_ON,
     )
-    monkeypatch.setattr(overseer_container, "current", lambda: model_of(edges=[needs]))
+    monkeypatch.setattr(
+        ontology_system, "current", lambda _=None: model_of(edges=[needs])
+    )
     return TestClient(app)
 
 
@@ -660,25 +661,6 @@ def test_a_tier_wider_than_a_row_wraps() -> None:
     found = overseer_map.layout([_entry(f"s{n}") for n in range(6)], shape)
     assert len({node["top"] for node in found["map_nodes"]}) == 2
     assert _widths(found)["s0"] == pytest.approx(overseer_map.FILL * 100 / 5)
-
-
-def test_a_crowded_row_widens_the_map_rather_than_cut_its_names() -> None:
-    """Seven side by side at the map's least width cut each name short: the
-    map grows so its slimmest node keeps ``MIN_NODE`` pixels, and says it is
-    wide (a dialog holding it grows, and past that it scrolls sideways). A
-    small map keeps its least width."""
-    shape = topology.Shape(tiers=[[f"s{n}" for n in range(7)]], links=[], hosted=[])
-    crowded = overseer_map.layout(
-        [_entry(f"s{n}") for n in range(7)], shape, compact=True, opened=True
-    )
-    slimmest = min(_widths(crowded).values())
-    assert crowded["map_min_width"] == pytest.approx(
-        overseer_map.MIN_NODE * 100 / slimmest
-    )
-    assert crowded["map_wide"] is True
-    small = overseer_map.layout([_entry("backend"), _entry("database")])
-    assert small["map_min_width"] == overseer_map.MIN_WIDTH
-    assert small["map_wide"] is False
 
 
 def test_across_the_foot_of_a_column_opens_its_hint_above() -> None:
@@ -979,3 +961,22 @@ def test_across_each_tier_is_a_column_and_lines_run_left_to_right() -> None:
     assert {n["top"] for n in found["map_nodes"]} == {0}
     out = {line["end"]: line["queued"] for line in found["map_links"]}
     assert out == {topology.QUEUE: True, "worker": True}  # either side of it
+
+
+def test_a_crowded_row_widens_the_map_rather_than_cut_its_names() -> None:
+    """Seven side by side at the map's least width cut each name short: the
+    map grows so its slimmest node keeps ``MIN_NODE`` pixels, and says it is
+    wide (a dialog holding it grows, and past that it scrolls sideways). A
+    small map keeps its least width."""
+    shape = topology.Shape(tiers=[[f"s{n}" for n in range(7)]], links=[], hosted=[])
+    crowded = overseer_map.layout(
+        [_entry(f"s{n}") for n in range(7)], shape, compact=True, opened=True
+    )
+    slimmest = min(_widths(crowded).values())
+    assert crowded["map_min_width"] == pytest.approx(
+        overseer_map.MIN_NODE * 100 / slimmest
+    )
+    assert crowded["map_wide"] is True
+    small = overseer_map.layout([_entry("backend"), _entry("database")])
+    assert small["map_min_width"] == overseer_map.MIN_WIDTH
+    assert small["map_wide"] is False

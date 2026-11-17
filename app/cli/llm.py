@@ -38,6 +38,7 @@ from app.services.ai.service import (
     list_vendors,
     set_active_model,
     sync_llm_catalog,
+    sync_source,
 )
 
 app = typer.Typer(help=lazy_t("llm.help"))
@@ -128,9 +129,11 @@ async def sync(
     start_time = time.time()
     shown_mode = mode or "chat + voice"
 
+    source = sync_source(source)
+
     # Build status message based on source
-    if source == "ollama":
-        status_msg = f"[bold {theme.ACCENT}]{t('llm.syncing_ollama')}..."
+    if source == "local":
+        status_msg = f"[bold {theme.ACCENT}]{t('llm.syncing_local')}..."
     elif source == "all":
         status_msg = (
             f"[bold {theme.ACCENT}]{t('llm.syncing_catalog_all', mode=shown_mode)}..."

@@ -28,7 +28,7 @@ const fire = (name, event) => (handlers[name] || []).forEach((fn) => fn(event));
 global.Event = class { constructor(name) { this.type = name; } };
 global.CustomEvent = class extends global.Event {
   constructor(name, init) { super(name); this.detail = init && init.detail; } };
-global.window = { location: { origin: 'http://app', pathname: '/', search: '' },
+global.window = { location: { origin: 'http://app', pathname: '/', search: '', hash: '' },
                   addEventListener: on, dispatchEvent: () => {} };
 global.document = { addEventListener: on, getElementById: () => null,
                     querySelector: () => null, querySelectorAll: () => [],
@@ -142,7 +142,27 @@ def test_a_dropdown_at_the_foot_of_the_window_opens_above() -> None:
     assert out == {"foot": "100%", "head": ""}
 
 
-COPY_HARNESS = (
+CLOSE_HARNESS = (
+    STUBS
+    + """
+const { closesDropdown } = require(APP_JS);
+const menu = { contains: (t) => t.inside };
+const at = (spot) => ({ inside: spot !== 'outside',
+  closest: (sel) => (spot === 'entry' && sel.includes('[role="menu"] button') ? {} : null) });
+console.log(JSON.stringify(['outside', 'entry', 'button', 'heading']
+  .map((spot) => closesDropdown(menu, at(spot)))));
+"""
+)
+
+
+def test_a_dropdown_closes_on_a_click_off_it_or_on_an_entry() -> None:
+    """One listener for every menu (a thousand-row table has a menu a
+    row): a click elsewhere or on one of its entries closes it; its own
+    button and a heading in it do not."""
+    assert run(CLOSE_HARNESS, APP_JS=APP_JS) == [True, True, False, False]
+
+
+COPY_START = (
     STUBS
     + """
 const toasts = [];
@@ -154,8 +174,16 @@ Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
 });
 require(APP_JS);
-const button = { dataset: { copy: 'postgres://db' }, querySelector: () => null };
-fire('click', { target: { closest: (sel) => (sel === '[data-copy]' ? button : null) } });
+const press = (button) => fire('click', { target: {
+  closest: (sel) => (sel.split(', ').some((one) => one.slice(1, -1) in button.marks)
+    ? button : null) } });
+"""
+)
+COPY_HARNESS = (
+    COPY_START
+    + """
+press({ marks: { 'data-copy': 1 }, dataset: { copy: 'postgres://db' },
+        querySelector: () => null });
 setTimeout(() => console.log(JSON.stringify({ written, toasts })), 0);
 """
 )
@@ -168,6 +196,37 @@ def test_any_copy_button_copies_its_text() -> None:
     result = out
     assert result["written"] == ["postgres://db"]
     assert result["toasts"][-1]["tone"] == "ok"
+
+
+# A transcript on the page: each line's label and its words, one with a
+# button among them, as ``_macros.html``'s ``transcript`` draws them.
+COPY_FROM_HARNESS = (
+    COPY_START
+    + """
+const said = (text, buttons = []) => ({ cloneNode: () => ({
+  querySelectorAll: () => buttons.map((label) => ({ remove: () => {
+    text = text.replace(label, ''); } })),
+  get textContent() { return text; } }) });
+const lines = [
+  { dataset: { copyLine: 'Ada [00:00]' }, querySelector: () => said('Hello. ') },
+  { dataset: { copyLine: 'Grace [00:01]' },
+    querySelector: () => said('Ship it scheduler', ['scheduler']) },
+];
+document.querySelectorAll = (sel) =>
+  (sel === '#meeting-transcript [data-copy-line]' ? lines : []);
+press({ marks: { 'data-copy-from': 1 }, dataset: { copyFrom: '#meeting-transcript' },
+        querySelector: () => null });
+setTimeout(() => console.log(JSON.stringify(written)), 0);
+"""
+)
+
+
+def test_a_copy_from_the_page_takes_each_line_without_its_buttons() -> None:
+    """A transcript copied from the page reads one line each, its label then
+    its words, with the buttons among the words left out."""
+    assert run(COPY_FROM_HARNESS, APP_JS=APP_JS) == [
+        "Ada [00:00]: Hello.\nGrace [00:01]: Ship it\n"
+    ]
 
 
 PROGRESS_HARNESS = (
@@ -318,7 +377,7 @@ const view = (shown) => {
   return { tabs, buttons, panels };
 };
 const first = view('notes');
-revealTab({ closest: () => first.panels[1] });
+revealTab({ closest: (s) => (s === '[data-tab-panel]' ? first.panels[1] : null) });
 revealTab({ closest: () => null });
 const reread = view('notes');
 fire('htmx:load', { detail: { elt: reread.tabs } });
@@ -340,6 +399,53 @@ def test_a_line_in_a_hidden_tab_shows_its_tab_and_a_reread_keeps_it() -> None:
         "selected": ["false", "true"],
         "kept": [True, False],
     }
+
+
+FOLDS_HARNESS = (
+    STUBS
+    + """
+const { revealTab } = require(APP_JS);
+// A line two folds deep: each fold it sits in opens, nothing above them.
+const page = { closest: () => null };
+const outer = { open: false, parentElement: page };
+const inner = { open: false, parentElement: { closest: (s) => (s === 'details' ? outer : null) } };
+revealTab({ closest: (s) => (s === 'details' ? inner : null) });
+console.log(JSON.stringify([inner.open, outer.open]));
+"""
+)
+
+
+def test_a_line_linked_to_in_a_fold_opens_every_fold_around_it() -> None:
+    """A link to a line inside folds opens
+    each fold it sits in, so the line is there to land on."""
+    assert run(FOLDS_HARNESS, APP_JS=APP_JS) == [True, True]
+
+
+ROWS_HARNESS = (
+    STUBS
+    + """
+require(APP_JS);
+// A row ``opens_rows`` opens (or shuts) before the click reaches the page.
+const row = (key, open) => {
+  const attrs = open ? { 'data-open': '' } : {};
+  return { dataset: { row: key }, attrs, hasAttribute: (k) => k in attrs,
+           setAttribute: (k, v) => { attrs[k] = v; } };
+};
+const at = (target) => ({ target: { closest: (sel) => (sel === 'tr.log-row[data-row]' ? target : null) } });
+fire('click', at(row('41', true)));
+fire('click', at(row('42', false)));
+const again = [row('41', false), row('42', false), row('43', false)];
+const table = { querySelectorAll: (sel) => (sel === 'tr.log-row[data-row]' ? again : []) };
+fire('htmx:load', { detail: { elt: table } });
+console.log(JSON.stringify(again.map((r) => 'data-open' in r.attrs)));
+"""
+)
+
+
+def test_a_row_opened_stays_open_when_its_table_re_sends_itself() -> None:
+    """Transactions re-sends its table every second: the statement a click
+    opened stays open, by the row's key; one shut, or new, stays shut."""
+    assert run(ROWS_HARNESS, APP_JS=APP_JS) == [True, False, False]
 
 
 MARK_HARNESS = (
@@ -365,6 +471,38 @@ def test_the_sidebar_marks_the_page_it_leads_to() -> None:
     to the link whose page holds the new address (a section under it
     included), and only the home link for the home page itself."""
     assert run(MARK_HARNESS, APP_JS=APP_JS) == [None, "page", None]
+
+
+TOP_HARNESS = (
+    STUBS
+    + """
+const scrolled = [];
+window.scrollTo = (x, y) => scrolled.push(window.location.pathname + window.location.search);
+require(APP_JS);
+const go = (path, search = '', hash = '') => {
+  fire('htmx:beforeHistorySave', {});
+  Object.assign(window.location, { pathname: path, search, hash });
+  fire('htmx:pushedIntoHistory', {});
+};
+window.location.pathname = '/overseer/components/scheduler';
+go('/overseer/components/database');
+go('/overseer/components/database', '?window=7');
+go('/overseer/resources', '', '#disk');
+go('/overseer/components/server');
+console.log(JSON.stringify(scrolled));
+"""
+)
+
+
+def test_a_new_page_opens_at_its_top_and_a_control_on_it_keeps_its_place() -> None:
+    """A link swaps only what is right of the sidebar, so the window kept
+    the last page's scroll: a new page now opens at its top. A pager, a
+    filter or a chart's window changes only the query, and keeps its
+    place; an address naming a place on the page (``#disk``) shows it."""
+    assert run(TOP_HARNESS, APP_JS=APP_JS) == [
+        "/overseer/components/database",
+        "/overseer/components/server",
+    ]
 
 
 RANGE_HARNESS = (
@@ -491,6 +629,36 @@ def test_hovering_a_map_node_keeps_it_and_its_neighbours_lit() -> None:
     ]
 
 
+FRAME_HARNESS = (
+    STUBS
+    + """
+const dimmed = {};
+const node = (key) => ({ dataset: { node: key },
+                         toggleAttribute: (name, on) => { dimmed[key] = on; } });
+const nodes = [node('database'), node('service_auth'), node('worker')];
+const lines = [{ dataset: { from: 'service_auth', to: 'database' },
+                 toggleAttribute: () => {} }];
+const map = { querySelectorAll: (s) => (s.startsWith('path') ? lines : nodes) };
+const root = { dataset: { hover: 'database' }, querySelector: () => map };
+document.getElementById = (id) => (id === 'overview-stack' ? root : null);
+require(APP_JS);
+fire('htmx:afterSwap', { detail: { elt: {} } });
+console.log(JSON.stringify(dimmed));
+"""
+)
+
+
+def test_a_live_frame_swaps_in_already_focused() -> None:
+    """A live frame's nodes take the hovered focus as they are swapped in,
+    before they paint: on ``htmx:load``, after the settle delay, each frame
+    showed its dimmed nodes lit and faded them back, a flicker a second."""
+    assert run(FRAME_HARNESS, APP_JS=APP_JS) == {
+        "database": False,
+        "service_auth": False,
+        "worker": True,
+    }
+
+
 LIT_HARNESS = (
     STUBS
     + """
@@ -555,59 +723,6 @@ def test_a_clicked_name_is_found_by_its_column_in_the_source() -> None:
     """Overseer > Code asks where a name is by line and column: the column
     counts the line's source only, never its number."""
     assert run(COLUMN, APP_JS=APP_JS) == [10, 4, None]
-
-
-def test_a_change_reads_in_the_viewers_clock() -> None:
-    """The server keeps UTC; the page shows the viewer's own time - the
-    time alone today, the day with it otherwise."""
-    harness = (
-        STUBS
-        + """
-const { localTime } = require(APP_JS);
-const now = new Date('2026-10-19T02:19:05Z');
-console.log(JSON.stringify([localTime('2026-10-19T02:19:05Z', now),
-                            localTime('2026-10-12T02:19:05Z', now)]));
-"""
-    )
-    today, earlier = run(harness, APP_JS=APP_JS)
-
-    assert "," not in today and ":" in today
-    assert "," in earlier
-
-
-SHEET = (
-    STUBS
-    + """
-const factories = {};
-const effects = [];
-global.Alpine = { data: (name, make) => { factories[name] = make; },
-                  effect: (fn) => { effects.push(fn); fn(); } };
-const page = [];
-document.documentElement = { classList: { toggle: (name, on) => page.push([name, on]) } };
-require(APP_JS);
-fire('alpine:init');
-const shell = factories.shell('/chat', false);
-shell.init();
-const set = (fields) => { Object.assign(shell, fields); effects.forEach((fn) => fn()); };
-set({ illiana: true });
-set({ illiana: false, mobileOpen: true });
-set({ mobileOpen: false });
-console.log(JSON.stringify(page.map(([name, on]) => `${name}:${on}`)));
-"""
-)
-
-
-def test_an_open_sheet_holds_the_page_still() -> None:
-    """#550: with Illiana's sheet (or the menu) open on a phone, a swipe
-    on its header or composer scrolled the page under the scrim. While
-    either is open the page does not scroll - in both shells, so the
-    shell component holds it rather than one layout."""
-    assert run(SHEET, APP_JS=APP_JS) == [
-        "overflow-hidden:false",
-        "overflow-hidden:true",
-        "overflow-hidden:true",
-        "overflow-hidden:false",
-    ]
 
 
 # A declaration at a script's top level (``function mount``, ``const KEY``).
@@ -679,3 +794,80 @@ def test_a_refusal_that_is_not_a_form_is_said_never_swapped_in() -> None:
     refusal) would blank the part of the page it targets."""
     out = run(REFUSED_HARNESS, APP_JS=APP_JS)
     assert out == {"json": False, "form": True, "toasts": ["No agent called x"]}
+
+
+GONE_HARNESS = (
+    STUBS
+    + """
+let closed = false;
+const toasts = [];
+window.dispatchEvent = (e) => toasts.push(e.detail && e.detail.text);
+document.getElementById = (id) => (id === 'drawer' ? { close: () => { closed = true; } } : null);
+require(APP_JS);
+const failed = (target, status) => fire('htmx:responseError',
+  { detail: { elt: { dataset: {} }, target: { id: target }, xhr: { status } } });
+failed('drawer-body', 404);
+failed('overseer-main', 500);
+console.log(JSON.stringify({ closed, toasts }));
+"""
+)
+
+
+def test_a_drawer_for_an_item_no_longer_there_closes() -> None:
+    """Deleted from that very drawer, or a stale link: the drawer closes
+    (its parameter leaves the address), no error; any other failure says so."""
+    out = run(GONE_HARNESS, APP_JS=APP_JS)
+    assert out == {"closed": True, "toasts": ["Request failed (500)"]}
+
+
+def test_a_change_reads_in_the_viewers_clock() -> None:
+    """The server keeps UTC; the page shows the viewer's own time - the
+    time alone today, the day with it otherwise."""
+    harness = (
+        STUBS
+        + """
+const { localTime } = require(APP_JS);
+const now = new Date('2026-10-19T02:19:05Z');
+console.log(JSON.stringify([localTime('2026-10-19T02:19:05Z', now),
+                            localTime('2026-10-12T02:19:05Z', now)]));
+"""
+    )
+    today, earlier = run(harness, APP_JS=APP_JS)
+
+    assert "," not in today and ":" in today
+    assert "," in earlier
+
+
+SHEET = (
+    STUBS
+    + """
+const factories = {};
+const effects = [];
+global.Alpine = { data: (name, make) => { factories[name] = make; }, magic: () => {},
+                  effect: (fn) => { effects.push(fn); fn(); } };
+const page = [];
+document.documentElement = { classList: { toggle: (name, on) => page.push([name, on]) } };
+require(APP_JS);
+fire('alpine:init');
+const shell = factories.shell('/chat', false);
+shell.init();
+const set = (fields) => { Object.assign(shell, fields); effects.forEach((fn) => fn()); };
+set({ illiana: true });
+set({ illiana: false, mobileOpen: true });
+set({ mobileOpen: false });
+console.log(JSON.stringify(page.map(([name, on]) => `${name}:${on}`)));
+"""
+)
+
+
+def test_an_open_sheet_holds_the_page_still() -> None:
+    """#550: with Illiana's sheet (or the menu) open on a phone, a swipe
+    on its header or composer scrolled the page under the scrim. While
+    either is open the page does not scroll - in both shells, so the
+    shell component holds it rather than one layout."""
+    assert run(SHEET, APP_JS=APP_JS) == [
+        "overflow-hidden:false",
+        "overflow-hidden:true",
+        "overflow-hidden:true",
+        "overflow-hidden:false",
+    ]

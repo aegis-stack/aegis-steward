@@ -18,11 +18,14 @@ from markupsafe import Markup, escape
 from starlette.responses import Response
 
 from app.components.backend.middleware.security_headers import csp_nonce
+from app.components.backend.security import honeypot
 from app.components.web_frontend import ranges
 from app.components.web_frontend.app_globals import register_app_globals
 from app.components.web_frontend.assets import COMPONENT_DIR, HOME_SCREEN, static_url
+from app.components.web_frontend.file_icons import icon_for
 from app.components.web_frontend.filters import FILTERS, assistant
 from app.components.web_frontend.nav import native, section
+from app.components.web_frontend.themes import theme_named, themes
 from app.core import series
 from app.core.config import settings
 from app.core.time import zone_named
@@ -32,21 +35,14 @@ from app.services.system import topology, ui_runtime
 
 templates = Jinja2Templates(COMPONENT_DIR / "templates", context_processors=[native])
 templates.env.globals.update(static=static_url, csp_nonce=csp_nonce)
-
-
-def voice() -> dict[str, object]:
-    """How Illiana is heard, for voice.js (core/voice_settings.py). Read
-    per render, never bound at import, so an .env change needs no code."""
-    return {
-        "reply": settings.VOICE_REPLY,
-        "sound": settings.VOICE_WORKING_SOUND,
-        "idle": settings.VOICE_LIVE_IDLE_SECONDS,
-        # A live engine is set: talking is the phone, not push-to-talk (#414).
-        "live": bool(settings.VOICE_LIVE_ENGINE),
-    }
-
-
-templates.env.globals["voice"] = voice
+templates.env.globals["icon_for"] = icon_for
+# The one name of the public forms' honeypot input (``honeypot()`` macro).
+templates.env.globals["honeypot_field"] = honeypot.FIELD
+# The themes a page may wear, as the toggle offers them, and the one the
+# stack opens with; a name no theme file has fails here, at boot, naming
+# the ones that exist.
+templates.env.globals["theme_choices"] = [(t.name, t.label) for t in themes().values()]
+templates.env.globals["default_theme"] = theme_named(settings.WEB_THEME)
 # Every page's <title> and sidebar name the project, so these are globals
 # rather than something each route has to remember to pass through.
 templates.env.globals["project_name"] = settings.PROJECT_DISPLAY_NAME
@@ -84,7 +80,7 @@ templates.env.globals["spark_box"] = f"0 0 {series.SPARK_WIDTH} {series.SPARK_HE
 # themselves are generated in tailwind.config.js (tests/web/test_theme.py
 # holds the two to the same list).
 APPEARANCE: dict[str, tuple[str | None, list[tuple[str, str]]]] = {
-    "theme": ("Theme", [("aegis", "Aegis"), ("steward", "Steward")]),
+    "theme": ("Theme", templates.env.globals["theme_choices"]),
     "mode": ("Mode", [("dark", "Dark"), ("light", "Light"), ("system", "System")]),
     "finish": ("Finish", [("matte", "Matte"), ("lustre", "Lustre")]),
     "assistant": ("Assistant button", [("show", "Show"), ("hide", "Hide")]),
@@ -97,15 +93,9 @@ templates.env.globals["appearance_choices"] = {
 }
 # Steward's own pages' vocabulary (sidebar, glyphs, matters, documents).
 register_app_globals(templates.env)
-# The chat section's path and the assistant's name, for the shell's drawer
-# and the sidebar's trigger, which render on every page.
-templates.env.globals["chat_path"] = section("chat").path
-# The addresses the chat surface's markup and scripts reach, published
-# once rather than rebuilt from the section path. Registered here, with
-# the shell that renders on every page; each chat route module adds its
-# own (routes/chat.py, chat_models, chat_voices, chat_speech, chat_live).
-CHAT_URLS: dict[str, str] = {}
-templates.env.globals["chat_urls"] = CHAT_URLS
+# Steward's chat mount and assistant, for the shell's drawer and sidebar
+# trigger on every page (``chat_path`` is the Overseer mount's).
+templates.env.globals["app_chat_path"] = section("chat").path
 templates.env.globals["assistant"] = assistant("finance-assistant")
 # The "everything" window, so a template can tell a default chip from a
 # chosen one without importing the module.
@@ -161,10 +151,20 @@ def hx_into(url: str, target: str, extra: str = "") -> Markup:
 
 
 def hx_dialog_post(url: str, extra: str = "") -> Markup:
-    """The attributes for a dialog's own form: post to ``url`` and swap the
-    answer back into the dialog, which is how a 422 re-renders the form
-    with its errors (pattern 1 inside pattern 4); ``extra`` rides along."""
-    return Markup(f'hx-post="{escape(url)}" hx-target="#dialog-body" {extra}')
+    """The attributes for a dialog's own form: post to ``url`` and swap
+    the answer back into the dialog, which is how a 422 re-renders the
+    form with its errors (pattern 1 inside pattern 4); ``extra`` rides
+    along. States its swap for the same reason ``hx_dialog`` does."""
+    return Markup(
+        f'hx-post="{escape(url)}" hx-target="#dialog-body" hx-swap="innerHTML" {extra}'
+    )
+
+
+def hx_post(url: str, extra: str = "") -> Markup:
+    """The attributes for "post to ``url`` and swap nothing": the answer's
+    headers say what happened (a toast, a page to go to); ``extra`` rides
+    along (``data-write``)."""
+    return Markup(f'hx-post="{escape(url)}" hx-swap="none" {extra}')
 
 
 def hx_filter(url: str, target: str) -> Markup:

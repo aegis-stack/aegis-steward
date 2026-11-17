@@ -17,13 +17,41 @@ from app.cli.ai.streaming import _stream_chat_response
 from app.cli.chat_completer import ChatCompleter
 from app.cli.slash_commands import SlashCommandHandler
 from app.cli.status_line import ChatSessionState, create_toolbar_callback
+from app.components.backend.api.ai.service import lifted_turn
 from app.i18n import t
+from app.services.ai.service import ProviderNotInstalledError, get_ai_config
 
 from ...core.config import settings
-from ...services.ai.domains.llm.config import get_ai_config
-from ...services.ai.domains.llm.providers import ProviderNotInstalledError
+from ...core.log import logger
+from ...services.system import live_status
 
 console = theme.console()
+
+
+async def _print_health() -> None:
+    """The banner's health line: the app's whole health (``live_status``,
+    the webserver's walk), or N/A when only this process can be seen."""
+    console.print(f"  [dim]>[/dim] {t('ai.health_label')} ", end="")
+    try:
+        status, partial = await live_status.live_status()
+    except Exception as exc:
+        logger.warning("ai.chat.health_unavailable", error=str(exc))
+        partial = "unavailable"
+    if partial:
+        console.print(f"[dim]{t('ai.health_na')}[/dim]")
+        return
+    health_pct = status.health_percentage
+    if status.overall_healthy:
+        console.print(
+            f"[{theme.ACCENT}]{t('ai.health_ok', pct=health_pct)}[/{theme.ACCENT}]"
+        )
+        return
+    degraded_label = t(
+        "ai.health_degraded",
+        pct=health_pct,
+        count=len(status.unhealthy_components),
+    )
+    console.print(f"[{theme.WARNING}]{degraded_label}[/{theme.WARNING}]")
 
 
 async def _interactive_chat_session(
@@ -57,34 +85,14 @@ async def _interactive_chat_session(
         end="",
     )
     # Warm up the agent (lazy imports, model initialization)
-    from app.services.ai.domains.llm.providers import get_agent
+    from app.services.ai.service import get_agent
 
     _ = await get_agent(ai_config, settings)
     console.print(f" [{theme.ACCENT}]{t('ai.ok')}[/{theme.ACCENT}]")
 
     console.print(f"  [dim]>[/dim] [dim]{t('ai.model_label')}[/dim] {ai_config.model}")
 
-    # Fetch and display health status
-    console.print(f"  [dim]>[/dim] {t('ai.health_label')} ", end="")
-    try:
-        from app.services.system.health import get_system_status
-
-        status = await get_system_status()
-        health_pct = status.health_percentage
-        if status.overall_healthy:
-            console.print(
-                f"[{theme.ACCENT}]{t('ai.health_ok', pct=health_pct)}[/{theme.ACCENT}]"
-            )
-        else:
-            unhealthy_count = len(status.unhealthy_components)
-            degraded_label = t(
-                "ai.health_degraded",
-                pct=health_pct,
-                count=unhealthy_count,
-            )
-            console.print(f"[{theme.WARNING}]{degraded_label}[/{theme.WARNING}]")
-    except Exception:
-        console.print(f"[dim]{t('ai.health_na')}[/dim]")
+    await _print_health()
 
     await asyncio.sleep(0.1)
     console.print()
@@ -257,6 +265,8 @@ async def _interactive_chat_session(
                             message=user_message,
                             conversation_id=current_conversation_id,
                             user_id="cli-user",
+                            admin=True,  # the operator's own shell, as MCP's stdio
+                            lifted=await lifted_turn(user_message, None, "cli-user"),
                         )
                     finally:
                         spinner_live.stop()

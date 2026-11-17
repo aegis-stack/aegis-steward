@@ -10,6 +10,7 @@ Whole only in the webserver, where startup registers every health check
 and the routes are; anywhere else the model is what is on disk, marked
 ``partial``. Readers ask ``current``: built once, kept once whole."""
 
+import asyncio
 from collections.abc import Callable, Iterable
 from functools import cache
 import inspect
@@ -21,6 +22,7 @@ from starlette.routing import Route
 import yaml
 
 from app.core import ownership, runtime, secrets, source_index
+from app.core.concurrency import background
 from app.core.constants import ComponentName, QueueName
 from app.core.ontology import calls, domain
 from app.core.ontology.model import (
@@ -54,27 +56,43 @@ WORKER = ComponentName.WORKER
 # Where code is: the part it belongs to and the module defining it.
 Placed = Callable[[Callable[..., Any]], dict[str, str | None]]
 
-
 _kept: SystemModel | None = None
 _building = threading.Lock()
 
 
-def current() -> SystemModel:
-    """The model readers (the MCP tool, the API) ask for, built once: a
-    partial one again only once health checks have registered since (the
-    webserver's startup), else it is all this process will ever see."""
+def current(kept: SystemModel | None = None) -> SystemModel:
+    """The model readers ask for, built once (a partial one again once
+    health checks have registered: the webserver's startup); where nothing
+    registered, ``kept`` (the webserver's whole one: ``shared``) instead."""
     global _kept
     with _building:  # two first asks (threads) build it once
-        if _kept is None or (_kept.partial and _registered()):
-            _kept = system_model()
+        registered = _registered()
+        if _kept is None or (_kept.partial and registered):
+            _kept = (None if registered else kept) or system_model()
     return _kept
+
+
+async def warm() -> None:
+    """Build the model now, off the loop, without waiting: the first to ask
+    (``current``) gets this build, and it is kept for the other processes.
+    The webserver runs it once its parts have registered."""
+    background(_build())
+
+
+async def _build() -> None:
+    from app.core.ontology.shared import keep  # it reads this module's
+    from app.services.system import service_parts
+
+    await keep(await asyncio.to_thread(current))
+    # The parts report (a zoomed map, the ontology tool's findings) reads
+    # the same source, every module cold: next, from what is now parsed.
+    await asyncio.to_thread(service_parts.report)
 
 
 def _registered() -> bool:
     from app.services.system import health
 
-    names = health.registered_health_names()
-    return bool(names["components"] or names["services"])
+    return any(health.registered_health_names().values())
 
 
 def with_app() -> SystemModel:
@@ -90,20 +108,13 @@ def with_app() -> SystemModel:
     return _kept
 
 
-def running_app() -> Starlette | None:
-    """The running backend's app; None where there is no backend (the CLI).
-    Here, so a service reads it without importing a component."""
-    from app.components.backend.main import get_configured_app
-
-    return get_configured_app()
-
-
 def system_model(app: Starlette | None = None) -> SystemModel:
     """The model, built now; ``app``'s routes in it (the running backend's
     when not given, none where there is no backend: the CLI)."""
+    from app.components.backend.main import get_configured_app
     from app.services.system import health  # the registry startup fills
 
-    app = app or running_app()
+    app = app or get_configured_app()
 
     names = health.registered_health_names()
     partial = not _registered()
@@ -111,7 +122,7 @@ def system_model(app: Starlette | None = None) -> SystemModel:
     # What is on disk joins what registered: a part with no health check
     # (deploy, the Flet frontend) is there all the same.
     components = [*dict.fromkeys([*names["components"], *on_disk(Kind.COMPONENT)])]
-    services = list(names["services"]) or on_disk(Kind.SERVICE)
+    services = [*dict.fromkeys([*names["services"], *on_disk(Kind.SERVICE)])]
     found = parts(components, services, index)
     ids = {n.id for n in found}
 
@@ -126,7 +137,7 @@ def system_model(app: Starlette | None = None) -> SystemModel:
     containers = _containers()
     boxes = [c.name for c in containers]
     taking = {c.queue: c.name for c in containers if c.queue}
-    jobs, own_jobs = _jobs(placed), _scheduler_jobs(placed)
+    jobs, own_jobs = _jobs(placed)
     queues, tasks = _worker(placed, ids)
     changes = _changes(placed)
     tables, links = _tables(by_module)
@@ -207,28 +218,24 @@ def _schedule(trigger: dict[str, Any]) -> str:
     return " ".join(f"{k}={v}" for k, v in trigger.items())
 
 
-def _jobs(placed: Placed) -> list[JobNode]:
-    from app.core.schedule import service_jobs
-
-    return [
-        JobNode(name=job.id, schedule=_schedule(job.trigger), **placed(job.func))
-        for job in service_jobs()
-    ]
-
-
-def _scheduler_jobs(placed: Placed) -> list[JobNode]:
-    """The scheduler's own (its heartbeat), beside the services'."""
+def _jobs(placed: Placed) -> tuple[list[JobNode], list[JobNode]]:
+    """The services' scheduled jobs and the scheduler's own (its heartbeat):
+    none without a scheduler, which alone runs them."""
     try:
         from app.components.scheduler import heartbeat
     except ImportError:  # no scheduler in this stack
-        return []
+        return [], []
+    from app.core.schedule import service_jobs
+
+    beat = JobNode(
+        name=heartbeat.HEARTBEAT_JOB_ID,
+        schedule=_schedule(heartbeat.HEARTBEAT_TRIGGER),
+        **placed(heartbeat.touch_scheduler_heartbeat),
+    )
     return [
-        JobNode(
-            name=heartbeat.HEARTBEAT_JOB_ID,
-            schedule=_schedule(heartbeat.HEARTBEAT_TRIGGER),
-            **placed(heartbeat.touch_scheduler_heartbeat),
-        )
-    ]
+        JobNode(name=job.id, schedule=_schedule(job.trigger), **placed(job.func))
+        for job in service_jobs()
+    ], [beat]
 
 
 def _worker(placed: Placed, ids: set[str]) -> tuple[list[QueueNode], list[TaskNode]]:

@@ -17,16 +17,16 @@
 </div>
 <div class="mt-1 micro-label text-aegis-muted">{{ caller() }}</div>
 {% endmacro %}
-{% set meta = component.metadata or {} %}
 {# A run's colour as its arc and its legend dot: looked up, never built,
    so Tailwind keeps every class (input.css). #}
 {% set ARC = {"green": "clock__arc--green", "yellow": "clock__arc--yellow", "red": "clock__arc--red", "blue": "clock__arc--blue"} %}
 {% set LIT = {"green": "clock__litdot--green", "yellow": "clock__litdot--yellow", "red": "clock__litdot--red", "blue": "clock__litdot--blue"} %}
+{% set meta = component.metadata or {} %}
 {# "running_persistent" -> "running": the store is already on the hub. #}
 {% set state = (meta.get("scheduler_state") or "unknown").split("_")[0] %}
 <div class="space-y-6">
   <div id="scheduler-clock-view" x-data="schedulerClock()" @click.outside="neutral()" @keydown.escape="neutral()"
-       class="flex flex-col lg:flex-row items-center justify-center gap-10 lg:gap-14 pt-10 pb-4">
+       class="flex flex-col 2xl:flex-row items-center justify-center gap-10 2xl:gap-14 pt-10 pb-4">
     <div id="scheduler-clock" class="clock" :class="{ 'clock--dragging': dragging }" x-ref="dial" @click="clickDial($event)"
          @pointermove="drag($event)" @pointerup="release()" @pointercancel="release()">
       <div class="clock__band{{ ' clock__band--live' if clock.band.continuous }}" aria-hidden="true"></div>

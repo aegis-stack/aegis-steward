@@ -8,10 +8,10 @@ from datetime import date
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import list_changes
 from app.services.documents.domains.reading.benefits import benefits
 from app.services.documents.domains.reading.proposals import propose_reading
 from app.services.finance.domains.planning import plan as plans
-from app.services.finance.domains.writes.queue import list_changes
 from tests._session import opens
 from tests.services._document_factories import pages, seed_paper
 
@@ -64,7 +64,7 @@ class TestItReachesTheQueue:
     async def _declared(self, db: AsyncSession) -> list:
         return [
             c
-            for c in await list_changes(db, status="pending")
+            for c in await list_changes(db, status="pending", owner_user_id=None)
             if c.change_type == "recurring.declare"
         ]
 
@@ -139,7 +139,7 @@ class TestItReachesTheQueue:
     async def test_approving_the_card_marks_the_income(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains.writes.queue import approve
+        from app.services.change_queue import approve
 
         document = await seed_paper(
             async_db_session, "Monthly pension benefit beginning 03/01/2031: $1,800.00"
@@ -147,7 +147,7 @@ class TestItReachesTheQueue:
         await propose_reading(opens(async_db_session), document.id)
         (card,) = await self._declared(async_db_session)
 
-        await approve(async_db_session, card.id)
+        await approve(async_db_session, card.id, owner_user_id=None)
 
         ran = await plans.run_plan(
             async_db_session, owner_user_id=None, today=date(2026, 11, 8), runs=1

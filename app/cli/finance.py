@@ -14,6 +14,7 @@ from app.cli import theme
 from app.cli.finance_options import OWNER_OPT
 from app.cli.finance_snaptrade import snaptrade_app
 from app.i18n import lazy_t, t
+from app.services.finance.utils import current_date
 
 app = typer.Typer(help="Finance service commands.")
 accounts_app = typer.Typer(help="Manage manual finance accounts.")
@@ -140,9 +141,7 @@ async def _recompute_snapshots(days: int) -> None:
     from sqlmodel import select
 
     from app.core.db import get_async_session
-    from app.services.finance.domains.ledger import networth
-    from app.services.finance.models import FinanceAccount
-    from app.services.finance.utils import current_date
+    from app.services.finance.service import FinanceAccount, recompute_snapshots
 
     start = current_date() - timedelta(days=max(days, 1) - 1)
     async with get_async_session() as session:
@@ -155,7 +154,7 @@ async def _recompute_snapshots(days: int) -> None:
         ).all()
         total = 0
         for owner_user_id in owners:
-            total += await networth.recompute_snapshots(
+            total += await recompute_snapshots(
                 session, owner_user_id=owner_user_id, start_date=start
             )
         await session.commit()
@@ -506,10 +505,8 @@ async def _import_investments(
     from rich.table import Table
 
     from app.core.db import get_async_session
-    from app.services.finance.domains.investments.loader import (
+    from app.services.finance.service import (
         import_investment_activities,
-    )
-    from app.services.finance.domains.investments.optum import (
         parse_optum_settled_transactions,
     )
 

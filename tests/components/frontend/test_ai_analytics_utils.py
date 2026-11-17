@@ -122,7 +122,7 @@ class TestAgentRowCells:
                 "name": "Support",
                 "model_id": "gpt-4o",
                 "tools": ["a", "b"],
-                "memory_modules": ["m"],
+                "context_modules": ["m"],
             }
         )
 

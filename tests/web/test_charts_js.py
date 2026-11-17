@@ -225,7 +225,7 @@ LEGEND = """
 const c = require(CHARTS_JS);
 const data = { datasets: [{ label: 'Spent', data: [3, 2] }, { label: 'Limit', guide: true }] };
 console.log(JSON.stringify({
-  slice: c.legendShows({ text: 'Groceries', index: 0 }, data),
+  slice: c.legendShows({ text: 'Voice', index: 0 }, data),
   line: c.legendShows({ text: 'Spent', datasetIndex: 0 }, data),
   guide: c.legendShows({ text: 'Limit', datasetIndex: 1 }, data),
   phone: c.legendPosition('doughnut', 360),
@@ -236,11 +236,11 @@ console.log(JSON.stringify({
 
 
 def test_a_doughnut_legend_names_its_slices() -> None:
-    """#544: a doughnut's legend items carry ``index``, not
-    ``datasetIndex``, and reading a guide flag off ``datasets[undefined]``
-    threw - Spending by category stayed blank, and every chart mounted
-    after it. A guide line is still left out. Beside the chart a legend
-    squeezes a phone's doughnut to nothing, so there it goes below."""
+    """A doughnut's legend items carry ``index``, not ``datasetIndex``:
+    reading a guide flag off ``datasets[undefined]`` threw, and the chart
+    (a pie card) stayed blank. A guide line is still left out. Beside the
+    chart a legend squeezes a phone's doughnut to nothing, so there it goes
+    below."""
     assert run(LEGEND, CHARTS_JS=CHARTS_JS) == {
         "slice": True,
         "line": True,
@@ -263,7 +263,82 @@ console.log(JSON.stringify({
 
 def test_a_bar_measures_from_zero() -> None:
     """A bar's height is its value: two workers at 190 and 199 MB drew one
-    bar as nothing beside the other when the axis started at 190. A time
-    chart measures from zero too; a line by labels keeps the range its
-    values span."""
+    bar as nothing beside the other when the axis started at 190
+    (2026-10-24). A time chart measures from zero too; a line by labels
+    keeps the range its values span."""
     assert run(ZERO, CHARTS_JS=CHARTS_JS) == {"bar": True, "time": True, "line": False}
+
+
+HIDDEN = """
+const c = require(CHARTS_JS);
+const store = {};
+global.localStorage = { getItem: (k) => store[k] ?? null, setItem: (k, v) => { store[k] = v; } };
+const series = [{ label: 'Server' }, { label: 'Host in use', dashed: true }];
+const sets = () => series.map((s) => ({ label: s.label }));
+const off = (list) => list.map((set) => Boolean(set.hidden));
+const fresh = off(c.withHidden('chart-cpu-data', sets(), series));
+c.remember('chart-cpu-data', 'Host in use', false);
+c.remember('chart-cpu-data', 'Server', true);
+const kept = off(c.withHidden('chart-cpu-data', sets(), series));
+const other = off(c.withHidden('chart-memory-data', sets(), series));
+global.localStorage = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
+c.remember('chart-cpu-data', 'Server', false);
+const blocked = off(c.withHidden('chart-cpu-data', sets(), series));
+console.log(JSON.stringify({ fresh, kept, other, blocked }));
+"""
+
+
+def test_a_legend_toggle_survives_a_redraw() -> None:
+    """Picking a range redraws every chart: the lines a reader turned off
+    or on in a legend stay so, per chart. The host's in use (``dashed``)
+    starts off, and storage that refuses leaves the defaults."""
+    assert run(HIDDEN, CHARTS_JS=CHARTS_JS) == {
+        "fresh": [False, True],
+        "kept": [True, False],
+        "other": [False, True],
+        "blocked": [False, True],
+    }
+
+
+ORIENTED = """
+const c = require(CHARTS_JS);
+const axes = { x: 'labels', y: 'values' };
+console.log(JSON.stringify({ flat: c.oriented({ horizontal: true }, axes),
+  upright: c.oriented({}, axes) }));
+"""
+
+
+def test_a_horizontal_chart_lays_its_values_along_the_bottom() -> None:
+    """``"horizontal": true`` (a service's load cost): a bar a row, its
+    label on the left, the values' axis (and its format) along the bottom."""
+    assert run(ORIENTED, CHARTS_JS=CHARTS_JS) == {
+        "flat": {"x": "values", "y": "labels"},
+        "upright": {"x": "labels", "y": "values"},
+    }
+
+
+GATHERED = """
+const c = require(CHARTS_JS);
+// What the chart gathered over its stream, and the last tick its script holds.
+const chart = { data: { datasets: [
+  { label: 'a', data: [{ x: 1000, y: 1 }, { x: 2000, y: 2 }, { x: 3000, y: 3 }] },
+  { label: '', guide: true, data: [{ x: 1000, y: 9 }, { x: 3000, y: 9 }] }] } };
+const tick = { x: 'time', labels: [3000], series: [{ label: 'a', values: [3] }],
+  window: [500, 3500], points: 1 };
+const renamed = { ...tick, series: [{ label: 'b', values: [3] }] };
+console.log(JSON.stringify({ redrawn: c.gathered(tick, chart), fresh: c.gathered(tick, undefined),
+  renamed: c.gathered(renamed, chart).labels }));
+"""
+
+
+def test_a_live_chart_drawn_again_keeps_what_it_gathered() -> None:
+    """A redraw (the theme changed) read the data script, which after the
+    first tick holds only that tick's points: the window emptied to its
+    last minute. It draws what the chart holds; a chart sent whole (its
+    lines renamed) or none drawn yet reads the script."""
+    found = run(GATHERED, CHARTS_JS=CHARTS_JS)
+    assert found["redrawn"]["labels"] == [1000, 2000, 3000]
+    assert found["redrawn"]["series"] == [{"label": "a", "values": [1, 2, 3]}]
+    assert found["redrawn"]["window"] == [500, 3500]
+    assert found["fresh"]["labels"] == [3000]
+    assert found["renamed"] == [3000]

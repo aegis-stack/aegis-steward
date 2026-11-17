@@ -12,7 +12,6 @@ from pydantic import (
 )
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.db import OpenSession
 from app.core.log import logger
 from app.services.finance.domains.detection.analyst.activity import (
     _SEVERITY_ORDER,
@@ -177,15 +176,10 @@ async def build_deep_dive_context(
 
 
 async def run_deep_dive(
-    open_session: OpenSession, *, owner_user_id: int | None, today: date | None = None
+    db: AsyncSession, *, owner_user_id: int | None, today: date | None = None
 ) -> FinanceInsight | None:
-    """Write an on-request full review. Opens and commits its own sessions.
-
-    Takes a way to GET a database rather than an open one, because the run
-    waits on a model in the middle and must not be inside a transaction
-    while it does - see ``OpenSession``. Three phases: read everything the
-    model needs, ask it while holding nothing, then write. The database is
-    held for the first and the last, and the lock with it.
+    """Write an on-request full review. Its reads are committed before the
+    model runs (``release_lock``); the review it writes, the caller commits.
 
     Unlike the nightly note this is NOT deduped per day - it is something a
     reader asks for, and asking twice after changing a budget should produce
@@ -200,42 +194,32 @@ async def run_deep_dive(
     from pydantic_ai.settings import ModelSettings
 
     from app.core.config import settings
+    from app.core.db import release_lock
     from app.services.ai.service import (
-        AIServiceConfig,
+        active_model,
+        chat_action,
         extract_usage,
         model_for,
         record_usage,
         resolve_agent,
     )
 
-    # ---- read what the model needs, then let the database go ----------
-    async with open_session() as db:
-        agent_config = await resolve_agent(DEEP_DIVE_AGENT_SLUG, session=db)
-        if agent_config.slug != DEEP_DIVE_AGENT_SLUG:
-            logger.warning(
-                "Deep dive skipped: agent is not registered or is inactive",
-                agent_slug=DEEP_DIVE_AGENT_SLUG,
-            )
-            return None
-
-        context = await build_deep_dive_context(
-            db, owner_user_id=owner_user_id, today=today
+    agent_config = await resolve_agent(DEEP_DIVE_AGENT_SLUG, session=db)
+    if agent_config.slug != DEEP_DIVE_AGENT_SLUG:
+        logger.warning(
+            "Deep dive skipped: agent is not registered or is inactive",
+            agent_slug=DEEP_DIVE_AGENT_SLUG,
         )
-        if context is None:
-            return None
-    # The database is not needed again until the review is written, and
-    # what follows waits on a model. Let go of it here.
+        return None
 
-    # The selection in force (the worker read it as this job started); an
-    # agent's own model_id still wins below.
-    service_config = AIServiceConfig.from_settings(settings)
-    update: dict[str, object] = {
-        "temperature": agent_config.temperature,
-        "max_tokens": agent_config.max_tokens,
-    }
-    if agent_config.model_id:
-        update["model"] = agent_config.model_id
-    service_config = service_config.model_copy(update=update)
+    context = await build_deep_dive_context(
+        db, owner_user_id=owner_user_id, today=today
+    )
+    if context is None:
+        return None
+    await release_lock(db)
+
+    service_config = await active_model.config_for_active(settings, agent_config)
 
     try:
         model, model_name = await model_for(service_config, settings)
@@ -251,7 +235,7 @@ async def run_deep_dive(
         result = await agent.run(context)
         dive = result.output
         await record_usage(
-            action=f"chat:{DEEP_DIVE_SURFACE}",
+            action=chat_action(DEEP_DIVE_SURFACE),
             model_name=model_name,
             usage=extract_usage(result),
             user_id=user_id_for(owner_user_id),
@@ -268,7 +252,6 @@ async def run_deep_dive(
         )
         return None
 
-    # ---- take the database back, just to write ------------------------
     note = FinanceInsight(
         owner_user_id=stored_owner(owner_user_id),
         insight_type=DEEP_DIVE_INSIGHT_TYPE,
@@ -278,10 +261,6 @@ async def run_deep_dive(
         body=render_deep_dive(dive),
         metadata_={"model_name": model_name, "sections": dive.model_dump()},
     )
-    async with open_session() as db:
-        db.add(note)
-        # The session commits on the way out, but flush first so the review
-        # has its id - and so a caller whose factory does not commit (a
-        # test holding one session open) still sees it.
-        await db.flush()
+    db.add(note)
+    await db.flush()
     return note

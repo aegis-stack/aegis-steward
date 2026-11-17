@@ -5,7 +5,6 @@ so the card plays after the request is no longer kept."""
 
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -34,11 +33,6 @@ KEPT = RequestHops(
 )
 
 
-def _runs(monkeypatch: pytest.MonkeyPatch, model: SystemModel) -> None:
-    """``model`` as the running model the card is staged on."""
-    monkeypatch.setattr(path_card, "running", AsyncMock(return_value=model))
-
-
 @pytest.fixture(autouse=True)
 def admin() -> Iterator[None]:
     with acting_as(None, None, admin=True):
@@ -65,9 +59,14 @@ async def test_a_flows_stops_are_joined_on_the_running_model(
     auth, db = "service:auth", "component:database"
     model = model_of([node_of(auth), node_of(db)], [edge_of(auth, db)])
 
-    _runs(monkeypatch, model)
+    async def running() -> SystemModel:
+        return model
+
+    monkeypatch.setattr(path_card, "running", running)
     card = await path_card.prepare(PathAsk(title="Reading", stops=[auth, db]))
     assert card.path.staged and [h.chain for h in card.path.hops] == [(auth, db)]
+    with pytest.raises(ValueError, match="Nothing on the map"):
+        await path_card.prepare(PathAsk(title="x", stops=[db, auth]))
 
 
 async def test_a_nodes_wiring_names_a_node_the_running_model_has(
@@ -77,7 +76,10 @@ async def test_a_nodes_wiring_names_a_node_the_running_model_has(
     the model does not have is refused by name."""
     auth, db = "service:auth", "component:database"
 
-    _runs(monkeypatch, model_of([node_of(auth), node_of(db)], [edge_of(auth, db)]))
+    async def running() -> SystemModel:
+        return model_of([node_of(auth), node_of(db)], [edge_of(auth, db)])
+
+    monkeypatch.setattr(path_card, "running", running)
     card = await path_card.prepare(PathAsk(title="Auth", node=auth))
     assert card == PathCard(title="Auth", node=auth)
     with pytest.raises(ValueError, match="service:auths"):
@@ -96,7 +98,10 @@ async def test_a_wiring_with_nothing_on_the_map_is_refused(
         [edge_of(shared, box, EdgeKind.RUNS_ON)],
     )
 
-    _runs(monkeypatch, model)
+    async def running() -> SystemModel:
+        return model
+
+    monkeypatch.setattr(path_card, "running", running)
     with pytest.raises(ValueError, match="Nothing on the map"):
         await path_card.prepare(PathAsk(title="Load test", node=shared))
 
@@ -147,7 +152,7 @@ async def test_drawn_it_is_stored_staged_and_says_why_when_it_cannot_be(
         return KEPT
 
     monkeypatch.setattr(path_card.staged_paths, "route", route)
-    with memory_user("0", conversation_id="conv-1"), card_stage():
+    with memory_user("0", conversation_id="conv-1", admin=True), card_stage():
         drawn = result_data(
             await draw_card("path", {"title": "Me", "route": "GET /me"})
         )

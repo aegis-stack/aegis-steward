@@ -10,11 +10,11 @@ from pydantic import ValidationError
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import registered_change_types
 from app.services.finance.domains.detection.analyst.prompt_matters import (
     MATTER_CHANGES,
 )
 import app.services.finance.domains.writes.executors  # noqa: F401 - registers them
-from app.services.finance.domains.writes.registry import registered_change_types
 from app.services.matters.matters import MatterService
 from app.services.matters.opening import (
     AmendMatterPayload,

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         document_id_of,
     )
     from app.services.documents.domains.extraction.dispatch import (  # noqa: F401
+        extract_and_wait,
         read_quietly,
         start_extraction,
     )
@@ -45,8 +46,16 @@ if TYPE_CHECKING:
         run_extraction,
         run_extraction_job,
     )
-    from app.services.documents.domains.extraction.pages import how_read  # noqa: F401
-    from app.services.documents.domains.extraction.vision import look  # noqa: F401
+    from app.services.documents.domains.extraction.pages import (  # noqa: F401
+        DocumentContentMissingError,
+        DocumentNotFoundError,
+        extract_document,
+        how_read,
+    )
+    from app.services.documents.domains.extraction.vision import (  # noqa: F401
+        look,
+        vision_reader,
+    )
     from app.services.documents.domains.reading import (  # noqa: F401
         check_card,
         checks,
@@ -63,12 +72,12 @@ if TYPE_CHECKING:
     from app.services.documents.queries import (  # noqa: F401
         documents_by_ids,
         first_pages,
+        page_for,
         pages_for,
+        tag_counts,
         tagged_with,
         tags_for_many,
     )
-
-__getattr__ = facade.lazy(__name__, __file__)[0]
 
 
 # The columns a client may change after the fact. Storage, hash, size and
@@ -439,3 +448,6 @@ class DocumentService:
         self.db.add(document)
         await self.db.flush()
         return True
+
+
+__getattr__ = facade.lazy(__name__, __file__)[0]

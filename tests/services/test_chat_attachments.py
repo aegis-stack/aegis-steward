@@ -8,12 +8,17 @@ but they should know a screenshot was there).
 
 import base64
 
+from pydantic import ValidationError
 import pytest
 
+from app.components.backend.api.ai.chat import ChatTurn
 from app.services.ai.domains.chat.attachments import (
+    MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENTS,
     ChatAttachment,
     annotate_attachments,
     build_user_content,
+    composer,
 )
 
 _PNG = base64.b64encode(b"\x89PNG fake bytes").decode()
@@ -45,6 +50,47 @@ class TestBuildUserContent:
         with pytest.raises(ValueError, match="attachment"):
             build_user_content("ctx", [bad])
 
+    def test_a_document_is_read_not_shown_to_the_model(self) -> None:
+        """A PDF reaches the turn as its text (``prepare_turn``), never as
+        bytes a model may not take."""
+        pdf = ChatAttachment.model_construct(
+            media_type="application/pdf", data_b64=_PNG, name="a.pdf"
+        )
+
+        assert build_user_content("ctx", [pdf]) == "ctx"
+        assert len(build_user_content("ctx", [pdf, _shot()])) == 2
+
+
+class TestWhatATurnMayCarry:
+    """The composer's limits are the server's, sent to it, and the request
+    holds them whoever sends it."""
+
+    def test_the_composer_is_told_the_limits_the_request_holds(self) -> None:
+        told = composer()
+
+        assert told["max_files"] == MAX_ATTACHMENTS
+        assert told["max_bytes"] == MAX_ATTACHMENT_BYTES
+        assert set(told["images"]) <= set(told["types"])
+
+    def test_a_file_it_does_not_take_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="takes"):
+            ChatAttachment(media_type="text/html", data_b64=_PNG)
+
+    def test_a_file_past_the_size_is_refused(self) -> None:
+        big = base64.b64encode(b"x" * (MAX_ATTACHMENT_BYTES + 3)).decode()
+
+        with pytest.raises(ValidationError):
+            ChatAttachment(media_type="image/png", data_b64=big)
+        # At the limit itself it rides.
+        exact = base64.b64encode(b"x" * MAX_ATTACHMENT_BYTES).decode()
+        assert ChatAttachment(media_type="image/png", data_b64=exact)
+
+    def test_more_files_than_one_turn_takes_are_refused(self) -> None:
+        shots = [_shot()] * MAX_ATTACHMENTS
+        assert ChatTurn(message="hi", attachments=shots)
+        with pytest.raises(ValidationError):
+            ChatTurn(message="hi", attachments=[*shots, _shot()])
+
 
 class TestAnnotateAttachments:
     def test_marker_names_what_was_attached(self) -> None:
@@ -60,22 +106,3 @@ class TestAnnotateAttachments:
     def test_no_attachments_leaves_the_message_alone(self) -> None:
         assert annotate_attachments("hi", []) == "hi"
         assert annotate_attachments("hi", None) == "hi"
-
-
-class TestSizeCap:
-    """The browser's byte cap is advice; the model is the server's cap."""
-
-    def test_an_attachment_at_the_byte_cap_is_accepted(self) -> None:
-        from app.core.chat_transcript import MAX_IMAGE_BYTES
-
-        data = base64.b64encode(b"x" * MAX_IMAGE_BYTES).decode()
-        assert ChatAttachment(media_type="image/png", data_b64=data).data_b64
-
-    def test_an_attachment_past_the_byte_cap_is_refused(self) -> None:
-        from pydantic import ValidationError
-
-        from app.core.chat_transcript import MAX_IMAGE_BYTES
-
-        data = base64.b64encode(b"x" * (MAX_IMAGE_BYTES + 3)).decode()
-        with pytest.raises(ValidationError):
-            ChatAttachment(media_type="image/png", data_b64=data)

@@ -19,6 +19,7 @@ class AIProvider(str, Enum):
     MISTRAL = "mistral"
     COHERE = "cohere"
     OLLAMA = "ollama"  # Local LLM inference via Ollama
+    LLAMACPP = "llamacpp"  # Local LLM inference via llama.cpp's llama-server
     PUBLIC = "public"  # LLM7.io: keyless anonymous tier; key unlocks premium
     POLLINATIONS = "pollinations"  # Pollinations: keyless anonymous tier
     OPENROUTER = "openrouter"  # Aggregator; speaks the OpenAI API
@@ -121,6 +122,13 @@ PROVIDER_CAPABILITIES = {
         supports_vision=False,
         free_tier_available=True,  # Local models, no API key required
     ),
+    AIProvider.LLAMACPP: ProviderCapabilities(
+        provider=AIProvider.LLAMACPP,
+        supports_streaming=True,
+        supports_function_calling=False,
+        supports_vision=False,
+        free_tier_available=True,  # Local models, no API key required
+    ),
     AIProvider.PUBLIC: ProviderCapabilities(
         provider=AIProvider.PUBLIC,
         supports_streaming=False,
@@ -174,6 +182,8 @@ class ProviderSpec:
     # installed. Most ride the OpenAI SDK, because most speak its API.
     dependency: str = "pydantic-ai-slim[openai]"
     module: str = "openai"
+    # LangChain's own client for it, where that brings no ``module``.
+    langchain_module: str = ""
     # Where a person goes to get a key; None for the keyless endpoints
     # and for a local server.
     key_url: str | None = None
@@ -225,6 +235,7 @@ PROVIDERS: dict[AIProvider, ProviderSpec] = {
         capabilities=PROVIDER_CAPABILITIES[AIProvider.MISTRAL],
         model=_OPENAI_CHAT,
         base_url="https://api.mistral.ai/v1",
+        langchain_module="langchain_mistralai",
         key_url="https://console.mistral.ai/api-keys/",
     ),
     AIProvider.COHERE: ProviderSpec(
@@ -232,6 +243,7 @@ PROVIDERS: dict[AIProvider, ProviderSpec] = {
         capabilities=PROVIDER_CAPABILITIES[AIProvider.COHERE],
         model=_OPENAI_CHAT,
         base_url="https://api.cohere.ai/v1",
+        langchain_module="langchain_cohere",
         key_url="https://dashboard.cohere.com/api-keys",
     ),
     AIProvider.OLLAMA: ProviderSpec(
@@ -240,6 +252,12 @@ PROVIDERS: dict[AIProvider, ProviderSpec] = {
         model=_OPENAI_CHAT,
         # Its address is a setting, not a constant, so the model is built
         # rather than described.
+        builds_own_client=True,
+    ),
+    AIProvider.LLAMACPP: ProviderSpec(
+        env_var="LLAMACPP_API_KEY",
+        capabilities=PROVIDER_CAPABILITIES[AIProvider.LLAMACPP],
+        model=_OPENAI_CHAT,
         builds_own_client=True,
     ),
     AIProvider.PUBLIC: ProviderSpec(

@@ -14,24 +14,25 @@ class StatusMixin(AIServiceBase):
         return await self.conversation_manager.get_conversation(conversation_id)
 
     async def list_conversations(
-        self, user_id: str = "default", surface: str | None = None
+        self,
+        user_id: str = "default",
+        surface: str | None = None,
+        subject: str | None = None,
     ) -> list[Conversation]:
-        """List conversations for a user, optionally scoped to one surface."""
+        """List conversations for a user, optionally scoped to one surface
+        and, within it, one subject."""
         return await self.conversation_manager.list_conversations(
-            user_id, surface=surface
+            user_id, surface=surface, subject=subject
         )
 
     async def get_service_status(self) -> dict[str, Any]:
-        """Get current service status and metrics."""
-        stats = await self.conversation_manager.get_stats()
-        total_conversations = stats["total_conversations"]
-
+        """How the service is set up (the conversations it holds are the
+        caller's read: ``conversation_stats``)."""
         return {
             "enabled": self.config.enabled,
             "provider": self.config.provider,
             "model": self.config.model,
             "agent_initialized": True,  # Agents created per request, always available
-            "total_conversations": total_conversations,
             "configuration_valid": not await self.config.validate_configuration(
                 self.settings
             ),

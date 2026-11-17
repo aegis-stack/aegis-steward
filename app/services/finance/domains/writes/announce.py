@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from app.core.log import logger
+from app.services.change_queue import on_landed
 
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
@@ -52,7 +53,7 @@ def said(row: Any) -> str:
     line reading "party 5" where the card said a name is a line nobody
     can check against their memory of saying yes.
     """
-    from app.services.finance.domains.writes.registry import executor_for
+    from app.services.change_queue import executor_for
 
     try:
         title = executor_for(row.change_type).title
@@ -128,24 +129,10 @@ async def on_the_worker(db: AsyncSession, conversation_id: str, message: str) ->
     )
 
 
+@on_landed
 async def announce(db: AsyncSession, rows: list[Any]) -> None:
-    """After the commit: each approved change's own follow-up
-    (``ChangeExecutor.after_commit``), then the announcement to whoever
-    asked. Never raises: an approval that landed must not read as failed
-    because something after it did."""
+    """After the commit (``change_queue.on_landed``): tell whoever asked
+    what landed."""
     from functools import partial
 
-    from app.services.finance.domains.writes.registry import executor_for
-
-    for row in rows:
-        then = executor_for(row.change_type).after_commit
-        if then is None or row.status != "approved":
-            continue
-        try:
-            await then(row.result or {})
-        except Exception:
-            logger.exception(f"After-commit step for change {row.id} failed")
-    try:
-        await announce_approval(rows, send=partial(on_the_worker, db))
-    except Exception:
-        logger.exception("Could not announce an approval")
+    await announce_approval(rows, send=partial(on_the_worker, db))

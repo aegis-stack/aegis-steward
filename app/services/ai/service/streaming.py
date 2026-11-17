@@ -1,6 +1,8 @@
 """The chat turn: ``stream_chat()`` yields ``StreamingMessage`` chunks as
 the model produces them, with usage captured after the stream drains;
-``chat()`` runs the same turn to its end and returns the reply (#455).
+``chat()`` runs the same turn to its end and returns the reply. One turn
+however it is asked for, so an announcement or an API call keeps the
+steps it took and their cost as the chat page does.
 """
 
 from collections.abc import AsyncIterator
@@ -20,27 +22,19 @@ from pydantic_ai.messages import (
 from pydantic_ai.run import AgentRunResultEvent
 
 from app.core.log import logger
-from app.services.ai.domains.chat.agent_loader import (
-    DEFAULT_AGENT_SLUG,
-    resolve_agent,
-)
 from app.services.ai.domains.chat.attachments import (
     ChatAttachment,
+    LiftedTurn,
     build_user_content,
-    prepare_turn,
 )
 from app.services.ai.domains.chat.cards import attach_cards, card_stage
-from app.services.ai.domains.chat.module_context import render_memory_modules
 from app.services.ai.domains.chat.readings import (
     merge_staged_readings,
     reading_stage,
-    user_readings,
 )
-from app.services.ai.domains.chat.user_memory import (
-    build_user_memory_context,
-    memory_user,
-)
+from app.services.ai.domains.chat.user_memory import memory_user
 from app.services.ai.domains.llm.providers import ProviderNotInstalledError
+from app.services.ai.domains.spend.recording import chat_action
 from app.services.ai.models import (
     ConversationMessage,
     MessageRole,
@@ -51,81 +45,50 @@ from app.services.ai.service.base import (
     AIServiceError,
     ProviderError,
 )
-from app.services.ai.service.chat import ChatMixin
-from app.services.ai.service.prompt import history_char_budget
+from app.services.ai.service.chat import ChatMixin, reply_metadata
 from app.services.ai.service.trace import (
-    call_args_preview,
     nested_tool_calls,
     record_tool_call,
     record_tool_result,
+    tool_notice,
 )
-
-# The agent a conversation is held with, in its metadata.
-AGENT_KEY = "agent_slug"
 
 
 class StreamingMixin(ChatMixin):
-    """Streaming variant of the chat turn."""
-
-    @staticmethod
-    def _tool_notice(
-        tool_name: str,
-        *,
-        message_id: str,
-        conversation_id: str | None,
-        stream_delta: bool,
-        args: str = "",
-    ) -> StreamingMessage:
-        """A content-free chunk naming a tool call, for the UI trail."""
-        return StreamingMessage(
-            content="",
-            is_final=False,
-            is_delta=stream_delta,
-            message_id=message_id,
-            conversation_id=conversation_id,
-            metadata={"event": "tool", "tool": tool_name, "args": args},
-        )
+    """The chat turn, streamed or run to its end."""
 
     async def chat(
         self,
         message: str,
         conversation_id: str | None = None,
         user_id: str = "default",
+        owner_user_id: int | None = None,
+        admin: bool | None = None,
         agent_slug: str | None = None,
         surface: str | None = None,
         attachments: list[ChatAttachment] | None = None,
+        subject: str | None = None,
+        instructions: str | None = None,
+        hand_over: bool = True,
+        lifted: LiftedTurn | None = None,
     ) -> ConversationMessage:
-        """
-        Send a chat message and get AI response.
-
-        Args:
-            message: The user's message
-            conversation_id: Optional conversation ID (creates new if None)
-            user_id: User identifier for conversation ownership
-            agent_slug: Agent row to speak as (None = the default agent)
-            surface: Originating chat surface, recorded on new
-                conversations so each embedded chat lists only its own
-                history
-            attachments: Image parts riding this turn (screenshots,
-                receipts); the model sees them alongside the message
-
-        Returns:
-            ConversationMessage: The AI's response message
-
-        Raises:
-            AIServiceError: If service is disabled or not configured
-            ProviderError: If AI provider fails
-            ConversationError: If conversation management fails
-        """
-        # One path (#455): the streamed turn, run to its end.
+        """``stream_chat`` run to its end: the reply, with the steps it
+        took, its model and its cost, as the streamed turn keeps them;
+        ``AIServiceError`` if the turn ends with no reply."""
         final: StreamingMessage | None = None
         async for frame in self.stream_chat(
-            message=message,
+            message,
             conversation_id=conversation_id,
             user_id=user_id,
+            owner_user_id=owner_user_id,
+            admin=admin,
             agent_slug=agent_slug,
             surface=surface,
             attachments=attachments,
+            subject=subject,
+            instructions=instructions,
+            hand_over=hand_over,
+            lifted=lifted,
         ):
             if frame.is_final:
                 final = frame
@@ -144,23 +107,34 @@ class StreamingMixin(ChatMixin):
         message: str,
         conversation_id: str | None = None,
         user_id: str = "default",
+        owner_user_id: int | None = None,
+        admin: bool | None = None,
         stream_delta: bool = False,
         agent_slug: str | None = None,
         surface: str | None = None,
         attachments: list[ChatAttachment] | None = None,
+        subject: str | None = None,
+        instructions: str | None = None,
+        hand_over: bool = True,
+        lifted: LiftedTurn | None = None,
     ) -> AsyncIterator[StreamingMessage]:
-        """
-        Stream a chat message with real-time response generation.
+        """Stream a chat message with real-time response generation.
 
         Args:
             message: The user's message
             conversation_id: Optional conversation ID (creates new if None)
             user_id: User identifier for conversation ownership
+            owner_user_id: The turn's owner (``current_owner_user_id``)
             stream_delta: Whether to stream delta changes or full content
             agent_slug: Agent row to speak as (None = the default agent)
             surface: Originating chat surface, recorded on new
                 conversations so each embedded chat lists only its own
                 history
+            instructions: This turn's manners (a meeting's), over its prompt
+            hand_over: Whether naming ``agent_slug`` hands the conversation
+                to it (``held_agent``); a live call's look does not
+            lifted: The turn its way in lifted before it (``lift_turn``),
+                in a session of its own: none is held across the answer
 
         Yields:
             StreamingMessage: Real-time message chunks
@@ -174,105 +148,48 @@ class StreamingMixin(ChatMixin):
             raise AIServiceError("AI service is disabled")
 
         try:
-            # Get fresh config for metadata (reflects current .env after use-provider)
             current = self.config
-
-            # Setup conversation and add user message. The stored text
-            # carries the attachment marker; the bytes ride only this
-            # turn's model call (history replays as text).
-            # Kept, not just carried: the bytes ride this turn's model
-            # call and the message remembers where the image was stored,
-            # so reopening the conversation still shows it.
-            stored_text, stored_metadata = await prepare_turn(
-                message, attachments, user_id
-            )
-            conversation = await self._setup_conversation(
-                stored_text,
-                conversation_id,
-                user_id,
-                config=current,
+            setup = await self._assemble_turn(
+                message,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_slug=agent_slug,
                 surface=surface,
-                metadata=stored_metadata,
+                attachments=attachments,
+                subject=subject,
+                owner_user_id=owner_user_id,
+                admin=admin,
+                instructions=instructions,
+                hand_over=hand_over,
+                lifted=lifted,
             )
+            conversation = setup.conversation
+            agent_config = setup.agent_config  # usage is attributed to the agent
 
-            # A conversation is held with one agent, and a turn that
-            # names none is hers: "I approved: ..." came back to the
-            # thread as the bare default agent, no tools, and the filing
-            # she had promised once the card was approved ended as "I
-            # can't do that from here". Recorded every turn, so any
-            # follow-up (an approval, a job's nudge) resumes as her.
-            agent_slug = agent_slug or conversation.metadata.get(AGENT_KEY)
-            held = agent_slug or DEFAULT_AGENT_SLUG
-            agent_config = await resolve_agent(held)
-            conversation.metadata[AGENT_KEY] = held
-
-            # Create streaming conversation wrapper
             streaming_conv = StreamingConversation(conversation=conversation)
             streaming_conv.reset_stream()
+            agent, conversation_context = setup.agent, setup.conversation_context
 
-            # No live health or usage here: the system prompt leads every
-            # request, and a number that moves each turn (CPU, a request
-            # count) makes a local engine re-read the whole prompt, tools
-            # and history, every message. The ``health`` tool reads them.
-            # The model catalog belongs to the default ops assistant;
-            # custom agents would pay its tokens without using it.
-            is_default_agent = (
-                agent_config is None or agent_config.slug == DEFAULT_AGENT_SLUG
-            )
-            catalog_context = (
-                await self._build_catalog_context() if is_default_agent else None
-            )
-
-            # Guarded per-user memory block (saved via the save_memory tool)
-            memory_context = await build_user_memory_context(user_id)
-
-            # Recorded readings, from the same per-user store.
-            readings = await user_readings(user_id)
-
-            # History budget scales with the EFFECTIVE model for this
-            # request (the agent's pin wins over the active default).
-            from app.services.ai.domains.llm.catalog import context_window_for
-
-            effective_model = (
-                agent_config.model_id
-                if agent_config is not None and agent_config.model_id
-                else current.model
-            )
-            context_window = await context_window_for(effective_model)
-            history_budget = history_char_budget(context_window)
-
-            # The agent row's memory modules (e.g. the finance snapshot)
-            agent_modules_context = await render_memory_modules(
-                agent_config.memory_modules, user_id=user_id
-            )
-
-            # Prepare agent and conversation context
-            agent, conversation_context = await self._prepare_agent_and_context(
-                conversation,
-                catalog_context=catalog_context,
-                agent_config=agent_config,
-                memory_context=memory_context,
-                agent_modules_context=agent_modules_context,
-                history_budget=history_budget,
-                context_window=context_window,
-                readings=readings,
-            )
-
-            # Start streaming
             start_time = datetime.now(UTC)
 
-            # Generate a message ID for the streaming response
             message_id = str(uuid.uuid4())
+
+            # Turn state the bookkeeping after the stream reads, whichever
+            # framework produced the stream. Pydantic AI fills all of it
+            # from its event stream; LangChain streams text deltas (no tool
+            # events) and token counts only where its provider reports them.
+
+            stream_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+
+            tool_trace: list[dict[str, Any]] = []
+            # Why the model stopped; "length" is max_tokens cutting it off.
+            finish_reason: str | None = None
 
             # Event-based streaming: unlike ``run_stream`` (which treats the
             # first text output as THE answer and stops), the event stream
             # crosses tool boundaries, so a model that narrates before
             # calling a tool - "let me pull that together" then run_code -
             # streams its preamble, runs the tool, and keeps talking.
-
-            stream_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
-
-            tool_trace: list[dict[str, Any]] = []
             # The turn's user rides a ContextVar for the whole stream:
             # a memory write lands mid-stream, inside a tool call, and
             # has no other way to know whose fact it is.
@@ -280,8 +197,13 @@ class StreamingMixin(ChatMixin):
             with (
                 memory_user(
                     user_id,
-                    agent_slug=agent_slug,
+                    owner_user_id=owner_user_id,
+                    # The agent the turn resolved to: a follow-up naming none
+                    # still acts as the one the conversation is held with.
+                    agent_slug=setup.agent_config.slug,
                     conversation_id=conversation.id,
+                    subject=subject,
+                    admin=admin,
                 ),
                 reading_stage() as staged_readings,
                 card_stage() as drawn_cards,
@@ -307,9 +229,9 @@ class StreamingMixin(ChatMixin):
                             # and notify the UI which tool is running.
                             streaming_conv.accumulated_content = ""
                             record_tool_call(tool_trace, event)
-                            yield self._tool_notice(
+                            yield tool_notice(
                                 event.part.tool_name,
-                                args=call_args_preview(event.part.args),
+                                args=event.part.args,
                                 message_id=message_id,
                                 conversation_id=conversation.id,
                                 stream_delta=stream_delta,
@@ -319,11 +241,11 @@ class StreamingMixin(ChatMixin):
                             # A completing run_code call carries its sandbox-
                             # dispatched calls as metadata; surface each one so
                             # the UI trail shows what the script actually did.
-                            record_tool_result(tool_trace, event)
+                            finished = record_tool_result(tool_trace, event)
                             # Cards a script drew ride that script's entry.
-                            attach_cards(tool_trace, drawn_cards)
+                            attach_cards(finished, drawn_cards)
                             for name, args in nested_tool_calls(event):
-                                yield self._tool_notice(
+                                yield tool_notice(
                                     name,
                                     args=args,
                                     message_id=message_id,
@@ -332,6 +254,11 @@ class StreamingMixin(ChatMixin):
                                 )
                             continue
                         elif isinstance(event, AgentRunResultEvent):
+                            finish_reason = getattr(
+                                getattr(event.result, "response", None),
+                                "finish_reason",
+                                None,
+                            )
                             # The shared extractor: cache-read and
                             # cache-write tokens ride along for pricing.
                             stream_usage = self._extract_usage(event.result)
@@ -367,62 +294,50 @@ class StreamingMixin(ChatMixin):
                 MessageRole.ASSISTANT, final_content, message_id=message_id
             )
 
-            input_tokens = stream_usage.get("input_tokens", 0)
-            output_tokens = stream_usage.get("output_tokens", 0)
-            # The model that answered: an agent's pin, else the global. It
-            # is what the turn is priced at and what the message reports.
-            answered_by = (
-                agent_config.model_id
-                if agent_config is not None and agent_config.model_id
-                else current.model
-            )
-            # One price lookup: the ledger row's cost is the message's.
-            cost = await self._record_usage(
-                f"chat:{agent_config.slug}",
-                stream_usage,
-                user_id,
-                conversation_id=conversation.id,
-                model=answered_by,
-            )
-
-            # Calculate TPS (tokens per second) for performance metrics
-            # This is especially useful for Ollama but works for all providers
-            gen_tps: float | None = None
-            if output_tokens > 0 and response_time_ms > 0:
-                gen_tps = round(output_tokens * 1000 / response_time_ms, 1)
-
-            # One metadata dict: what the final frame reports is what the
-            # message keeps, so a conversation reopened from history shows
-            # the same model, cost and trace the live turn did.
-            final_metadata: dict[str, Any] = {
-                "conversation_id": conversation.id,
-                "provider": current.provider,
-                "model": answered_by,
-                "response_time_ms": response_time_ms,
-                "stream_complete": True,
-                # Token usage and cost for CLI status line
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cost": cost,
-                # TPS for performance monitoring (especially useful for Ollama)
-                "gen_tps": gen_tps,
-            }
+            # Store conversation metadata
+            ai_message.metadata["conversation_id"] = conversation.id
             if tool_trace:
                 # Persisted with the message, so a conversation reopened
                 # from history can still expand what each run did.
-                final_metadata["tool_trace"] = tool_trace
-            ai_message.metadata.update(final_metadata)
+                ai_message.metadata["tool_trace"] = tool_trace
 
+            # The model that answered: an agent's pin, else the global. It
+            # is what the turn is priced at and what the message reports.
+            answered_by = agent_config.model_id or current.model
+            # One price lookup: the ledger row's cost is the message's.
+            cost = await self._record_usage(
+                chat_action(agent_config.slug),
+                stream_usage,
+                user_id,
+                duration_ms=response_time_ms,
+                conversation_id=conversation.id,
+                model=answered_by,
+            )
             # Extractions recorded mid-run outlive the image AND the
             # thread: they belong to the user, so a new conversation
             # opens still holding them.
             await merge_staged_readings(
                 user_id, staged_readings, legacy=conversation.metadata.get("readings")
             )
+            final_metadata = await reply_metadata(
+                conversation.id,
+                provider=current.provider,
+                model=answered_by,
+                response_time_ms=response_time_ms,
+                tool_trace=tool_trace,
+                finish_reason=finish_reason,
+                usage=stream_usage,
+                cost=cost,
+                agent_config=agent_config,
+            )
+            # What the final frame reports is what the message keeps, so a
+            # conversation reopened from history shows the same model and
+            # cost the live turn did.
+            ai_message.metadata.update(final_metadata)
+
             # Finalize conversation (update metadata and save)
             await self._finalize_conversation(conversation, response_time_ms)
 
-            # Yield final streaming message
             yield StreamingMessage(
                 content=final_content,
                 is_final=True,

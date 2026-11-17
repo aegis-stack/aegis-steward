@@ -5,6 +5,7 @@ Provides common fixtures and configuration for all tests.
 """
 
 from collections.abc import AsyncGenerator, Callable, Generator
+from datetime import datetime
 import os
 from pathlib import Path
 import shutil
@@ -45,84 +46,6 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.ai.models.agents import (  # noqa: F401
-    Agent,
-    AgentTool,
-    AgentUserMemory,
-    MemoryModule,
-    Tool,
-)
-from app.services.ai.models.llm import (  # noqa: F401
-    LargeLanguageModel,
-    LLMActiveSelection,
-    LLMDeployment,
-    LLMModality,
-    LLMOrg,
-    LLMPrice,
-    LLMUsage,
-)
-
-# Import finance models to register them with SQLModel metadata
-from app.services.finance.models import (  # noqa: F401
-    FinanceAccount,
-    FinanceAttachment,
-    FinanceBalanceSnapshot,
-    FinanceBudget,
-    FinanceBudgetCategory,
-    FinanceCategory,
-    FinanceCategoryAlias,
-    FinanceConnection,
-    FinanceCurrency,
-    FinanceFxRate,
-    FinanceHolding,
-    FinanceImportBatch,
-    FinanceImportBatchRow,
-    FinanceImportProfile,
-    FinanceInsight,
-    FinanceInstitution,
-    FinanceLiabilityDetail,
-    FinanceMerchant,
-    FinanceNetWorthSnapshot,
-    FinanceRecurringStream,
-    FinanceRule,
-    FinanceSecurity,
-    FinanceSecurityPrice,
-    FinanceSpendingBaseline,
-    FinanceTag,
-    FinanceTrade,
-    FinanceTransaction,
-    FinanceTransactionChangelog,
-    FinanceTransactionSplit,
-    FinanceTransactionTag,
-    FinanceTransfer,
-    FinanceValuation,
-    FinanceWebhookEvent,
-)
-
-# Import matter models to register them with SQLModel metadata
-from app.services.insurance.models import InsuranceClaim, InsurancePolicy  # noqa: F401
-from app.services.mail.models import (  # noqa: F401
-    MailAttachment,
-    MailBatch,
-    MailMessage,
-)
-from app.services.matters.models import (  # noqa: F401
-    DocumentParty,
-    Fact,
-    Matter,
-    MatterParticipant,
-    Party,
-    Request,
-    RequestItem,
-    SignIn,
-)
-
-# Import scheduler models to register them with SQLModel metadata
-from app.services.scheduler.models import JobExecution  # noqa: F401
-
-# Import AI models to register them with SQLModel metadata. The agents and
-# llm subpackages each import every model module they own, so these two
-# names pull in the whole set.
 from tests._sqlite import IMPATIENT_BUSY_TIMEOUT_MS, shape_like_production
 
 # Add project root to Python path for imports
@@ -132,8 +55,8 @@ from app.core.model_registry import import_all_models
 from app.integrations.main import create_integrated_app
 
 # Every table the app defines, registered before any test database is
-# built: the imports above name only some, so a table reached lazily
-# (the live engines) was missing from a file run on its own.
+# built: a table reached lazily (the live engines) was missing from a file
+# run on its own.
 import_all_models()
 
 # queryspy's baseline knows a repeated statement by its shape, so a new
@@ -194,6 +117,30 @@ async def _fresh_login_limit() -> None:
     await get_cache().invalidate_prefix(LOGIN_BUCKET)
 
 
+# Every test runs on one fixed calendar day for finance. The service reads
+# "today" through ``utils.current_date`` (its 30- and 90-day windows, the
+# month it budgets, what counts as overdue), and tests seed dates either
+# fixed or relative to that same clock. On the real clock, fixed seeds
+# drift out of those windows as the calendar moves and a green suite goes
+# red on a date nobody chose. ``@pytest.mark.real_clock`` opts a test out.
+FINANCE_TODAY = datetime(2026, 9, 29, 12, 0)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "real_clock: the test reads the real clock, not the finance calendar"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _finance_calendar(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if request.node.get_closest_marker("real_clock"):
+        return
+    monkeypatch.setattr("app.services.finance.utils.utcnow", lambda: FINANCE_TODAY)
+
+
 # Swap the module-level ``cache`` singleton to the in-memory dict
 # backend for the whole test session. The Redis-backed singleton
 # binds its async connection pool to the event loop alive when it
@@ -244,6 +191,32 @@ def clean_registry() -> Generator[None]:
         unregister_tool(name)
 
 
+@pytest.fixture
+def card_tools() -> Generator[None]:
+    """The approval-card tools a stored trace names, stood in where this
+    stack lacks them (no change queue, no memory), so a renderer's test
+    reads the same on every stack. The registry is loaded first, so a
+    stack's own tools stay, and only the stand-ins are taken out after."""
+    from app.core.tools import (
+        card_tool_names,
+        get_tool,
+        register_tool,
+        unregister_tool,
+    )
+
+    async def stand_in() -> None:
+        """A card tool this stack does not have."""
+
+    card_tool_names()
+    names = ("propose", "propose_many", "pending", "save_memory")
+    added = [name for name in names if get_tool(name) is None]
+    for name in added:
+        register_tool(name, stand_in, effect="proposes", cards=True)
+    yield
+    for name in added:
+        unregister_tool(name)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_system_status_cache():
     """No test sees another test's cached system-status walk."""
@@ -272,6 +245,16 @@ def _no_background_sampling(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(series, "run", idle)
     monkeypatch.setattr(series, "get_cache", lambda: cache)
     monkeypatch.setattr(series, "get_store", lambda: history)
+
+
+@pytest.fixture(autouse=True)
+def _no_speech_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No speech server (SPEECH_BASE_URL, which inference[kokoro_fastapi]
+    or ``.env`` sets): one reached from a test would be the dev stack's. A
+    test that needs one sets its own address."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SPEECH_BASE_URL", None)
 
 
 @pytest.fixture(autouse=True)
@@ -376,10 +359,49 @@ async def _forget_memoized_prices() -> None:
     await invalidate_price_cache()
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
+def _nothing_wrong_right_now(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn's status line reads the app's live health (``node_now``); a
+    test reads none unless it fakes some, so no turn waits on a walk."""
+    from datetime import UTC, datetime
+
+    from app.services.ai.service import turn
+    from app.services.system.node_now import RightNow
+
+    async def nothing_wrong() -> RightNow:
+        return RightNow(attention=(), read_at=datetime.now(UTC))
+
+    monkeypatch.setattr(turn, "right_now", nothing_wrong)
+
+
+@pytest.fixture(scope="session")
 def app() -> FastAPI:
-    """Create a configured FastAPI app instance for testing."""
+    """The configured FastAPI app, built once for the whole session.
+
+    ``create_integrated_app()`` wires every router, middleware and startup
+    hook; per test that is the single most expensive thing a suite does.
+    Nothing is read from mutable settings at build time, and ``TestClient``
+    still runs the lifespan per context manager, so one instance is safe
+    to share.
+
+    Sharing it does mean ``app.dependency_overrides`` outlives a test;
+    ``_clear_dependency_overrides`` below is what keeps that from leaking.
+    """
     return create_integrated_app()
+
+
+@pytest.fixture(autouse=True)
+def _clear_dependency_overrides(app: FastAPI) -> Generator[None]:
+    """Hand every test a clean override table.
+
+    With a session-scoped app, an override a test forgets to pop (or one
+    left behind by a failing test) is inherited by everything that runs
+    after it, which shows up as order-dependent failures far from the
+    cause. Clearing on both sides makes that impossible.
+    """
+    app.dependency_overrides.clear()
+    yield
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -387,6 +409,18 @@ def client(app: FastAPI) -> Generator[TestClient]:
     """Create a test client for the FastAPI app."""
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def files(tmp_path: Path) -> Generator[Any]:
+    """The object store (``app.core.storage``), on disk in the test's own
+    directory and put back after it."""
+    from app.core.storage import FilesystemStorage, set_storage
+
+    store = FilesystemStorage(tmp_path)
+    set_storage(store)
+    yield store
+    set_storage(None)
 
 
 @pytest.fixture
@@ -551,6 +585,9 @@ async def impatient_engine():
     shape_like_production(engine, busy_timeout_ms=IMPATIENT_BUSY_TIMEOUT_MS)
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+    async with AsyncSession(engine, expire_on_commit=False) as seed:
+        seed.add_all(_known_owner_rows())
+        await seed.commit()
     yield engine
     await engine.dispose()
     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -594,51 +631,47 @@ def _no_production_database(app_owned_engine, monkeypatch):
             app_owned_engine, class_=AsyncSession, expire_on_commit=False
         ),
     )
-    # The SYNC factory too: the conversation store (``db_session()``) and
-    # the usage recorder write through it, and with only the async one
-    # redirected every chat test that persisted a turn wrote into the
-    # database in ``DATABASE_URL`` (hundreds of "hello" conversations in a
-    # developer's live file). Same temp file, so both views agree.
-    sync_engine = _sync_twin(app_owned_engine)
-    monkeypatch.setattr(
-        db_module,
-        "SessionLocal",
-        sessionmaker(bind=sync_engine, class_=Session),
-    )
-    # And the ENGINE, because DDL does not go through either factory.
-    # ``init_database()`` is ``create_all(engine)``, and the conversation
-    # store calls it on construction, so building one during the suite
-    # created every missing model table in the developer's live file. Not
-    # a data-loss bug - create_all only ever ADDS tables - but the table
-    # it adds is frozen at the models' shape in that moment and nothing
-    # corrects it later (2026-09-10: ``finance_merchant_alias`` landed in
-    # a real ledger without the column added minutes afterwards).
-    monkeypatch.setattr(db_module, "engine", sync_engine)
-
-
-def _sync_twin(async_engine: Any) -> Engine:
-    """A sync engine on the app-owned test database file, with the same
-    schema attachments and pragmas its async engine has."""
-    path = async_engine.url.database
-    engine = create_engine(
-        f"sqlite:///{path}", connect_args={"check_same_thread": False}
-    )
+    # The sync factory too: ``db_session()`` is what startup hooks and the
+    # scheduler still open for themselves (the chat store is async). A sync
+    # engine on the SAME file, with the same schema attachments, so both
+    # factories see one database - the one ``app_owned_engine`` already
+    # ran ``create_all`` on.
+    # Left uncovered, a Postgres project fails "no such table" on the first
+    # sync lookup: its startup migrations begin with CREATE SCHEMA, which
+    # SQLite rejects, so nothing else ever creates tables for that path.
+    owned_db = Path(app_owned_engine.url.database)
     schema_names = {
         table.schema for table in SQLModel.metadata.tables.values() if table.schema
     }
+    sync_engine = create_engine(
+        f"sqlite:///{owned_db}", echo=False, connect_args={"check_same_thread": False}
+    )
 
-    @event.listens_for(engine, "connect")
-    def attach_schemas(dbapi_connection: Any, connection_record: Any) -> None:
+    @event.listens_for(sync_engine, "connect")
+    def attach_schemas_sync(dbapi_connection: Any, connection_record: Any) -> None:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         for schema_name in schema_names:
             cursor.execute(
-                f"ATTACH DATABASE '{Path(path).parent / (schema_name + '.sqlite')}' "
+                f"ATTACH DATABASE '{owned_db.parent / (schema_name + '.sqlite')}' "
                 f"AS {schema_name}"
             )
         cursor.close()
 
-    return engine
+    monkeypatch.setattr(
+        db_module,
+        "SessionLocal",
+        sessionmaker(bind=sync_engine, class_=Session, expire_on_commit=False),
+    )
+    # And the ENGINE, because DDL does not go through either factory.
+    # ``init_database()`` is ``create_all(engine)``: run during the suite,
+    # it created every missing model table in the developer's live file.
+    # Not a data-loss bug - create_all only ever ADDS tables - but the
+    # table it adds is frozen at the models' shape in that moment and
+    # nothing corrects it later (2026-09-10).
+    monkeypatch.setattr(db_module, "engine", sync_engine)
+    yield
+    sync_engine.dispose()
 
 
 @pytest.fixture(scope="session")
@@ -707,6 +740,7 @@ async def csv_profiles(async_db_session: AsyncSession) -> None:
     exists, and ``get_or_create`` is idempotent for a caller that already
     seeded one.
     """
+    from app.services.finance.models import FinanceImportProfile
     from app.services.finance.seeds.seed import CSV_IMPORT_PROFILES, DEFAULT_CURRENCIES
     from app.services.finance.service import FinanceService
 
@@ -744,7 +778,14 @@ async def live_engine_rows(async_db_session: AsyncSession) -> AsyncGenerator[Non
     yield
     from sqlmodel import delete
 
-    from app.services.ai.models.llm import LLMOrgRole
+    from app.services.ai.models.llm import (
+        LargeLanguageModel,
+        LLMDeployment,
+        LLMModality,
+        LLMOrg,
+        LLMOrgRole,
+        LLMPrice,
+    )
     from app.services.ai.models.voice.live_engine import LiveEngine
 
     async with get_async_session() as session:
@@ -805,6 +846,27 @@ def job_session(
 
 
 @pytest.fixture
+async def key_holder(async_db_session: AsyncSession) -> AsyncGenerator[Any]:
+    """A table naming stored objects the two ways rows do (``app.core.storage``):
+    a ``*_key`` column (a document's file) and inside JSON (a chat
+    attachment), beside a ``*_key`` that names something else."""
+    from sqlalchemy import JSON, Column, Integer, String, Table
+    from sqlmodel import AutoString
+
+    table = Table(
+        "key_holder",
+        SQLModel.metadata,
+        Column("id", Integer, primary_key=True),
+        Column("file_key", AutoString),
+        Column("payee_key", String),
+        Column("meta_data", JSON),
+    )
+    await async_db_session.run_sync(lambda s: table.create(s.connection()))
+    yield table
+    SQLModel.metadata.remove(table)
+
+
+@pytest.fixture
 async def async_client_with_db(
     app: FastAPI, async_db_session: AsyncSession
 ) -> AsyncGenerator[TestClient]:
@@ -851,7 +913,7 @@ async def user_factory(async_db_session: AsyncSession):
     import uuid
 
     from app.models.user import UserCreate
-    from app.services.auth.service import UserService
+    from app.services.auth.domains.users.accounts import UserService
 
     user_service = UserService(async_db_session)
     counter = {"n": 0}
@@ -913,7 +975,7 @@ async def auth_user(async_db_session: AsyncSession):
     """Create a generic authenticated user. Basic auth has no role
     concept, so this is just "a logged-in user" — no admin claim."""
     from app.models.user import UserCreate
-    from app.services.auth.service import UserService
+    from app.services.auth.domains.users.accounts import UserService
 
     user_service = UserService(async_db_session)
     return await user_service.create_user(

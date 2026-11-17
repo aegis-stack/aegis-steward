@@ -10,11 +10,8 @@ The one exception is the server's front door: in prod Traefik takes 80 and
 443 on every interface, and nothing else does.
 """
 
-from pathlib import Path
+from tests._compose import load_compose
 
-import yaml
-
-ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ("docker-compose.yml", "docker-compose.dev.yml", "docker-compose.prod.yml")
 PUBLIC = {("docker-compose.prod.yml", "traefik"): {"80:80", "443:443"}}
 
@@ -22,7 +19,7 @@ PUBLIC = {("docker-compose.prod.yml", "traefik"): {"80:80", "443:443"}}
 def test_every_published_port_binds_loopback() -> None:
     published = []
     for name in COMPOSE:
-        compose = yaml.safe_load((ROOT / name).read_text()) or {}
+        compose = load_compose(name)
         for service, spec in (compose.get("services") or {}).items():
             for port in (spec or {}).get("ports") or []:
                 published.append((name, service, str(port)))

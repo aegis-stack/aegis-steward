@@ -12,7 +12,8 @@ controls where ``operator_refusal`` says why not.
 
 from dataclasses import dataclass
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request, status
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_async_session
@@ -72,6 +73,21 @@ async def get_admin_actor(admin: User = Depends(require_admin)) -> Actor:
     return actor_of(admin)
 
 
+async def get_admin_reader(user: User = Depends(get_current_active_user)) -> None:
+    """An operator's read across every owner: whoever Overseer's own gate
+    lets in (``is_admin``, as ``overseer_gate``), so both Overseers agree."""
+    if not is_admin(user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Admins only")
+
+
+# Whether an owner of ``None`` is the household's: true here, where every row
+# kept before sign-in carries no owner and ``get_owner_user_id`` scopes whoever
+# signs in to them. A tool call bound to ``None`` then acts for the household;
+# where it is false, ``None`` is a call nobody signed in to, which the queue's
+# tools refuse rather than reach every user's rows.
+UNOWNED_IS_HOUSEHOLD = True
+
+
 async def get_owner_user_id(
     _owner: User = Depends(get_current_active_user),
 ) -> int | None:
@@ -91,6 +107,16 @@ async def get_owner_user_id(
 get_optional_owner_user_id = get_owner_user_id
 
 
+async def owner_is_admin(session: AsyncSession, owner_user_id: int | None) -> bool:
+    """Whether what is done for ``owner_user_id`` is done for an admin: the
+    user by ``is_admin``. Where sign-in is off, everyone is one; nobody
+    signed in is not."""
+    if not settings.AUTH_ENABLED or owner_user_id is None:
+        return not settings.AUTH_ENABLED
+    user = await session.get(User, owner_user_id)
+    return user is not None and is_admin(user)
+
+
 async def caller_is_admin() -> bool:
     """Whether the tool call being run acts for an admin: what its runner
     bound (``current_admin``: MCP's token, the CLI's shell, an admin-only
@@ -103,5 +129,4 @@ async def caller_is_admin() -> bool:
     if not settings.AUTH_ENABLED or owner is None:
         return not settings.AUTH_ENABLED
     async with get_async_session() as session:
-        user = await session.get(User, owner)
-    return user is not None and is_admin(user)
+        return await owner_is_admin(session, owner)

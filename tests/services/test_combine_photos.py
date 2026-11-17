@@ -96,7 +96,7 @@ class TestTheCard:
 
         rows = await combine_describe(async_db_session, payload, None)
 
-        said = [(r.label, r.value, r.scan) for r in rows]
+        said = [(r.label, r.value, bool(r.scan)) for r in rows]
         assert said[:3] == [
             ("Document", "Citizens Bank 1099-INT, 2025", False),
             ("Page 1", "IMG_6611.jpeg", True),
@@ -157,17 +157,17 @@ class TestApproving:
         self, async_db_session: AsyncSession
     ) -> None:
         from app.core.storage import get_storage
-        from app.services.ai.domains.chat.pastes import store_image
         from app.services.documents.queries import tags_for_many
         from app.services.matters.matters import MatterService
         from app.services.matters.models import matter_tag
+        from tests._pastes import keep_photo
 
         db = async_db_session
         matter = await MatterService(db).open(title="2025 Tax Return")
         ids = []
         for name, color in (("IMG_7001.jpeg", "white"), ("IMG_7002.jpeg", "gray")):
             key = await get_storage().put(_jpeg(color), content_type="image/jpeg")
-            ids.append((await store_image("0", key, "image/jpeg", name, db))["id"])
+            ids.append((await keep_photo(db, "0", key, "image/jpeg", name)).id)
 
         result = await combine_execute(
             db,

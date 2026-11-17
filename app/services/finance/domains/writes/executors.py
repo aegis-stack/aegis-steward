@@ -8,7 +8,7 @@ debt costs); importing this module arms the whole surface.
 
 from __future__ import annotations
 
-from app.services.ai.service import memory_changes as memory
+from app.services.change_queue import register
 from app.services.documents.service import check_card, checks, reading, receipts
 from app.services.finance.domains.writes import (
     accounts,
@@ -24,13 +24,13 @@ from app.services.finance.domains.writes import (
     structure,
     terms,
 )
-from app.services.finance.domains.writes.registry import ChangeExecutor, register
+from app.services.finance.domains.writes.registry import finance_type
 from app.services.insurance import changes as insurance
 from app.services.matters import changes as matters
 from app.services.matters import contacts, opening, timeline
 
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="transaction.categorize",
         title="Categorize a transaction",
         payload_model=curation.CategorizePayload,
@@ -39,7 +39,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="transaction.memo",
         title="Note what a transaction was",
         payload_model=curation.MemoPayload,
@@ -48,7 +48,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="transaction.assign_payee",
         title="Assign a payee",
         payload_model=curation.AssignPayeePayload,
@@ -57,7 +57,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="account.create",
         title="Add an account the ledger cannot see",
         payload_model=accounts.CreateAccountPayload,
@@ -70,7 +70,7 @@ register(
 # cannot be put in somebody's name is an account that stays in the wrong
 # total and cannot answer the agency asking what they hold.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="account.whose",
         title="Whose account this is",
         payload_model=accounts.WhosePayload,
@@ -79,7 +79,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="account.valuation",
         title="Record what an asset was worth",
         payload_model=terms.ValuationPayload,
@@ -88,7 +88,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="document.file",
         title="File a document where it belongs",
         payload_model=filing.FileDocumentPayload,
@@ -100,7 +100,7 @@ register(
 )
 # Photos that are pages of one form, as one document (#439).
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="document.combine",
         title="Photos as one document",
         payload_model=combining.CombinePayload,
@@ -111,7 +111,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="transaction.link",
         title="File a transaction with a case or a contact",
         payload_model=linking.LinkTransactionPayload,
@@ -120,7 +120,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="account.loan_terms",
         title="Record a loan's terms",
         payload_model=terms.LoanTermsPayload,
@@ -129,7 +129,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="recurring.match",
         title="Match a payment to a bill",
         payload_model=structure.MatchPayload,
@@ -138,7 +138,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="recurring.declare",
         title="Declare a bill or an income",
         payload_model=structure.DeclarePayload,
@@ -147,7 +147,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="transaction.tag",
         title="Tag a transaction",
         payload_model=curation.TagSwapPayload,
@@ -156,7 +156,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="transaction.untag",
         title="Remove a tag from a transaction",
         payload_model=curation.TagPayload,
@@ -165,7 +165,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="transaction.split",
         title="Split a transaction",
         payload_model=structure.SplitChangePayload,
@@ -178,7 +178,7 @@ register(
 # types, not tools - which is why it registers here rather than growing
 # a second approval queue nobody would see.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="fact.record",
         title="Record what can be said about someone's money",
         payload_model=matters.RecordFactPayload,
@@ -187,7 +187,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="ask.amend",
         title="Correct an ask",
         payload_model=matters.AmendAskPayload,
@@ -196,7 +196,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="ask.add",
         title="Add an ask the letter makes",
         payload_model=matters.AddAskPayload,
@@ -205,7 +205,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="ask.attach",
         title="Attach the paper that answers an ask",
         payload_model=matters.AttachAskPayload,
@@ -216,7 +216,7 @@ register(
 # Opening the case itself (#284): every other part of a matter had a
 # card, so a visit with no case yet had nowhere to go.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="matter.create",
         title="Open a matter",
         payload_model=opening.OpenMatterPayload,
@@ -228,7 +228,7 @@ register(
 # than reads it - "I called DSS this morning" - and without this the
 # telling goes nowhere and the timeline has a hole where the call was.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="matter.event",
         title="Record what happened",
         payload_model=timeline.RecordEventPayload,
@@ -239,7 +239,7 @@ register(
 # Changing a case already on file (#566): a coming visit belongs in its
 # note, and nothing could put one there after the case was opened.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="matter.amend",
         title="Change a matter",
         payload_model=opening.AmendMatterPayload,
@@ -248,7 +248,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="contact.relate",
         title="Record how two people are related",
         payload_model=contacts.RelateContactsPayload,
@@ -257,7 +257,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="contact.create",
         title="Add a person or an organization",
         payload_model=contacts.CreateContactPayload,
@@ -271,7 +271,7 @@ register(
 # about somebody already on file has nowhere to go, and what happens
 # instead is that it gets announced as saved and written nowhere.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="contact.amend",
         title="Correct a contact already on file",
         payload_model=contacts.AmendContactPayload,
@@ -280,7 +280,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="recurring.amend",
         title="Correct a bill or an income",
         payload_model=structure.AmendPayload,
@@ -292,7 +292,7 @@ register(
 # What an anomaly turned out to be: a card, because the assistant's own
 # list keeps resolving without confirmation behind confirmation (FW-09).
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="insight.resolve",
         title="Say what an anomaly was",
         payload_model=findings.ResolveInsightPayload,
@@ -303,7 +303,7 @@ register(
 
 # Insurance: the plan document proposes the policy, the EOB the claim.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="policy.create",
         title="Record an insurance policy",
         payload_model=insurance.PolicyCreatePayload,
@@ -312,7 +312,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="claim.record",
         title="Record a claim as the insurer settled it",
         payload_model=insurance.ClaimRecordPayload,
@@ -321,7 +321,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="claim.paid",
         title="Match a charge to a claim",
         payload_model=insurance.ClaimPaidPayload,
@@ -330,7 +330,7 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="account.institution",
         title="Say which bank an account is held with",
         payload_model=accounts.InstitutionPayload,
@@ -342,7 +342,7 @@ register(
 # A document's own metadata is read off its pages and approved like any
 # other claim: extraction proposes, nothing extracted becomes truth.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="document.metadata",
         title="What a document says it is",
         payload_model=reading.MetadataPayload,
@@ -353,7 +353,7 @@ register(
 # A check's scans filed on its ledger row, and the payee read off its
 # face (#415): a reading proposes, approval files.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type=checks.CHECK,
         title="A check's scans on its transaction",
         payload_model=check_card.CheckPayload,
@@ -369,7 +369,7 @@ register(
 # A receipt that waited for its charge, matched (#330): approving files
 # it on the charge, as the register's paperclip does.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type=receipts.RECEIPT,
         title="A receipt on its charge",
         payload_model=receipts.ReceiptPayload,
@@ -380,7 +380,7 @@ register(
 # Which paper answers which ask. ST-07 makes the link a human action;
 # this is the door that lets a reading PROPOSE one.
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="document.evidence_link",
         title="What this paper answers",
         payload_model=reading.EvidencePayload,
@@ -389,49 +389,12 @@ register(
     )
 )
 register(
-    ChangeExecutor(
+    finance_type(
         change_type="document.request",
         title="What a letter asks for",
         payload_model=reading.RequestPayload,
         execute=reading.request_execute,
         describe=reading.request_describe,
-    )
-)
-# What the assistant remembers is a write too: see memory_changes.
-register(
-    ChangeExecutor(
-        change_type="memory.save",
-        title="Remember a fact",
-        payload_model=memory.SavePayload,
-        execute=memory.save_execute,
-        describe=memory.save_describe,
-    )
-)
-register(
-    ChangeExecutor(
-        change_type="memory.replace",
-        title="Replace everything remembered",
-        payload_model=memory.ReplacePayload,
-        execute=memory.replace_execute,
-        describe=memory.replace_describe,
-    )
-)
-register(
-    ChangeExecutor(
-        change_type="memory.update",
-        title="Change a remembered fact",
-        payload_model=memory.UpdatePayload,
-        execute=memory.update_execute,
-        describe=memory.update_describe,
-    )
-)
-register(
-    ChangeExecutor(
-        change_type="memory.forget",
-        title="Forget a remembered fact",
-        payload_model=memory.ForgetPayload,
-        execute=memory.forget_execute,
-        describe=memory.forget_describe,
     )
 )
 # The plan's other half (#166): bills and income already had cards;
@@ -488,7 +451,7 @@ for change_type, title, model, execute, describe in (
     ),
 ):
     register(
-        ChangeExecutor(
+        finance_type(
             change_type=change_type,
             title=title,
             payload_model=model,

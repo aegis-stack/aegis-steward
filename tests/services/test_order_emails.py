@@ -15,11 +15,11 @@ from typing import Any
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import approve
 from app.services.documents.domains.reading import orders, receipts
 from app.services.documents.models import DocumentPage
 from app.services.documents.service import DocumentService
 from app.services.finance.constants import transaction_tag
-from app.services.finance.domains.writes.queue import approve
 from tests._session import opens
 from tests.services._finance_factories import (
     pending_cards,
@@ -136,7 +136,7 @@ class TestTheOrderIsRead:
         charge = await _charge(db, -4612, ORDERED + timedelta(days=2), "AMAZON MKTPL")
         assert await receipts.match_waiting(db, owner_user_id=None) == 1
         (match,) = await _cards(db, receipts.RECEIPT)
-        await approve(db, int(match.id or 0))
+        await approve(db, int(match.id or 0), owner_user_id=None)
 
         (split,) = await _cards(db, "transaction.split")
         assert split.payload["transaction_id"] == charge

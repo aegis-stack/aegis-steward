@@ -1,0 +1,125 @@
+"""A change type no shipped service owns, for the change queue's tests:
+registered the way a new service registers its own, with one ``register``
+call. ``executed`` lists what approvals ran."""
+
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+import pytest
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.figures import FIGURES
+from app.services import change_queue
+from app.services.change_queue import (
+    ChangeDisplayRow,
+    ChangeExecutor,
+    PendingChange,
+    registry,
+)
+
+executed: list[str] = []
+# A note whose world moved after it was filed: ``describe`` refuses it with
+# the rest of the text as the reason.
+GONE = "gone: "
+# A note whose execution fails at flush, as a constraint violation does.
+BREAKS_AT_FLUSH = "breaks at flush"
+
+
+class NotePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+
+
+# What a letter's ``kind`` picks from (``ChangeExecutor.choices``).
+KINDS = ("note", "memo")
+
+
+class LetterPayload(BaseModel):
+    """A note with an addressee and a kind: the payload of a type whose card
+    the reader may edit before approving (``ChangeExecutor.editable``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    to: str | None = Field(default=None, max_length=20)
+    kind: str = "note"
+
+
+class Noted(BaseModel):
+    model_config = FIGURES
+
+    noted: str
+
+
+async def _execute(
+    db: AsyncSession, payload: NotePayload, owner_user_id: int | None
+) -> Noted:
+    executed.append(payload.text)
+    if payload.text == BREAKS_AT_FLUSH:
+        # A write the database refuses: the session needs a rollback.
+        db.add(PendingChange(change_type=None, payload={}))  # type: ignore[arg-type]
+        await db.flush()
+    return Noted(noted=payload.text)
+
+
+async def _describe(
+    db: AsyncSession, payloads: list[NotePayload], owner_user_id: int | None
+) -> list[list[ChangeDisplayRow]]:
+    # A note naming a path or an address links to it, as a card row can.
+    for p in payloads:
+        if p.text.startswith(GONE):
+            raise ValueError(p.text.removeprefix(GONE))
+    # "first | rest" is a note with a detail line: two notes sharing their
+    # detail differ only in which note they are, as a batch's rows do.
+    return [
+        [
+            ChangeDisplayRow(
+                label="Note",
+                value=note,
+                url=note if note.startswith(("/", "https://")) else None,
+            ),
+            *([ChangeDisplayRow(label="Detail", value=detail)] if detail else []),
+        ]
+        for note, _, detail in (p.text.partition(" | ") for p in payloads)
+    ]
+
+
+@contextmanager
+def note_type(change_type: str, **options: Any) -> Iterator[None]:
+    """``change_type`` registered as "Write a note" for the block; ``options``
+    are the rest of its ``ChangeExecutor`` (``editable``, ``after_commit``,
+    ``scan``, another ``payload_model`` or ``describe``)."""
+    executed.clear()
+    change_queue.register(
+        ChangeExecutor(
+            **{
+                "change_type": change_type,
+                "title": "Write a note",
+                "description": "A note, for the tests.",
+                "payload_model": NotePayload,
+                "execute": _execute,
+                "describe": _describe,
+            }
+            | options
+        )
+    )
+    try:
+        yield
+    finally:
+        registry._EXECUTORS.pop(change_type, None)
+
+
+def queue_tools_on(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The queue's tools (``change_queue.tools``), writing through
+    ``session`` instead of opening their own."""
+    from app.services.change_queue import tools
+
+    @asynccontextmanager
+    async def test_session() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    monkeypatch.setattr(tools, "get_async_session", test_session)
+    return tools

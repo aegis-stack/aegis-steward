@@ -21,7 +21,7 @@ from app.services.documents.service import (
     DocumentPage,
     DocumentService,
     ProtectedDocumentError,
-    queries,
+    page_for,
     start_extraction,
 )
 
@@ -51,7 +51,7 @@ async def drawer(
 async def _page(
     service: DocumentService, document_id: int, number: int
 ) -> DocumentPage:
-    row = await queries.page_for(service.db, document_id, number)
+    row = await page_for(service.db, document_id, number)
     if row is None:
         raise HTTPException(status_code=404, detail="No such page.")
     return row
@@ -83,7 +83,8 @@ async def page_render(
     service: DocumentService = Depends(get_document_service),
 ) -> Response:
     """The page's stored render, from the object store."""
-    return await page_image(await _page(service, document_id, number))
+    row = await _page(service, document_id, number)
+    return await page_image(row, await service.get(document_id))
 
 
 @router.post("/upload")

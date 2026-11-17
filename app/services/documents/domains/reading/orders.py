@@ -240,13 +240,10 @@ async def propose_split(
     once; nothing when no order was read, no item fell in a category
     the household has, or the charge already has a card. A caller that
     has the household's categories by name hands them over."""
+    from app.services.change_queue import propose
     from app.services.documents.domains.reading.asked import already_asked
     from app.services.documents.service import DocumentService
-    from app.services.finance.service import (
-        FinanceTransaction,
-        list_categories,
-        propose,
-    )
+    from app.services.finance.service import FinanceTransaction, list_categories
 
     document = await DocumentService(db).get(document_id)
     kept = (document.meta_data if document else {}).get(ORDER)

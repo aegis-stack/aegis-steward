@@ -15,12 +15,12 @@ from typing import Any
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import list_changes
 from app.services.documents.domains.reading import filing, propose_reading
 from app.services.documents.models import DocumentPage
 from app.services.documents.service import DocumentService
 from app.services.finance.constants import account_tag
 from app.services.finance.domains.ledger import numbers
-from app.services.finance.domains.writes.queue import list_changes
 from app.services.finance.models import FinanceAccount
 from app.services.finance.service import FinanceService
 from tests._session import opens
@@ -69,7 +69,7 @@ async def _account(db: AsyncSession, name: str, mask: str | None = None) -> int:
 async def _card(db: AsyncSession, document_id: int) -> Any:
     cards = [
         c
-        for c in await list_changes(db, status="pending")
+        for c in await list_changes(db, status="pending", owner_user_id=None)
         if c.change_type == "document.metadata"
         and c.payload["document_id"] == document_id
     ]
@@ -196,7 +196,7 @@ class TestANewFactReadsTheUnfiledPileAgain:
     ) -> None:
         """The fact lands by a card: approving the M1 statement's last four
         files the OTHER statement that prints it, in the same breath."""
-        from app.services.finance.domains.writes.queue import approve, propose
+        from app.services.change_queue import approve, propose
 
         account_id = await _account(async_db_session, "M1 Individual Brokerage Account")
         first = await _paper(async_db_session, "m1_aug.pdf", M1_FRONT)
@@ -207,7 +207,7 @@ class TestANewFactReadsTheUnfiledPileAgain:
         assert (await _card(async_db_session, later)) is None
         card = await _card(async_db_session, first)
 
-        await approve(async_db_session, card.id)
+        await approve(async_db_session, card.id, owner_user_id=None)
 
         account = await async_db_session.get(FinanceAccount, account_id)
         assert account is not None and account.mask == "2774"

@@ -247,6 +247,7 @@ class TestCountingFrom:
         assert changed is False
         assert envelope_metadata(made["envelope"].metadata_).tag_since == start
 
+    @pytest.mark.real_clock  # the envelope dates its start by the real clock
     @pytest.mark.asyncio
     async def test_the_card_moves_the_start_and_says_so(
         self, async_db_session: AsyncSession

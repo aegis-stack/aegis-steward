@@ -9,7 +9,10 @@ package registers the snapshot fetcher (``report``), exactly as
 importing the old module did.
 """
 
-from app.services.ai.service import Agent, MemoryModule
+from app.services.ai.service import (
+    Agent,
+    ContextModule,
+)
 from app.services.finance.constants import (
     ANALYST_NOTE_INSIGHT_TYPE,
 )
@@ -51,10 +54,9 @@ from app.services.finance.domains.detection.analyst.sections import (
     context_label,
 )
 from app.services.finance.domains.detection.analyst.seeds import (
-    FINANCE_TOOL_GRANTS,
     analyst_agent_definition,
+    context_module_definitions,
     load_finance_agent_fixtures,
-    memory_module_definitions,
     snapshot_module_definition,
 )
 from app.services.finance.domains.detection.analyst.shared import (
@@ -77,12 +79,12 @@ __all__ = [
     "ANALYST_RULES",
     "ANALYST_SYSTEM_PROMPT",
     "Agent",
+    "ContextModule",
     "DEEP_DIVE_AGENT_SLUG",
     "DEEP_DIVE_INSIGHT_TYPE",
     "DEEP_DIVE_SYSTEM_PROMPT",
     "DeepDive",
     "MAX_ANOMALY_LINES",
-    "MemoryModule",
     "ReportFacts",
     "SNAPSHOT_MODULE_SLUG",
     "STANDALONE_USER_ID",
@@ -96,9 +98,8 @@ __all__ = [
     "context_label",
     "diff_facts",
     "findings_digest",
-    "FINANCE_TOOL_GRANTS",
     "load_finance_agent_fixtures",
-    "memory_module_definitions",
+    "context_module_definitions",
     "owner_user_id_for",
     "render_deep_dive",
     "render_report",

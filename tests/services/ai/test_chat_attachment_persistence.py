@@ -8,21 +8,13 @@ the image is kept once and the message remembers where.
 
 import pytest
 
-from app.core.storage import FilesystemStorage, content_key, set_storage
+from app.core.storage import content_key
 from app.services.ai.domains.chat.attachments import (
     ChatAttachment,
     attachment_metadata,
     persist_attachments,
     prepare_turn,
 )
-
-
-@pytest.fixture
-def store(tmp_path):
-    storage = FilesystemStorage(tmp_path)
-    set_storage(storage)
-    yield storage
-    set_storage(None)
 
 
 def _png(payload: bytes = b"fake png bytes") -> ChatAttachment:
@@ -38,7 +30,7 @@ def _png(payload: bytes = b"fake png bytes") -> ChatAttachment:
 class TestPersistAttachments:
     @pytest.mark.asyncio
     async def test_the_bytes_are_stored_and_the_descriptor_points_at_them(
-        self, store
+        self, files
     ) -> None:
         stored = await persist_attachments([_png()])
 
@@ -46,10 +38,10 @@ class TestPersistAttachments:
         assert stored[0]["key"] == content_key(b"fake png bytes")
         assert stored[0]["media_type"] == "image/png"
         assert stored[0]["name"] == "receipt.png"
-        assert await store.get(stored[0]["key"]) == b"fake png bytes"
+        assert await files.get(stored[0]["key"]) == b"fake png bytes"
 
     @pytest.mark.asyncio
-    async def test_the_same_image_twice_is_stored_once(self, store) -> None:
+    async def test_the_same_image_twice_is_stored_once(self, files) -> None:
         """Re-attaching a screenshot already in the store costs nothing -
         that is what content addressing buys."""
         first = await persist_attachments([_png()])
@@ -58,13 +50,13 @@ class TestPersistAttachments:
         assert first[0]["key"] == second[0]["key"]
 
     @pytest.mark.asyncio
-    async def test_no_attachments_touches_no_storage(self, store) -> None:
+    async def test_no_attachments_touches_no_storage(self, files) -> None:
         assert await persist_attachments(None) == []
         assert await persist_attachments([]) == []
 
     @pytest.mark.asyncio
     async def test_a_storage_failure_never_costs_the_user_their_message(
-        self, store, monkeypatch
+        self, files, monkeypatch
     ) -> None:
         """The turn is the point; keeping the picture is a bonus. A store
         that is full or unreachable must not swallow the question."""
@@ -72,7 +64,7 @@ class TestPersistAttachments:
         async def boom(*_args, **_kwargs):
             raise OSError("disk full")
 
-        monkeypatch.setattr(store, "put", boom)
+        monkeypatch.setattr(files, "put", boom)
 
         assert await persist_attachments([_png()]) == []
 
@@ -90,7 +82,7 @@ class TestAttachmentMetadata:
 
     @pytest.mark.asyncio
     async def test_a_malformed_payload_is_the_callers_error_not_the_stores(
-        self, store
+        self, files
     ) -> None:
         """Swallowing this would drop the image silently while logging a
         storage failure that never happened."""
@@ -102,7 +94,7 @@ class TestAttachmentMetadata:
 
 class TestPrepareTurn:
     @pytest.mark.asyncio
-    async def test_both_chat_paths_get_the_same_three_steps(self, store) -> None:
+    async def test_both_chat_paths_get_the_same_three_steps(self, files) -> None:
         """Streaming and non-streaming need store, annotate, describe - in
         that order. One call so neither can miss a step."""
         text, metadata = await prepare_turn("what is this?", [_png()])
@@ -112,77 +104,8 @@ class TestPrepareTurn:
         assert metadata["attachments"][0]["key"] == content_key(b"fake png bytes")
 
     @pytest.mark.asyncio
-    async def test_a_photo_is_named_and_says_where_its_reading_is(self, store) -> None:
-        """#285: a photographed statement could not be filed - it had no
-        handle. Its marker now names it, the way a read PDF's does, and
-        points at what it showed rather than at filing it: most pictures
-        are a screen to talk about, not paper to keep."""
-        from app.services.ai.domains.chat.pastes import paste_id
-        from app.services.ai.domains.chat.user_memory import load_user_pastes
-
-        text, _metadata = await prepare_turn(
-            "file this", [_png(b"hvcu statement")], user_id="photo-filer"
-        )
-
-        handle = paste_id(content_key(b"hvcu statement"))
-        assert f"#{handle}" in text and f'pasted("{handle}")' in text
-        entry = next(
-            p for p in await load_user_pastes("photo-filer") if p["id"] == handle
-        )
-        assert (entry["key"], entry["media_type"]) == (
-            content_key(b"hvcu statement"),
-            "image/png",
-        )
-
-    @pytest.mark.asyncio
-    async def test_a_turn_with_no_images_is_unchanged(self, store) -> None:
+    async def test_a_turn_with_no_images_is_unchanged(self, files) -> None:
         text, metadata = await prepare_turn("plain question", None)
 
         assert text == "plain question"
         assert metadata == {}
-
-
-class TestReadingAPhoto:
-    """What a photo showed is read on the worker, not in the turn: the
-    turn that carries it already sees the bytes, and a second vision
-    call inline would make every picture turn wait on two."""
-
-    @staticmethod
-    def _queue(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
-        from app.components.worker import pools
-
-        enqueued: list[tuple[object, ...]] = []
-
-        async def enqueue(name: str, _queue: str, *args: object, **_: object) -> None:
-            enqueued.append((name, *args))
-
-        monkeypatch.setattr(pools, "enqueue_task", enqueue)
-        return enqueued
-
-    @pytest.mark.asyncio
-    async def test_a_kept_photo_is_queued_to_be_read(
-        self, store, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from app.services.ai.domains.chat.pastes import paste_id
-
-        enqueued = self._queue(monkeypatch)
-
-        await prepare_turn("see this", [_png(b"a screen")], user_id="photo-reader")
-
-        handle = paste_id(content_key(b"a screen"))
-        assert enqueued == [("read_photo_task", "photo-reader", handle)]
-
-    @pytest.mark.asyncio
-    async def test_a_photo_already_read_is_not_read_again(
-        self, store, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from app.services.ai.domains.chat import pastes
-
-        enqueued = self._queue(monkeypatch)
-        key = await store.put(b"read before", content_type="image/png")
-        photo = await pastes.store_image("photo-reread", key, "image/png", "r.png")
-        await pastes.keep_reading("photo-reread", photo, "A receipt.")
-
-        await prepare_turn("again", [_png(b"read before")], user_id="photo-reread")
-
-        assert enqueued == []

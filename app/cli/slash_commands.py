@@ -164,6 +164,7 @@ class SlashCommandHandler:
 
         # Check for cloud providers with API keys (requires LLM catalog)
         from app.services.ai.service import (
+            LOCAL_PROVIDERS,
             AIProvider,
             check_provider_dependency_installed,
             get_existing_api_key,
@@ -181,7 +182,7 @@ class SlashCommandHandler:
 
         configured_vendors = []
         for provider in AIProvider:
-            if provider.value in ("public", "ollama"):
+            if provider.value == "public" or provider in LOCAL_PROVIDERS:
                 continue
             if not check_provider_dependency_installed(provider.value):
                 continue

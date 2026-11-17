@@ -1,0 +1,250 @@
+"""Pending-change shapes: the confirmation card's data contract.
+
+The card renders THIS response - which is built from the stored queue
+row, which is what approval executes - so what the user sees and what
+runs are the same thing by construction.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
+from pydantic import AliasChoices, BaseModel, Field
+
+from app.core.figures import FIGURES, absent
+from app.core.tools import Refused
+
+if TYPE_CHECKING:
+    from app.services.change_queue.models import PendingChange
+
+
+class ChangeProposal(BaseModel):
+    """POST body for /changes: one proposed mutation."""
+
+    change_type: str
+    payload: dict[str, Any]
+    proposed_by_agent: str | None = None
+    conversation_id: str | None = None
+
+
+class ChangeDisplayRow(BaseModel):
+    """One label/value line of the card body - resolved from the
+    database at read time, never authored by a model."""
+
+    label: str
+    value: str
+    # Where the value leads, when it names something that has a page (a
+    # campaign, an issue): the card shows the value as a link to it. A row
+    # with none is label and value alone, not a field of nulls.
+    url: str | None = absent()
+    # This row is a picture the card carries (a scanned page, a photo),
+    # drawn from where its change type's ``scan`` says it is stored.
+    scan: bool | None = absent()
+    # What the line is about, beside the sentence rather than only inside
+    # it: a card holding seventy of them can total them and name their span
+    # without parsing money back out of its own prose. Cents, named so a
+    # model reading the card never takes them for dollars (an older frozen
+    # card says ``amount``); ``at`` is ISO, as the frozen card stores it.
+    amount_cents: int | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        validation_alias=AliasChoices("amount_cents", "amount"),
+    )
+    at: str | None = absent()
+    # Where the value came from, drawn on a line of its own under it.
+    note: str | None = absent()
+    # The page of a stored document the value was read off, so the card can
+    # show it beside the claim. Ids, not a URL: a decided card is frozen as
+    # JSON, and a route that moves would rewrite history.
+    document_id: int | None = absent()
+    page: int | None = absent()
+
+
+class ChangeRevision(BaseModel):
+    """POST body for revising a waiting card: the fields to change, by
+    name; a field given blank is cleared, one not given is kept."""
+
+    fields: dict[str, str]
+
+
+class PendingChangeResponse(BaseModel):
+    id: int
+    change_type: str
+    title: str
+    status: str
+    display: list[ChangeDisplayRow]
+    proposed_by_agent: str | None
+    conversation_id: str | None
+    batch_id: str | None
+    error: str | None
+    note: str | None = None
+    # The reader may put their own words on it before approving (``revise``).
+    editable: bool = False
+    # How many of its rows are pictures (``ChangeDisplayRow.scan``).
+    scans: int = 0
+    created_at: datetime
+    resolved_at: datetime | None
+
+    @classmethod
+    def from_row(
+        cls,
+        row: PendingChange,
+        *,
+        title: str,
+        display: list[ChangeDisplayRow],
+        editable: bool = False,
+    ) -> PendingChangeResponse:
+        if row.id is None:
+            raise ValueError("pending change row has no id - flush before responding")
+        return cls(
+            id=row.id,
+            change_type=row.change_type,
+            title=title,
+            status=row.status,
+            display=display,
+            proposed_by_agent=row.proposed_by_agent,
+            conversation_id=row.conversation_id,
+            batch_id=row.batch_id,
+            error=(row.result or {}).get("error"),
+            note=(row.result or {}).get("note"),
+            editable=editable,
+            scans=sum(1 for line in display if line.scan),
+            created_at=row.created_at,
+            resolved_at=row.resolved_at,
+        )
+
+
+class PendingChangeListResponse(BaseModel):
+    items: list[PendingChangeResponse]
+    total: int
+
+
+class PendingChangeCount(BaseModel):
+    count: int
+
+
+class BatchResolveRequest(BaseModel):
+    """POST body for batch approval: the vetoed row ids (rejected, not
+    deferred - a veto is a decision)."""
+
+    exclude_ids: list[int] = []
+
+
+class BatchResolveResponse(BaseModel):
+    """How a batch resolved: rows approved, rejected (vetoes included) and
+    failed (left pending with their error)."""
+
+    model_config = FIGURES
+
+    approved: int
+    rejected: int
+    failed: int
+
+
+# What the queue's tools hand an agent (``tools``).
+
+
+class ChangeTypeContract(BaseModel):
+    """A change type as an agent reads it: its title, when to use it, the
+    table it changes, and its payload's JSON schema."""
+
+    model_config = FIGURES
+
+    title: str
+    description: str
+    object: str | None
+    payload_schema: dict[str, Any]
+
+
+class NotFiled(Refused):
+    """Why the queue would not take a call, with the contracts when it was
+    a proposal."""
+
+    change_types: dict[str, ChangeTypeContract] | None = absent()
+
+
+class Proposed(BaseModel):
+    """A pending change, as its card will show it."""
+
+    model_config = FIGURES
+
+    pending_change_id: int
+    change_type: str
+    title: str
+    status: str
+    display: list[ChangeDisplayRow]
+
+
+class BatchRow(BaseModel):
+    model_config = FIGURES
+
+    id: int
+    pending_change_id: int
+    status: str
+    display: list[ChangeDisplayRow]
+
+
+class ProposedBatch(BaseModel):
+    """A batch of pending changes, one card."""
+
+    model_config = FIGURES
+
+    batch_id: str
+    change_type: str
+    title: str
+    count: int
+    items: list[BatchRow]
+
+
+class FiledCard(BaseModel):
+    """One card an agent filed: a batch, or a single proposal."""
+
+    model_config = FIGURES
+
+    batch_id: str | None  # None for a single proposal
+    pending_change_ids: list[int]
+    rows: int
+    change_type: str
+    title: str
+    status: str  # pending, approved, rejected, withdrawn, or mixed
+    filed_at: datetime
+    decided_at: datetime | None
+    summary: str  # what it does, with one example row
+
+
+class Filed(BaseModel):
+    """An agent's own cards: awaiting the user, and decided lately; and
+    the ones a chat redraws (``draw``), only when asked to."""
+
+    model_config = FIGURES
+
+    pending: list[FiledCard]
+    decided: list[FiledCard]
+    draw: list[FiledCard] = []
+    note: str | None = absent()  # in a chat: what it redrew
+
+
+class Withdrawn(BaseModel):
+    model_config = FIGURES
+
+    pending_change_id: int
+    status: str
+    note: str | None
+
+
+class Revised(BaseModel):
+    """What a revision changed: the cards it put the words on, and why it
+    could not change the others it was asked to."""
+
+    model_config = FIGURES
+
+    revised: list[int]
+    errors: dict[str, str] | None = absent()  # by card id
+
+
+class BatchWithdrawn(BaseModel):
+    model_config = FIGURES
+
+    batch_id: str
+    withdrawn: int  # rows

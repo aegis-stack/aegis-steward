@@ -1,53 +1,40 @@
-"""Why the answer has not started yet, when the provider can say.
+"""Why a turn's answer has not started yet, when its engine can say.
 
-``core.streaming.announce_waiting`` reports that a stream is quiet and
-for how long; it deliberately knows nothing about what is producing it.
-This is the other half for local inference: Ollama evicts a model after
-its ``keep_alive`` expires and reloads it on the next request, which on
-a large model is tens of seconds of total silence before the first
-token. "Waiting 40s" is honest but alarming; "loading - 40s" is the same
-wait with the reason attached, and the reason is the part that tells the
-user it will finish.
-
-What comes back is the STATE, never the model name: the composer's chip
-already shows the model, and which of the two waits this is - a load
-that ends on its own, or a model already working - is the fact that is
-nowhere else on screen.
-
-Ollama has no event API - ``/api/ps`` is the only signal, the same one
-the dashboard's Activity tab polls - so the question this answers is
-narrow on purpose: is the model this turn needs warm right now? A
-provider that cannot say returns None and the wait goes out unexplained.
+The chat stream names a quiet stretch (``core.concurrency.announce_waiting``)
+and asks this once per stretch. A local model may be loading, tens of
+seconds of silence before its first token: "loading - 40s" is the same wait
+as "waiting 40s" with the part that says it will finish. The turn's model
+is the one its prompt was built for (``self_context``); its engine, through
+the inference interface, says whether that model is in memory. A cloud
+model, or a stack without the inference component, has no reason to give.
 """
 
-from __future__ import annotations
+from contextvars import ContextVar
 
-from app.services.ai.models import AIProvider
+from app.core.discovery import present
+from app.services.ai.domains.chat.self_context import TurnContext, current_turn
+from app.services.ai.models.provider_names import LOCAL_PROVIDERS
+
+# ponytail: the engine interface, not just the component: Steward's
+# inference is its own Ollama code until the engine switch (#637).
+INFERENCE = present("app.components.inference.engine")
+THINKING = "thinking"
+# The turn whose model was found in memory: it stays so for the turn, so
+# its engine is not asked again (each quiet stretch asked it, through every
+# tool run and model round). A stream's stretches share one context.
+_thinking: ContextVar[TurnContext | None] = ContextVar("thinking", default=None)
 
 
-async def waiting_reason(provider: AIProvider, model: str) -> str | None:
-    """A short phrase for why nothing has arrived, or None."""
-    if provider is not AIProvider.OLLAMA or not model:
+async def waiting_reason() -> str | None:
+    """A short phrase for why nothing has arrived this turn, or None."""
+    turn = current_turn()
+    if not (INFERENCE and turn and turn.model and turn.provider in LOCAL_PROVIDERS):
         return None
-    try:
-        from app.components.inference.ollama import OllamaClient
-    except ImportError:  # no inference component: nothing to ask
-        return None
-    running = await OllamaClient().fetch_running_models()
-    # ``name`` and ``model`` are the two spellings /api/ps returns, and
-    # they are the same string today; both are read so a tag written one
-    # way in config still matches. There is no ``model_id`` here - that
-    # lives on OllamaModel (/api/tags), and reaching for it raised an
-    # AttributeError that the explainer's own except swallowed, so the
-    # pause went out unexplained and looked like the feature had simply
-    # not shipped.
-    # The STATE, not the model: the composer's chip already names the
-    # model, so repeating it says nothing new, while "is it loading or
-    # is it working" is the part that is not on screen anywhere and the
-    # part that says how long this is likely to last.
-    if any(row.name == model or row.model == model for row in running):
-        # Warm and quiet: it has the prompt and has not emitted yet. A
-        # 30B at 128k context chews a long one for twenty seconds with
-        # nothing to show.
-        return "thinking"
-    return "loading"
+    if _thinking.get() is turn:
+        return THINKING
+    from app.components.inference import get_inference_engine
+
+    reason = await get_inference_engine(turn.provider).waiting_reason(turn.model)
+    if reason == THINKING:
+        _thinking.set(turn)
+    return reason

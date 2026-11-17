@@ -7,6 +7,8 @@ plus the answers given during it.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from fastapi import APIRouter, Depends, Request
 from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.responses import Response
@@ -16,7 +18,8 @@ from app.components.web_frontend.filters import short_date, usd
 from app.components.web_frontend.nav import section, settings_nav
 from app.components.web_frontend.rendering import render
 from app.core.db import get_async_db
-from app.services.ai.service import usage_report
+from app.core.formatting import format_minutes
+from app.services.ai.service import spend_report
 
 router = APIRouter()
 
@@ -51,7 +54,17 @@ async def usage(
     days: int = DEFAULT_DAYS,
     db: AsyncSession = Depends(get_async_db),
 ) -> Response:
-    report = await usage_report(db, days=_ALL_DAYS if days == ranges.ALL else days)
+    # The ledger stores naive UTC; the window reads it the same way.
+    end = datetime.now(UTC).replace(tzinfo=None)
+    start = end - timedelta(days=_ALL_DAYS if days == ranges.ALL else days)
+    models = await spend_report.models_by_kind(db, start, end)
+    calls = await spend_report.live_calls(db, start, end)
+    kinds: dict[str, dict[str, float]] = {}
+    for row in models:
+        kind = kinds.setdefault(row.kind, {"cost": 0.0, "uses": 0, "seconds": 0.0})
+        kind["cost"] += row.cost
+        kind["uses"] += row.uses
+        kind["seconds"] += row.seconds
     return render(
         request,
         "pages/settings/usage.html",
@@ -61,40 +74,42 @@ async def usage(
             "path": USAGE,
             "days": days,
             "ranges": WINDOWS,
-            "total": usd(report["total"]),
+            "total": usd(sum(kind["cost"] for kind in kinds.values())),
             "kinds": [
                 {
-                    "label": kind["label"],
+                    "label": label,
                     "value": usd(kind["cost"]),
                     "caption": (
-                        f"{kind['minutes']:.1f} min · {kind['uses']} uses"
-                        if kind["minutes"]
-                        else f"{kind['uses']} uses"
+                        f"{format_minutes(kind['seconds'])} min · {int(kind['uses'])} uses"
+                        if kind["seconds"]
+                        else f"{int(kind['uses'])} uses"
                     ),
                 }
-                for kind in report["kinds"]
+                for label, kind in kinds.items()
             ],
             "model_columns": MODEL_COLUMNS,
             "models": [
                 {
-                    **m,
-                    "minutes": f"{m['minutes']:.1f}" if m["minutes"] else "",
-                    "tokens": f"{m['tokens']:,}" if m["tokens"] else "",
-                    "cost": usd(m["cost"]),
+                    "kind": m.kind,
+                    "model": m.model_id,
+                    "uses": m.uses,
+                    "minutes": format_minutes(m.seconds) or "",
+                    "tokens": f"{m.tokens:,}" if m.tokens else "",
+                    "cost": usd(m.cost),
                 }
-                for m in report["models"]
+                for m in models
             ],
             "call_columns": CALL_COLUMNS,
             "calls": [
                 {
-                    "when": short_date(call["when"]),
-                    "minutes": f"{call['minutes']:.1f}",
-                    "call_cost": usd(call["call_cost"]),
-                    "answers_cost": usd(call["answers_cost"]),
-                    "total": usd(call["total"]),
-                    "ended": call["ended"],
+                    "when": short_date(call.started),
+                    "minutes": format_minutes(call.seconds) or "",
+                    "call_cost": usd(call.call_cost),
+                    "answers_cost": usd(call.answers_cost),
+                    "total": usd(call.call_cost + call.answers_cost),
+                    "ended": spend_report.ENDED[call.success],
                 }
-                for call in report["calls"]
+                for call in calls
             ],
         },
     )

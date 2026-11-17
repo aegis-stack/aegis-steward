@@ -1,0 +1,495 @@
+"""A live call from the chat surface, on any mount: one path for every
+engine.
+
+The page opens a WebSocket here; the server opens the engine's realtime
+session (the key never leaves it) and carries the audio both ways: the
+microphone arrives as binary frames (PCM16 at the model's input rate) and
+the voice goes back the same way (at its output rate), while a few JSON
+events tell the page what the call is doing. ``realtime_calls.drive`` does
+the rest: the agent's tools, the saved turns, the priced usage.
+
+``live_router(mount, socket_guard)`` builds it under the mount's path,
+behind a guard a socket can run (it carries cookies, never a bearer
+header). It is its own router, apart from the mount's pages: a page guard
+reads an HTTP request a socket does not have. Otherwise a call is a
+turn: the mount's ``bind`` (whose call it is, about what), the signed-in
+owner and the mount's ``gate``, as ``/stream`` takes them.
+
+A picture shown mid-call (``{"type": "shown"}``) is a typed turn of the
+call's agent with the picture attached: it looks at it in the
+conversation and the assistant says what it saw, so a screenshot never
+means leaving the call.
+"""
+
+import asyncio
+from collections.abc import Awaitable, Callable
+import contextlib
+import functools
+import json
+from typing import Annotated, Any, Literal
+
+from fastapi import APIRouter, Depends, WebSocket
+from pydantic_ai.messages import (
+    FunctionToolCallEvent,
+    PartDeltaEvent,
+    PartEndEvent,
+    PartStartEvent,
+    RealtimeInputSpeechEndEvent,
+    RealtimeInputSpeechStartEvent,
+    RealtimeResponseInterruptedEvent,
+    RealtimeTurnCompleteEvent,
+    SpeechPart,
+    SpeechPartDelta,
+)
+
+from app.components.backend.api.ai.service import ai_service
+from app.components.web_frontend import chat_surface as chat
+from app.components.web_frontend.chat_surface import ChatSurface
+from app.core.chat_transcript import trace_label
+from app.core.config import settings
+from app.core.db import get_async_session
+from app.core.log import logger
+from app.core.pages import page_stage
+from app.services.ai.service import (
+    ChatAttachment,
+    LiveEngine,
+    live_engines,
+    realtime_calls,
+    to_spoken,
+)
+from app.services.ai.service.trace import record_tool_call
+from app.services.shared.deps import get_optional_owner_user_id
+
+# Sent the moment the call is up, so the assistant speaks first: a cue
+# rather than a line, so the greeting varies.
+GREETING = (
+    "The call just connected. Greet them warmly in a few words and ask "
+    "what they would like to talk about."
+)
+# A call into a conversation already under way: no introductions.
+CONTINUING = (
+    "The call just connected, in a conversation you are already having with "
+    "them (it is above). Greet them briefly as someone you know - no "
+    "introductions - and ask what is next."
+)
+# A call soon after one dropped mid-answer picks it up.
+RESUMING = (
+    "The call just reconnected. It dropped while you were answering them; "
+    'they had asked: "{asked}". Say in a few words that you got cut off, '
+    "then pick that answer up."
+)
+
+# Into the quiet: no provider ends a call on silence, so the page counts it
+# (call-state.js) and names one of these; the assistant says it. Cues, not
+# scripts, so the words vary. The check-in is a question they can tell
+# apart: "I'm ready when you are" went unnoticed as one.
+CHECK_IN = (
+    'It has gone quiet on the call. Ask them "Are you still there?" and nothing else.'
+)
+GOODBYE = (
+    "It is still quiet; they seem to have stepped away. Say a short goodbye "
+    "and end the call."
+)
+CUES = {"check_in": CHECK_IN, "goodbye": GOODBYE}
+
+# A picture shown mid-call: what the turn is asked with it (nothing was
+# said, the picture is the question), and the cue the assistant says what
+# it saw from, in its own voice. A look that failed is said too: the page
+# waits on it.
+SHOWN = "(showing you this on the call)"
+SAW = (
+    "They just showed you a picture on the call and you looked at it. Tell "
+    'them what you saw, in your own words: "{seen}"'
+)
+NOT_SEEN = (
+    "They just showed you a picture on the call, but you could not look at "
+    "it. Say so in a sentence and ask them to try again."
+)
+# What of the look is spoken: a few sentences, not the whole transcription.
+SEEN_CHARS = 1_000
+
+# A mount's longest call (``ChatSurface.longest_call``): this long before
+# it, the assistant is cued to wrap up; at it, the call ends and the page
+# is told why.
+WRAP_UP_SECONDS = 20.0
+WRAP_UP = (
+    "The call is nearly out of time. Tell them so in a sentence and say a "
+    "short goodbye."
+)
+TIME_UP = "The call reached its time limit. You can carry on by typing."
+
+# How a call the gate let through ended (``ChatSurface.on_call_end``): as
+# ``drive`` says (the page or the provider hung up, it failed), or the
+# server ended it, at its longest or refused by the mount's ``call_check``
+# mid-call. A quiet call's goodbye is the page hanging up.
+CallEnded = realtime_calls.CallEnd | Literal["limit", "refused"]
+
+
+def opening(conversation: Any) -> str:
+    """How the call opens: picking up a dropped one, carrying on a
+    conversation, or a first greeting."""
+    if conversation is None:
+        return GREETING
+    if asked := realtime_calls.resumed(conversation):
+        return RESUMING.format(asked=asked)
+    return CONTINUING if conversation.messages else GREETING
+
+
+async def _engine_now() -> tuple[LiveEngine | None, dict[str, Any] | None]:
+    """The engine the voice profile names, and what the call bar shows of
+    it: its name, and its rate a second where it bills by time (the bar
+    ticks it). Its own short session: a call writes in others."""
+    async with get_async_session() as db:
+        engine = await live_engines.resolve(db, settings.VOICE_LIVE_ENGINE)
+        info = engine and {
+            "label": engine.llm.title,
+            "per_second": await live_engines.per_second(db, engine),
+        }
+    return engine, info
+
+
+async def _send(ws: WebSocket, message: dict[str, Any]) -> None:
+    try:
+        await ws.send_json(message)
+    except Exception:  # the page hung up first
+        return
+
+
+async def _tell(ws: WebSocket, event: Any) -> None:
+    """What the page shows of an event, if anything."""
+    said: dict[str, Any] | None = None
+    if isinstance(event, RealtimeResponseInterruptedEvent):
+        said = {"type": "interrupted"}  # drop what has not been played
+    elif isinstance(event, RealtimeInputSpeechStartEvent):
+        # OpenAI and xAI hear you start before any word is transcribed (a
+        # transcript comes once you stop): you talking is never quiet.
+        said = {"type": "onset"}
+    elif isinstance(event, RealtimeInputSpeechEndEvent):
+        said = {"type": "turn_end"}  # its answer is owed
+    elif isinstance(event, FunctionToolCallEvent):
+        if event.part.tool_name == realtime_calls.END_CALL:
+            said = {"type": "hang_up"}  # after the goodbye has played
+        else:
+            step: list[dict[str, Any]] = []
+            record_tool_call(step, event)
+            said = {"type": "working", "label": trace_label(step[0])}
+    elif isinstance(event, RealtimeTurnCompleteEvent):
+        said = {"type": "done"}
+    elif (
+        isinstance(event, PartStartEvent)
+        and isinstance(event.part, SpeechPart)
+        and event.part.speaker == "user"
+    ):
+        # Gemini reports no onset of speech: your first transcribed words
+        # are it, and "heard" is the end. No quiet counts in between.
+        said = {"type": "hearing"}
+    elif (
+        isinstance(event, PartDeltaEvent)
+        and isinstance(event.delta, SpeechPartDelta)
+        and event.delta.speaker == "assistant"
+        and event.delta.transcript
+    ):
+        # Her words so far, as she says them: a card on screen follows
+        # the part she names (mentions.js).
+        said = {"type": "saying", "text": event.delta.transcript}
+    elif isinstance(event, PartEndEvent) and isinstance(event.part, SpeechPart):
+        side = "heard" if event.part.speaker == "user" else "said"
+        said = {"type": side, "text": event.part.transcript or ""}
+    if said:
+        await _send(ws, said)
+
+
+def _said(text: str) -> dict[str, Any]:
+    """A page's message, or nothing when it is not a JSON object."""
+    try:
+        said = json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning("A live call sent a message that is not JSON")
+        return {}
+    return said if isinstance(said, dict) else {}
+
+
+def _cue(said: dict[str, Any]) -> str | None:
+    """The line a page's cue names (``{"line": "check_in"}``): only the
+    server's own, so the page never puts words in the assistant's mouth."""
+    return CUES.get(said.get("line"))
+
+
+async def _shown(
+    ws: WebSocket,
+    session: Any,
+    image: Any,
+    see: Callable[[ChatAttachment], Awaitable[str]],
+) -> None:
+    """A picture shown on the call: ``see`` looks at it as a turn, and the
+    assistant is cued to say what it saw. The page is told the look is
+    over (``looked``) however it went, or its call bar stays working."""
+    try:
+        picture = ChatAttachment.model_validate(image)
+        if not picture.media_type.startswith("image/"):
+            raise ValueError("only a picture can be shown on a call")
+    except ValueError:
+        await _send(ws, {"type": "looked"})
+        return
+    try:
+        cue = SAW.format(seen=await see(picture))
+    except Exception:
+        logger.exception("Looking at a picture on a call failed")
+        cue = NOT_SEEN
+    await session.send(cue)
+    await _send(ws, {"type": "looked"})
+
+
+async def _carry(
+    ws: WebSocket,
+    session: Any,
+    conversation: Any,
+    info: dict[str, Any] | None,
+    stopped: asyncio.Event,
+    clock: Callable[..., Awaitable[None]] | None = None,
+    see: Callable[[ChatAttachment], Awaitable[str]] | None = None,
+) -> None:
+    """The audio, both ways, until the page hangs up or the server ends
+    the call (``stopped``); ``clock`` runs beside it (the longest call),
+    and ``see`` looks at a picture the page shows, beside the call."""
+    await ws.send_json(
+        {
+            "type": "ready",
+            "input_rate": session.audio_input_sample_rate,
+            "output_rate": session.audio_output_sample_rate,
+            "conversation_id": conversation.id,
+            "engine": info,
+        }
+    )
+
+    async def speak() -> None:
+        async for chunk in session.stream_audio():
+            await ws.send_bytes(chunk)
+
+    looks: set[asyncio.Task[None]] = set()
+
+    async def listen() -> None:
+        while True:
+            message = await ws.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            if message.get("bytes"):
+                await session.send_audio(message["bytes"])
+                continue
+            if not message.get("text"):
+                continue
+            said = _said(message["text"])
+            if said.get("type") == "shown" and see:
+                # Looked at beside the call, not in its way.
+                looking = asyncio.create_task(
+                    _shown(ws, session, said.get("image"), see)
+                )
+                looks.add(looking)
+                looking.add_done_callback(looks.discard)
+            elif line := _cue(said):
+                await session.send(line)
+
+    tasks = [asyncio.create_task(speak())]
+    if clock:
+        tasks.append(asyncio.create_task(clock(session)))
+    try:
+        await session.send(opening(conversation))
+        hearing = asyncio.create_task(listen())
+        tasks += [hearing, asyncio.create_task(stopped.wait())]
+        await asyncio.wait(tasks[-2:], return_when=asyncio.FIRST_COMPLETED)
+        if hearing.done():
+            hearing.result()  # an error in the loop is raised, as it always was
+    finally:
+        # Cancelled too (``drive`` cancels this when the provider ends the
+        # call first): nothing it started outlives the call.
+        for task in [*tasks, *looks]:
+            task.cancel()
+        await session.close()
+
+
+def _answers(mount: ChatSurface) -> str | None:
+    """Who answers the call: the mount's voice agent, else its chat agent."""
+    return mount.voice_agent_slug or mount.agent_slug
+
+
+def live_router(
+    mount: ChatSurface, socket_guard: Callable[..., Any], *, admin: bool = False
+) -> APIRouter:
+    """The call's socket, under ``mount.path``/live/ws, behind
+    ``socket_guard``; ``admin`` when that guard lets only admins in, so the
+    call's agent reaches the admin tools."""
+    router = APIRouter(prefix=mount.path, dependencies=[Depends(socket_guard)])
+
+    async def call_for(
+        bound: ChatSurface,
+        owner_user_id: int | None,
+        conversation_id: str | None,
+        engine: LiveEngine,
+    ) -> Any:
+        """The conversation the call saves into (a call without one starts
+        one) and the agent as the engine's brain (``open_call``)."""
+        conversation = None
+        if conversation_id:
+            conversation = await chat.find_conversation(bound, conversation_id)
+            if conversation is None:
+                raise LookupError("not this mount's conversation")
+        return await realtime_calls.open_call(
+            ai_service,
+            engine,
+            conversation=conversation,
+            user_id=bound.user,
+            owner_user_id=owner_user_id,
+            subject=bound.subject,
+            surface=bound.surface,
+            agent_slug=_answers(bound),
+            voice=settings.TTS_VOICE,
+            admin=admin,
+        )
+
+    async def show_cards(ws: WebSocket, card_ids: list[str]) -> None:
+        """A card drawn mid-call, up while it is talked about."""
+        for card_id in card_ids:
+            await _send(ws, {"type": "card", "url": f"{mount.path}/cards/{card_id}"})
+
+    @router.websocket("/live/ws")
+    async def live_call(
+        ws: WebSocket,
+        bound: Annotated[ChatSurface, Depends(chat.resolver(mount))],
+        refusal: Annotated[str | None, Depends(chat.gatekeeper(mount))],
+        owner_user_id: Annotated[int | None, Depends(get_optional_owner_user_id)],
+        conversation_id: str | None = None,
+        page: str | None = None,
+    ) -> None:
+        """A call, for as long as the page holds the socket, on the page
+        it names (``ChatSurface.pages``)."""
+        await ws.accept()
+        if refusal:  # the gate let no call through: nothing to end
+            await ws.close(code=1008, reason=refusal)
+            return
+        # The page the call is on (the socket says which): her actions
+        # on it go out as they are taken (``page_action``).
+        on_page = bound.page_at(page)
+        with page_stage(on_page, lambda act: _send(ws, {"type": "page", **act})):
+            how: CallEnded = "refused"
+            try:
+                if not chat.offers_calls(bound):  # no phone on their page
+                    await ws.close(code=1008)
+                    return
+                how = "error"
+                engine, info = await _engine_now()
+                if engine is None:
+                    await ws.close(code=1008, reason="No live engine is enabled.")
+                    return
+                try:
+                    conversation, realtime, answers = await call_for(
+                        bound, owner_user_id, conversation_id, engine
+                    )
+                except Exception:
+                    logger.exception("Opening a live call failed")
+                    await ws.close(code=1011)
+                    return
+                stopped = asyncio.Event()
+                server_end: CallEnded | None = None
+                # The engine and what the call costs are the operator's figures:
+                # a caller without the controls (a visitor) is shown neither.
+                operator = bound.operator_controls
+                # What the turns the call handed off cost (a picture looked
+                # at): its thinking, beside what its voice costs.
+                thinking = 0.0
+
+                async def end(by: CallEnded, reason: str) -> None:
+                    """The server ends the call, and tells the page why: an event,
+                    not the socket's close reason, which holds 123 bytes and a
+                    ``call_check`` reason is the app's own words."""
+                    nonlocal server_end
+                    if server_end:
+                        return
+                    server_end = by
+                    logger.info("Live call ended by the server", by=by, reason=reason)
+                    await _send(ws, {"type": "ended", "reason": reason})
+                    stopped.set()
+
+                async def clock(session: Any, longest: float) -> None:
+                    """The mount's longest call: a cue to wrap up, then the end."""
+                    wrap = min(WRAP_UP_SECONDS, longest)
+                    await asyncio.sleep(longest - wrap)
+                    with contextlib.suppress(Exception):  # the limit holds regardless
+                        await session.send(WRAP_UP)
+                    await asyncio.sleep(wrap)
+                    await end("limit", TIME_UP)
+
+                async def see(picture: ChatAttachment) -> str:
+                    """The call's agent looks at a picture, as a turn of
+                    the call's conversation; what it saw, to say."""
+                    nonlocal thinking
+                    reply = await ai_service.chat(
+                        SHOWN,
+                        conversation_id=conversation.id,
+                        user_id=bound.user,
+                        owner_user_id=owner_user_id,
+                        admin=admin,
+                        agent_slug=answers,
+                        # The call's agent looks; the thread stays held
+                        # with the agent its typed turns answer as.
+                        hand_over=False,
+                        surface=bound.surface,
+                        attachments=[picture],
+                        subject=bound.subject,
+                    )
+                    thinking += float((reply.metadata or {}).get("cost") or 0)
+                    return to_spoken(reply.content, SEEN_CHARS)
+
+                async def saved(cost: float) -> None:
+                    """A turn is kept, with what the call has cost so far
+                    (its voice, and its thinking); the mount's check may
+                    end the call there."""
+                    spent = {"cost": cost, "thinking": thinking}
+                    await _send(ws, {"type": "saved"} | (spent if operator else {}))
+                    if server_end or not bound.call_check:
+                        return
+                    if reason := await bound.call_check(bound):
+                        await end("refused", reason)
+
+                longest = bound.longest_call
+                # The call's ledger row is kept on its own session, each
+                # write committed as it lands (``drive``).
+                async with get_async_session() as ledger:
+                    how = await realtime_calls.drive(
+                        ai_service,
+                        realtime,
+                        ledger=ledger,
+                        alongside=lambda session: _carry(
+                            ws,
+                            session,
+                            conversation,
+                            info if operator else None,
+                            stopped,
+                            functools.partial(clock, longest=longest)
+                            if longest
+                            else None,
+                            see,
+                        ),
+                        on_event=lambda event: _tell(ws, event),
+                        on_saved=saved,
+                        on_drawn=lambda card_ids: show_cards(ws, card_ids),
+                        conversation_id=conversation.id,
+                        model=live_engines.realtime_model(engine),
+                        agent_slug=answers,
+                        user_id=bound.user,
+                        owner_user_id=owner_user_id,
+                        subject=bound.subject,
+                        admin=admin,
+                    )
+                how = server_end or how
+                try:
+                    await ws.close()
+                except Exception:  # already closed by the page
+                    return
+            finally:
+                if bound.on_call_end:
+                    try:
+                        await bound.on_call_end(bound, how)
+                    except Exception:
+                        logger.exception("A call's end hook failed")
+
+    return router

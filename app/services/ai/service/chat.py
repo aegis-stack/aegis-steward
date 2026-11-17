@@ -1,30 +1,165 @@
-"""A conversation's setup and teardown around a turn.
-
-The turn itself is ``stream_chat()`` in ``streaming.py``; ``chat()``
-there runs it to its end (#455).
+"""A turn's conversation: set up before the model runs (the agent row, the
+conversation with the message added, the runnable ``_build_turn`` makes)
+and saved after, with what its reply reports (``reply_metadata``). The
+turn itself, streamed or run to its end, is ``streaming.py``'s.
 """
 
 from datetime import UTC, datetime
 from typing import Any
 
 from app.core.tools import load_tools
+from app.services.ai.domains.chat.agent_loader import AgentConfig, resolve_agent
+from app.services.ai.domains.chat.attachments import (
+    ChatAttachment,
+    LiftedTurn,
+    prepare_turn,
+)
 from app.services.ai.domains.chat.self_context import current_turn
-from app.services.ai.domains.chat.summary import enqueue_if_due
+from app.services.ai.domains.chat.summary import enqueue_fold
 from app.services.ai.domains.chat.titles import conversation_title
 from app.services.ai.domains.llm.config import AIServiceConfig
+from app.services.ai.domains.spend.calls import handed_off_call
 from app.services.ai.models import Conversation, MessageRole
-from app.services.ai.service.base import (
-    ConversationError,
-)
-from app.services.ai.service.prompt import PromptMixin
+from app.services.ai.service.base import ConversationError
+from app.services.ai.service.turn import TurnMixin, TurnSetup
 
-# Every service's tools registered, so DB-granted names resolve in every
-# process that serves chat - the API, the CLI, and code-mode agents alike.
+# Every registered tool, so DB-granted names resolve in every process that
+# serves chat - the API, the CLI, and code-mode agents alike.
 load_tools()
 
+# The agent a conversation is held with, on its metadata.
+AGENT_KEY = "agent_slug"
 
-class ChatMixin(PromptMixin):
-    """Conversation setup and teardown, shared by the one turn."""
+
+async def held_agent(
+    conversation: Conversation, slug: str | None, *, hand_over: bool = True
+) -> AgentConfig:
+    """The agent that answers in ``conversation``: the one ``slug`` names,
+    else the one the conversation is held with, else the default.
+
+    A conversation is held with one agent, and a turn that names none
+    speaks as it: a follow-up (an approval coming back, a job's nudge) came
+    back as the default agent, without the tools the work it had promised
+    needed. Naming another agent hands the conversation over, unless the
+    turn does not (``hand_over``): a live call answers as its voice agent
+    without the typed turns after it answering as the voice model."""
+    named = slug or conversation.metadata.get(AGENT_KEY)
+    agent = await resolve_agent(named) if named else await resolve_agent()
+    if hand_over:
+        conversation.metadata[AGENT_KEY] = agent.slug
+    return agent
+
+
+async def reply_metadata(
+    conversation_id: str,
+    *,
+    provider: Any,
+    model: str,
+    response_time_ms: float,
+    tool_trace: list[dict[str, Any]],
+    finish_reason: str | None,
+    rag: dict[str, Any] | None = None,
+    usage: dict[str, int],
+    cost: float,
+    agent_config: AgentConfig,
+) -> dict[str, Any]:
+    """What a reply's final frame reports and its message keeps, so a
+    conversation reopened from history shows what the live turn did."""
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+
+    # Calculate TPS (tokens per second) for performance metrics
+    # This is especially useful for Ollama but works for all providers
+    gen_tps: float | None = None
+    if output_tokens > 0 and response_time_ms > 0:
+        gen_tps = round(output_tokens * 1000 / response_time_ms, 1)
+    metadata: dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "provider": provider,
+        "model": model,
+        "response_time_ms": response_time_ms,
+        "stream_complete": True,
+        # Token usage and cost for CLI status line
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost": cost,
+        # TPS for performance monitoring (especially useful for Ollama)
+        "gen_tps": gen_tps,
+        **(rag or {}),
+    }
+    if tool_trace:
+        metadata["tool_trace"] = tool_trace
+    if finish_reason:
+        metadata["finish_reason"] = finish_reason
+    # The settings this reply ran under; the agent may change later.
+    metadata["agent"] = {
+        "slug": agent_config.slug,
+        "temperature": agent_config.temperature,
+        "max_tokens": agent_config.max_tokens,
+    }
+    # A turn a live call handed off names the call's ledger row:
+    # what its thinking cost is read from these replies.
+    if (call := await handed_off_call()) is not None:
+        metadata["call"] = call
+    return metadata
+
+
+class ChatMixin(TurnMixin):
+    """A turn's conversation setup and teardown."""
+
+    async def _assemble_turn(
+        self,
+        message: str,
+        *,
+        conversation_id: str | None,
+        user_id: str,
+        agent_slug: str | None,
+        surface: str | None,
+        attachments: list[ChatAttachment] | None,
+        subject: str | None = None,
+        owner_user_id: int | None = None,
+        admin: bool | None = None,
+        instructions: str | None = None,
+        hand_over: bool = True,
+        lifted: LiftedTurn | None = None,
+    ) -> TurnSetup:
+        """Everything a turn needs before the model runs: the agent row
+        (``held_agent``, ``instructions`` leading its prompt), the
+        conversation with the user message added, and the runnable
+        ``_build_turn`` makes for it."""
+        current = self.config
+
+        # Setup conversation and add user message. The stored text
+        # carries the attachment marker; the bytes ride only this
+        # turn's model call (history replays as text).
+        # Kept, not just carried: the bytes ride this turn's model
+        # call and the message remembers where the image was stored,
+        # so reopening the conversation still shows it. What is lifted
+        # out of the text the way in lifted (``lifted``): no session here.
+        stored_text, stored_metadata = await prepare_turn(
+            message, attachments, user_id, lifted=lifted
+        )
+        conversation = await self._setup_conversation(
+            stored_text,
+            conversation_id,
+            user_id,
+            config=current,
+            surface=surface,
+            metadata=stored_metadata,
+            subject=subject,
+        )
+
+        agent_config = await held_agent(conversation, agent_slug, hand_over=hand_over)
+        agent_config = agent_config.led_by(instructions)
+
+        return await self._build_turn(
+            conversation,
+            agent_config,
+            user_id=user_id,
+            subject=subject,
+            owner_user_id=owner_user_id,
+            admin=admin,
+        )
 
     async def _setup_conversation(
         self,
@@ -34,6 +169,7 @@ class ChatMixin(PromptMixin):
         config: AIServiceConfig | None = None,
         surface: str | None = None,
         metadata: dict[str, Any] | None = None,
+        subject: str | None = None,
     ) -> Conversation:
         """
         Get or create conversation and add user message.
@@ -68,6 +204,7 @@ class ChatMixin(PromptMixin):
                 model=cfg.model,
                 user_id=user_id,
                 surface=surface,
+                subject=subject,
             )
             # First message names the conversation; history lists need a
             # human hook, not a UUID.
@@ -101,7 +238,7 @@ class ChatMixin(PromptMixin):
 
         # Save conversation
         await self.conversation_manager.save_conversation(conversation)
-        # Turns that left this one's window fold into the running summary
-        # on the worker, once enough have (#295).
-        if (stamp := current_turn()) is not None and stamp.messages_dropped:
-            await enqueue_if_due(conversation, stamp.first_kept)
+        # Turns that left this one's window fold into the running summary,
+        # on the worker (``summary``).
+        if (stamp := current_turn()) is not None and stamp.fold_to:
+            await enqueue_fold(conversation.id, stamp.fold_to)

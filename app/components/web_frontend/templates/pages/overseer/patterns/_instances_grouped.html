@@ -5,7 +5,7 @@
 {% from "pages/overseer/_macros.html" import todos %}
 {% macro _to_fix(row) %}{{ todos(row.todo) }}{% endmacro %}
 {% for group, rows in route_groups %}
-<details data-route-group {% if groups_open %}open{% endif %} class="raised px-5">
+<details data-route-group {% if groups_open %}open{% endif %} class="hover-card raised px-5">
   <summary class="list-none cursor-pointer select-none py-3 flex items-center gap-3">
     {{ fold_mark() }}
     <h2 class="text-sm font-semibold text-aegis-text">{{ group }}</h2>

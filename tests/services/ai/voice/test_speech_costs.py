@@ -1,14 +1,12 @@
-"""Hearing and speaking cost money too (#270).
+"""Hearing and speaking cost money too.
 
 Every transcription and every spoken reply was recorded at $0 (a TODO in
 both services). Each is now priced at the catalog's rates and written to
 the one usage ledger (``llm_usage``, action ``stt``/``tts``) beside the
-model calls and live minutes, and to its own telemetry row.
+model calls and live calls.
 """
 
 from __future__ import annotations
-
-from unittest.mock import MagicMock
 
 import pytest
 from sqlmodel import select
@@ -16,12 +14,13 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 import app.core.db as db_module
 from app.services.ai.domains.spend import recording as usage_recording
+from app.services.ai.domains.voice.models import SpeechTokens
 from app.services.ai.domains.voice.stt import STTService
 from app.services.ai.domains.voice.tts import TTSService
 from app.services.ai.models.llm import LLMUsage
-from app.services.ai.models.voice.usage import STTUsage, TTSUsage
 from tests._session import opens
 from tests._voice_catalog import seed_voice_catalog
+from tests._voice_settings import voice_settings
 
 
 @pytest.fixture
@@ -60,31 +59,14 @@ class TestRates:
         assert await usage_recording.speech_cost("gpt-transcribe") == 0.0
 
 
-def _settings(**values: object) -> MagicMock:
-    settings = MagicMock()
-    for key, value in values.items():
-        setattr(settings, key, value)
-    return settings
-
-
 class TestHearing:
     @pytest.mark.asyncio
     async def test_a_transcription_is_priced_and_in_the_ledger(
         self, ledger: AsyncSession
     ) -> None:
-        stt = STTService(
-            _settings(
-                STT_PROVIDER="openai_whisper",
-                STT_MODEL="gpt-transcribe",
-                STT_LANGUAGE=None,
-                STT_DEVICE=None,
-            )
-        )
+        stt = STTService(voice_settings(STT_MODEL="gpt-transcribe"))
         await stt._record_usage(
-            input_bytes=48_000,
             input_duration_seconds=30,
-            output_characters=120,
-            detected_language="en",
             latency_ms=900,
             user_id="0",
             success=True,
@@ -98,29 +80,35 @@ class TestHearing:
             30,
         )
         assert row.total_cost == pytest.approx(0.00225)
-        (telemetry,) = (await ledger.exec(select(STTUsage))).all()
-        assert telemetry.total_cost == pytest.approx(0.00225)
+        assert row.duration_ms == 900
 
 
 class TestSpeaking:
     @pytest.mark.asyncio
+    async def test_a_realtime_line_is_priced_by_its_tokens(
+        self, ledger: AsyncSession
+    ) -> None:
+        priced = await usage_recording.speech_cost(
+            "gpt-realtime-2.1-mini",
+            characters=900,
+            tokens=SpeechTokens(
+                input_tokens=1_000,
+                output_tokens=1_000_000,
+                output_audio_tokens=1_000_000,
+            ),
+        )
+
+        # 1k text in at $0.60/M, 1M audio out at $20/M; never by the character.
+        assert priced == pytest.approx(0.0006 + 20.0)
+
+    @pytest.mark.asyncio
     async def test_a_spoken_reply_is_priced_by_its_characters(
         self, ledger: AsyncSession
     ) -> None:
-        tts = TTSService(
-            _settings(
-                TTS_PROVIDER="openai",
-                TTS_MODEL="tts-1",
-                TTS_VOICE="marin",
-                TTS_SPEED=1.0,
-                TTS_INSTRUCTIONS=None,
-            )
-        )
+        tts = TTSService(voice_settings(TTS_MODEL="tts-1", TTS_VOICE="marin"))
         await tts._record_usage(
             input_characters=2_000,
-            output_bytes=64_000,
             output_duration_seconds=None,
-            voice="marin",
             latency_ms=700,
             user_id="0",
             success=True,
@@ -130,5 +118,26 @@ class TestSpeaking:
         (row,) = (await ledger.exec(select(LLMUsage))).all()
         assert (row.action, row.model_id) == ("tts", "tts-1")
         assert row.total_cost == pytest.approx(0.03)
-        (telemetry,) = (await ledger.exec(select(TTSUsage))).all()
-        assert telemetry.total_cost == pytest.approx(0.03)
+
+
+class TestRealtimeSpeechInTheLedger:
+    @pytest.mark.asyncio
+    async def test_a_realtime_line_keeps_its_tokens(self, ledger: AsyncSession) -> None:
+        tts = TTSService(
+            voice_settings(TTS_MODEL="gpt-realtime-2.1-mini", TTS_VOICE="marin")
+        )
+        await tts._record_usage(
+            input_characters=12,
+            output_duration_seconds=1.5,
+            latency_ms=900,
+            user_id="0",
+            success=True,
+            error_message=None,
+            tokens=SpeechTokens(
+                input_tokens=40, output_tokens=120, output_audio_tokens=100
+            ),
+        )
+
+        (row,) = (await ledger.exec(select(LLMUsage))).all()
+        assert (row.input_tokens, row.output_tokens) == (40, 120)
+        assert row.total_cost > 0

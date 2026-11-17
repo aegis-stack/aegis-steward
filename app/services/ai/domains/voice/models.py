@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.discovery import present
 from app.core.voice_settings import TTS_SPEED_MAX, TTS_SPEED_MIN, setting_default
 
 
@@ -21,12 +22,16 @@ class STTProvider(str, Enum):
     WHISPER_LOCAL = "whisper_local"  # Local Whisper via HuggingFace transformers
     FASTER_WHISPER = "faster_whisper"  # SYSTRAN faster-whisper (optimized local)
     GROQ_WHISPER = "groq_whisper"  # Groq API (ultra-fast)
+    PARAKEET = "parakeet"  # NVIDIA Parakeet in the app (onnx-asr)
 
 
 class TTSProvider(str, Enum):
     """Supported Text-to-Speech providers."""
 
     OPENAI = "openai"  # OpenAI TTS API
+    GEMINI = "gemini"  # Gemini's speech models, the voices Gemini Live speaks
+    KOKORO = "kokoro"  # Kokoro in the app (kokoro-onnx)
+    LOCAL_SERVER = "local_server"  # a speech server you run (tts/server.py)
 
 
 class OpenAIVoice(str, Enum):
@@ -52,8 +57,27 @@ class OpenAIVoice(str, Enum):
 # response.
 DEFAULT_TTS_PROVIDER = TTSProvider(setting_default("TTS_PROVIDER"))
 DEFAULT_STT_PROVIDER = STTProvider(setting_default("STT_PROVIDER"))
-DEFAULT_TTS_MODEL = "tts-1"
+# OpenAI's speech model: gpt-realtime-2.1-mini, the one it names for
+# when every /v1/audio/speech model shuts down (Jan 6, 2027). It speaks
+# over the Realtime API only (``tts/realtime.py``).
+DEFAULT_TTS_MODEL = "gpt-realtime-2.1-mini"
+REALTIME_TTS_MODELS = [DEFAULT_TTS_MODEL]
 DEFAULT_TTS_VOICE = OpenAIVoice.ALLOY.value
+# Each provider's model and voice when none is named.
+DEFAULT_TTS_MODELS: dict[TTSProvider, str] = {
+    TTSProvider.OPENAI: DEFAULT_TTS_MODEL,
+    TTSProvider.GEMINI: "gemini-3.8-flash-tts",
+    TTSProvider.KOKORO: "kokoro-v1.0",
+    # Kokoro-FastAPI's (the one server SPEECH_SERVER names so far).
+    TTSProvider.LOCAL_SERVER: "kokoro",
+}
+DEFAULT_TTS_VOICES: dict[TTSProvider, str] = {
+    TTSProvider.OPENAI: DEFAULT_TTS_VOICE,
+    TTSProvider.GEMINI: "Kore",
+    TTSProvider.KOKORO: "af_heart",  # Kokoro's own pick
+    # tts/server.py's id for Kokoro's af_heart: its ids name their provider.
+    TTSProvider.LOCAL_SERVER: f"{TTSProvider.LOCAL_SERVER.value}:af_heart",
+}
 DEFAULT_STT_MODEL = "whisper-1"
 # Each provider's model when none is named.
 DEFAULT_STT_MODELS: dict[STTProvider, str] = {
@@ -61,14 +85,66 @@ DEFAULT_STT_MODELS: dict[STTProvider, str] = {
     STTProvider.GROQ_WHISPER: "whisper-large-v3-turbo",
     STTProvider.WHISPER_LOCAL: "openai/whisper-base",
     STTProvider.FASTER_WHISPER: "base",
+    STTProvider.PARAKEET: "nemo-parakeet-tdt-0.6b-v3",  # as onnx-asr names it
 }
 # The setting holding each cloud provider's key; a provider not here runs
 # locally and needs none.
-TTS_KEYS: dict[TTSProvider, str] = {TTSProvider.OPENAI: "OPENAI_API_KEY"}
+TTS_KEYS: dict[TTSProvider, str] = {
+    TTSProvider.OPENAI: "OPENAI_API_KEY",
+    TTSProvider.GEMINI: "GOOGLE_API_KEY",
+}
+# The catalog org whose logo each speech provider shows (Gemini is Google's).
+TTS_ORGS: dict[TTSProvider, str] = {
+    TTSProvider.OPENAI: "openai",
+    TTSProvider.GEMINI: "google",
+}
 STT_KEYS: dict[STTProvider, str] = {
     STTProvider.OPENAI_WHISPER: "OPENAI_API_KEY",
     STTProvider.GROQ_WHISPER: "GROQ_API_KEY",
 }
+# What each in-process provider imports, and the name ``uv add`` installs
+# it by. No stack installs these (torch alone is gigabytes): a provider
+# here runs once its packages are added.
+LOCAL_PACKAGES: dict[str, dict[str, str]] = {
+    STTProvider.WHISPER_LOCAL: {"transformers": "transformers", "torch": "torch"},
+    STTProvider.FASTER_WHISPER: {"faster_whisper": "faster-whisper"},
+    # PyAV decodes the browser's webm, which onnx-asr cannot read.
+    STTProvider.PARAKEET: {"onnx_asr": '"onnx-asr[cpu,hub]"', "av": "av"},
+    TTSProvider.KOKORO: {"kokoro_onnx": "kokoro-onnx"},
+}
+
+
+def uninstalled(provider: str) -> list[str]:
+    """The packages (as ``uv add`` names them) an in-process ``provider``
+    lacks; nothing for one installed or hosted."""
+    needs = LOCAL_PACKAGES.get(provider, {})
+    return [package for module, package in needs.items() if not present(module)]
+
+
+def install_line(provider: str) -> str | None:
+    """The command that installs what ``provider`` lacks; None when nothing."""
+    needed = uninstalled(provider)
+    return f"uv add {' '.join(needed)}" if needed else None
+
+
+def not_installed(provider: str) -> str | None:
+    """Why ``provider`` cannot run here, with the line that fixes it: what
+    the settings report and the provider factories raise."""
+    install = install_line(provider)
+    name = getattr(provider, "value", provider)
+    return f"{name} is not installed: {install}" if install else None
+
+
+def unserved(provider: str, url: str | None) -> str | None:
+    """Why a provider reached over the network cannot run: its server's
+    address (SPEECH_BASE_URL, ``url``) is not set."""
+    served = provider == TTSProvider.LOCAL_SERVER
+    return "SPEECH_BASE_URL missing" if served and not url else None
+
+
+class CannotRunError(RuntimeError):
+    """A provider factory's refusal (``not_installed``, ``unserved``): words
+    of the app's own, so safe to show where a provider's text is not."""
 
 
 class AudioFormat(str, Enum):
@@ -89,6 +165,34 @@ class AudioFormat(str, Enum):
             return cls((filename or "").rsplit(".", 1)[-1].lower())
         except ValueError:
             return None
+
+
+# What each format is served as.
+MEDIA_TYPES: dict[AudioFormat, str] = {
+    AudioFormat.WAV: "audio/wav",
+    AudioFormat.MP3: "audio/mpeg",
+    AudioFormat.M4A: "audio/mp4",
+    AudioFormat.WEBM: "audio/webm",
+    AudioFormat.OGG: "audio/ogg",
+    AudioFormat.FLAC: "audio/flac",
+    AudioFormat.MP4: "audio/mp4",
+}
+# What each speaking provider's audio comes back as, known before a
+# stream's first byte.
+TTS_FORMATS: dict[TTSProvider, AudioFormat] = {
+    TTSProvider.OPENAI: AudioFormat.MP3,
+    TTSProvider.GEMINI: AudioFormat.WAV,
+    TTSProvider.KOKORO: AudioFormat.WAV,
+    # Asked of every speech server: each one known speaks it, so none needs
+    # a transcode.
+    TTSProvider.LOCAL_SERVER: AudioFormat.WAV,
+}
+
+
+def speech_format(provider: TTSProvider, model: str) -> AudioFormat:
+    """What a provider's model speaks in: a realtime model's PCM comes back
+    as WAV, otherwise the provider's own format."""
+    return AudioFormat.WAV if model in REALTIME_TTS_MODELS else TTS_FORMATS[provider]
 
 
 class AudioInput(BaseModel):
@@ -165,9 +269,25 @@ class SpeechRequest(BaseModel):
     )
     instructions: str | None = Field(
         default=None,
-        description="How to say it - tone, emotion, pacing (gpt-4o models); "
+        description="How to say it - tone, emotion, pacing (a model that "
+        "steers them); "
         "None = TTS_INSTRUCTIONS",
     )
+
+
+class SpeechTokens(BaseModel):
+    """What a realtime model billed for a line, in the names Pydantic AI's
+    ``RequestUsage`` gives a call's, so the ledger prices both alike
+    (``spend.recording.realtime_cost``). Not that class itself: speech runs
+    on LangChain stacks too, which have no Pydantic AI."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    input_audio_tokens: int = 0
+    output_audio_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 class SpeechResult(BaseModel):
@@ -179,8 +299,18 @@ class SpeechResult(BaseModel):
         default=None, description="Duration of the audio in seconds"
     )
     provider: TTSProvider = Field(..., description="Provider used for synthesis")
+    tokens: SpeechTokens | None = Field(
+        default=None,
+        description="What a realtime model billed; None for a model billed "
+        "by the character or second",
+    )
 
     model_config = {"arbitrary_types_allowed": True}
+
+    @property
+    def media_type(self) -> str:
+        """What the audio is served as."""
+        return MEDIA_TYPES[self.format]
 
 
 class VoiceChatResponse(BaseModel):
@@ -208,16 +338,6 @@ class VoiceChatResponse(BaseModel):
 # =============================================================================
 # Voice Catalog Models
 # =============================================================================
-
-
-class VoiceCategory(str, Enum):
-    """Voice personality/style categories."""
-
-    NEUTRAL = "neutral"
-    WARM = "warm"
-    ENERGETIC = "energetic"
-    AUTHORITATIVE = "authoritative"
-    EXPRESSIVE = "expressive"
 
 
 class ProviderInfo(BaseModel):
@@ -254,6 +374,24 @@ class ModelInfo(BaseModel):
     max_input_chars: int | None = Field(
         default=None, description="Maximum input characters for TTS"
     )
+    steers: list[str] = Field(
+        default_factory=list,
+        description="What its delivery instructions steer (accent, tone...); "
+        "none for a model that ignores them",
+    )
+    retires: str | None = Field(
+        default=None, description="When its provider shuts it down"
+    )
+    speeds: tuple[float, float] | None = Field(
+        default=(TTS_SPEED_MIN, TTS_SPEED_MAX),
+        description="The speeds it can be set to; None for one with no speed",
+    )
+
+    @property
+    def note(self) -> str:
+        """What it is, after when it shuts down where it does."""
+        said = self.description or ""
+        return f"Shuts down {self.retires}; {said}" if self.retires else said
 
 
 class VoiceInfo(BaseModel):
@@ -266,11 +404,14 @@ class VoiceInfo(BaseModel):
         default_factory=list, description="Compatible model IDs"
     )
     description: str = Field(..., description="Voice description")
-    category: VoiceCategory | None = Field(
-        default=None, description="Voice personality category"
-    )
     gender: str | None = Field(
         default=None, description="Voice gender: 'male', 'female', 'neutral'"
+    )
+    tone: str | None = Field(
+        default=None, description="How it sounds, in a word (Warm, Bright, Firm)"
+    )
+    accent: str | None = Field(
+        default=None, description="The accent it speaks with (American, British)"
     )
     preview_text: str = Field(
         default="Hello, I'm {voice_name}. How can I help you today?",
@@ -290,22 +431,18 @@ class VoiceSettingsResponse(BaseModel):
     stt_language: str | None = None
 
 
-class VoiceSettingsUpdate(BaseModel):
-    """Voice settings update request (partial update)."""
-
-    tts_provider: str | None = Field(None, description="TTS provider ID")
-    tts_model: str | None = Field(None, description="TTS model ID")
-    tts_voice: str | None = Field(None, description="TTS voice ID")
-    tts_speed: float | None = Field(
-        None, ge=TTS_SPEED_MIN, le=TTS_SPEED_MAX, description="TTS speed"
-    )
-    stt_provider: str | None = Field(None, description="STT provider ID")
-    stt_model: str | None = Field(None, description="STT model ID")
-    stt_language: str | None = Field(None, description="STT language code (e.g., 'en')")
-
-
 class VoicePreviewRequest(BaseModel):
     """Voice preview generation request."""
 
     voice_id: str = Field(..., description="Voice ID to preview")
     text: str | None = Field(None, description="Custom text (uses default if None)")
+
+
+# OpenAI's speech models that take delivery ``instructions`` (and every
+# voice); their dated builds can be pinned (the March one is more
+# expressive, the December one mishears less).
+INSTRUCTED_TTS_MODELS = [
+    "gpt-4o-mini-tts",
+    "gpt-4o-mini-tts-2025-03-20",
+    "gpt-4o-mini-tts-2025-12-15",
+]

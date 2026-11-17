@@ -1,35 +1,88 @@
-/* The chat stream (island #2).
+/* The chat stream (partials/chat/surface.html).
 
    The page is server HTML; this owns only the live turn. The composer's
    post appends a user bubble and a streaming bubble carrying the text to
-   send; this reads that bubble, POSTs to the API's SSE endpoint and
+   send; this reads that bubble, POSTs to the mount's SSE route and
    renders the frames into it: `chunk` text through a typewriter, `tool`
-   calls as trail rows, `error` as a line. When the stream completes the
+   calls as trail rows, `page` actions on the page, `waiting` as the caption
+   of a quiet stretch, `error` as a line. When the stream completes the
    stored message is swapped in over the bubble (server-rendered), so the
    client never renders a settled message.
 
    Transport is fetch + a streamed SSE body: chat needs a POST body, and
    EventSource is GET-only. Frames are `event: <name>` + `data: <json>`
-   pairs separated by a blank line. */
+   pairs separated by a blank line.
+
+   Also here: `chatDrawer`, the drawer frame's Alpine state, and the
+   surface's parts both this and voice.js reach. */
+
+// Markup a script needs is cloned from a <template> in the surface
+// partial, so styling has one home (the template), never a JS string.
+function clone(id) {
+  return document.getElementById(id).content.firstElementChild.cloneNode(true);
+}
+// The thread (streamed into, reloaded mid-call), the conversation it is,
+// and the composer.
+function chatThread() {
+  return document.getElementById('chat-thread');
+}
+function chatConversation() {
+  return document.getElementById('chat-conversation');
+}
+// The conversation's id, or null for a new one; and a new id kept.
+function conversationId() {
+  return chatConversation()?.value || null;
+}
+function setConversation(id) {
+  const field = chatConversation();
+  if (id && field) field.value = id;
+}
+function chatComposer() {
+  return document.getElementById('chat-composer');
+}
+// The page the chat is on, which the mount's declaration is keyed by: a
+// typed turn and a call each say it.
+function chatPage() {
+  return location.pathname;
+}
+// An agent's action on that page (``page_action``, checked against what
+// the page declares before it is sent). One of the page's own carries its
+// value and goes to the page's code as a `page-action` event on the part;
+// the rest the chat applies: brought into view, and lit as a part named
+// on a card is (``data-lit``, input.css), lit again from the start.
+function pageAction({ action, target, value }) {
+  const part = document.getElementById(target);
+  if (!part) return;
+  if (value !== undefined) {
+    part.dispatchEvent(new CustomEvent('page-action', { bubbles: true, detail: { action, value } }));
+    return;
+  }
+  revealTab(part); // app.js: a part in a tab not showing
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  part.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
+  if (action !== 'highlight') return;
+  clearTimeout(part.unlit);
+  part.dataset.lit = '';
+  part.unlit = setTimeout(() => delete part.dataset.lit, 4000);
+}
+
 (() => {
   const CURSOR = '▌';
-  const WENT_WRONG = 'Something went wrong answering that.';
   let controller = null; // the in-flight turn's AbortController
 
   const root = () => document.getElementById('chat');
+  const thread = chatThread;
   const scroller = () => document.getElementById('chat-scroll');
   const config = () => JSON.parse(root().dataset.chat);
   // The live turn, told to whoever listens (voice.js speaks it as it comes):
-  // `chat:text` per streamed chunk, `chat:tool` when she stops writing to run
-  // a tool, `chat:end` when the stream is over.
+  // `chat:text` per streamed chunk, `chat:tool` when the assistant stops
+  // writing to run a tool, `chat:end` when the stream is over.
   const announce = (name, detail) => document.dispatchEvent(new CustomEvent(name, { detail }));
 
   // --- Scroll: stay with the newest unless the reader went looking ------
   // Pinned is an INTENT, not a position. Content settles after it arrives
-  // (images decode, markdown lays out, a drawer finishes opening), so a
-  // single scroll-to-bottom at load lands short — it ran against a height
-  // that was still growing. Hold the intent instead and re-apply it every
-  // time the thread changes size.
+  // (images decode, markdown lays out, a drawer finishes opening), so the
+  // intent is held and re-applied every time the thread changes size.
   const SLACK = 24;
   let pinned = true;
   const nearBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight <= SLACK;
@@ -46,115 +99,63 @@
     if (force) setPinned(true);
     if (pinned) el.scrollTop = el.scrollHeight;
   };
-  // Only going UP unpins. Content arriving fires a scroll event too - the
-  // box is suddenly taller than it was - and treating that as the reader
-  // walking away was what left a fresh open stranded mid-conversation:
-  // the intent was dropped a frame after it was set, by the very growth
-  // it was waiting for. Coming back to the bottom pins again.
+  // Only going UP, away from the bottom, unpins: content arriving scrolls
+  // too, and must not drop the intent it is waiting for. A settling answer
+  // shrinks for a moment (its card reloads) and the browser pulls the
+  // scroll up to the new bottom: still at the bottom, so still pinned.
+  // Coming back to the bottom pins again.
   let lastTop = 0;
   document.addEventListener('scroll', (event) => {
     const el = scroller();
     if (!el || event.target !== el) return;
-    if (el.scrollTop < lastTop - 1) setPinned(false);
+    if (el.scrollTop < lastTop - 1 && !nearBottom(el)) setPinned(false);
     else if (nearBottom(el)) setPinned(true);
     lastTop = el.scrollTop;
   }, true);
-  // Whatever the thread does next - an image arriving, an answer growing,
-  // the drawer taking its width - is a reason to re-apply the intent.
   let growth = null;
   const watchGrowth = () => {
-    const el = chatThread();
+    const el = thread();
     if (!el) return;
     if (!growth) growth = new ResizeObserver(() => follow());
     growth.disconnect();
     growth.observe(el);
-    const box = scroller();
-    if (box) growth.observe(box);
+    growth.observe(scroller());
   };
   document.addEventListener('click', (event) => {
-    const jump = event.target.closest('#chat-jump');
-    if (jump) follow(true);
+    if (event.target.closest('#chat-jump')) follow(true);
+    // The stage's way back, and the way onto it with the conversation open
+    // here: handlers in the script, never inline (the CSP refuses those).
+    if (event.target.closest('[data-stage-back]')) history.back();
+    const toStage = event.target.closest('[data-stage-link]');
+    if (toStage) toStage.search = conversationId() ? '?conversation_id=' + encodeURIComponent(conversationId()) : '';
     const replay = event.target.closest('[data-replay]');
     if (replay) {
-      const text = replay.closest('[data-role=user]').querySelector('[data-text]').textContent;
-      const box = composerBox();
-      // Through Alpine: without it the clear on a successful send writes
-      // nothing, leaving the replayed text in the composer after it went.
-      setBoxText(box, text);
-      box.form.requestSubmit();
-    }
-    const copy = event.target.closest('[data-copy]');
-    if (copy) {
-      // Either bubble. The answer keeps its markdown source in a
-      // template (what is drawn is rendered HTML); a question is already
-      // its own text, so there is nothing to stash a second copy of.
-      const bubble = copy.closest('[data-role]');
-      const raw = bubble?.querySelector('template[data-raw]');
-      const text = raw ? raw.innerHTML : bubble?.querySelector('[data-text]')?.textContent;
-      if (text) {
-        copied(copy);
-        write(text).catch(() => settle(copy));
-      }
+      // What it sent, its paste markers kept, not the words on screen.
+      const text = replay.closest('[data-role=user]').dataset.sent;
+      const form = chatComposer();
+      const box = form.querySelector('textarea');
+      box.value = text;
+      // Alpine owns this box through x-model and never sees a direct
+      // assignment; without this its copy stays empty and the clear on a
+      // successful send leaves the replayed text sitting in the composer.
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      form.requestSubmit();
     }
     if (event.target.closest('#chat-stop') && controller) controller.abort();
-    // A group's skip is the group's rows' skip: the summary stands for
-    // them, so its control has to as well - and the form only ever reads
-    // the per-row boxes, which is what keeps one source of truth.
-    const group = event.target.closest('[data-skip-group]');
-    if (group) {
-      const rows = group.closest('li').querySelectorAll('input[name=exclude_ids]');
-      rows.forEach((box) => { box.checked = group.checked; });
-    }
     const view = event.target.closest('[data-view-image]');
     if (view) viewImage(view.dataset.viewImage, view.title || view.getAttribute('alt') || '');
   });
 
-  // navigator.clipboard exists only in a secure context, which a stack
-  // served over plain http to anything but localhost is not - so the
-  // modern call is the preference, not the requirement, and the old
-  // execCommand path keeps the button working on a LAN address.
-  const write = (text) => {
-    if (navigator.clipboard) return navigator.clipboard.writeText(text);
-    const box = document.createElement('textarea');
-    box.value = text;
-    box.setAttribute('readonly', '');
-    box.style.cssText = 'position:fixed;top:-1000px;opacity:0';
-    document.body.appendChild(box);
-    box.select();
-    const ok = document.execCommand('copy');
-    box.remove();
-    return ok ? Promise.resolve() : Promise.reject(new Error('copy refused'));
-  };
-
-  // The clipboard says nothing back, so the button does: a tick for a
-  // beat, then the clipboard again. It answers the CLICK, not the
-  // promise — a write that hangs (or a browser that refuses one to an
-  // unfocused document) would otherwise leave the button looking broken,
-  // which is the thing this exists to prevent. A refusal settles it
-  // early, so a failed copy flashes rather than claims success.
-  const COPIED_MS = 1200;
-  const settle = (button) => {
-    delete button.dataset.copied;
-    button.querySelector('[data-copy-idle]')?.classList.remove('hidden');
-    button.querySelector('[data-copy-done]')?.classList.add('hidden');
-  };
-  const copied = (button) => {
-    button.dataset.copied = 'true';
-    button.querySelector('[data-copy-idle]')?.classList.add('hidden');
-    button.querySelector('[data-copy-done]')?.classList.remove('hidden');
-    clearTimeout(button._settle);
-    button._settle = setTimeout(() => settle(button), COPIED_MS);
-  };
-
-  // A thumbnail opens its image in the one modal (pattern 4), not a tab.
+  // A thumbnail opens its image in the modal, not a tab.
   const viewImage = (url, name) => {
     const body = document.getElementById('dialog-body');
-    if (!body) return;
+    const dialog = document.getElementById('dialog');
+    if (!body || !dialog) return;
     const img = clone('chat-image');
     img.src = url;
     img.alt = name;
     body.replaceChildren(img);
-    openDialog();
+    if (!dialog.open) dialog.showModal();
   };
 
   // --- Live markdown: enough to read while it streams ----------------
@@ -162,31 +163,27 @@
   // half-arrived answer legible (bold, code, bullets, balanced fences).
   const escapeHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const balanceFences = (t) => ((t.match(/```/g) || []).length % 2 === 1 ? `${t}\n\`\`\`` : t);
-  const live = (text) => {
-    const blocks = balanceFences(text).split('```');
-    return blocks.map((block, i) => {
-      if (i % 2 === 1) return `<pre><code>${escapeHtml(block.replace(/^\w*\n/, ''))}</code></pre>`;
-      let t = escapeHtml(block);
-      t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
-      let html = '';
-      let inList = false;
-      for (const line of t.split('\n')) {
-        const m = line.match(/^\s*[-*]\s+(.*)$/);
-        const h = line.match(/^(#{1,3})\s+(.*)$/);
-        if (m) {
-          if (!inList) { html += '<ul>'; inList = true; }
-          html += `<li>${m[1]}</li>`;
-          continue;
-        }
-        if (inList) { html += '</ul>'; inList = false; }
-        if (h) html += `<h${h[1].length}>${h[2]}</h${h[1].length}>`;
-        else if (line.trim()) html += `<p>${line}</p>`;
+  const live = (text) => balanceFences(text).split('```').map((block, i) => {
+    if (i % 2 === 1) return `<pre><code>${escapeHtml(block.replace(/^\w*\n/, ''))}</code></pre>`;
+    const t = escapeHtml(block)
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>');
+    let html = '';
+    let inList = false;
+    for (const line of t.split('\n')) {
+      const item = line.match(/^\s*[-*]\s+(.*)$/);
+      const heading = line.match(/^(#{1,3})\s+(.*)$/);
+      if (item) {
+        if (!inList) { html += '<ul>'; inList = true; }
+        html += `<li>${item[1]}</li>`;
+        continue;
       }
-      if (inList) html += '</ul>';
-      return html;
-    }).join('');
-  };
+      if (inList) { html += '</ul>'; inList = false; }
+      if (heading) html += `<h${heading[1].length}>${heading[2]}</h${heading[1].length}>`;
+      else if (line.trim()) html += `<p>${line}</p>`;
+    }
+    return inList ? `${html}</ul>` : html;
+  }).join('');
 
   // --- Typewriter: decouple network bursts from display ----------------
   // Reveal per frame is backlog-proportional: ~2 chars/frame at rest
@@ -248,10 +245,11 @@
   };
 
   // --- Attachments: staged in memory, sent with the next turn ----------
-  // A file input, a paste or a drop stages an image; the chips are drawn
-  // from the staged list, and the stream request carries the bytes as
-  // base64. They ride one turn only: cleared on success, kept on failure
-  // so a retry still has them.
+  // A file input, a paste or a drop stages an image (or a PDF, where the
+  // server reads one); the chips are drawn from the staged list, and the
+  // stream request carries the bytes as base64. They ride one turn only:
+  // cleared on success, kept on failure so a retry still has them. What
+  // the composer takes, and how much, is the server's (`config().composer`).
   let staged = []; // {name, media_type, data_b64, url}
   const drawChips = () => {
     const box = document.getElementById('chat-attachments');
@@ -261,8 +259,7 @@
       const chip = clone('chat-chip');
       chip.dataset.chip = file.name;
       const img = chip.querySelector('img');
-      // A PDF has no thumbnail: the chip carries its name alone rather
-      // than a broken image box.
+      // A PDF has no thumbnail: its chip carries its name alone.
       if (file.url) {
         img.src = file.url;
         img.dataset.viewImage = file.url;
@@ -276,10 +273,9 @@
     window.dispatchEvent(new CustomEvent('chat-staged', { detail: staged.length }));
   };
   // Vision models read at about a thousand pixels on the long edge; a
-  // full-resolution screenshot only costs encode time (a 2214px paste took
-  // two minutes on a local 30B model) and bytes on the wire. Anything
-  // larger is scaled down before it is staged; animated GIFs are left
-  // alone, since a canvas would keep one frame.
+  // full-resolution screenshot only costs encode time and bytes on the
+  // wire. Anything larger is scaled down before it is staged; animated
+  // GIFs are left alone, since a canvas would keep one frame.
   const MAX_EDGE = 1568;
   const shrink = async (file) => {
     if (file.type === 'image/gif') return file;
@@ -297,25 +293,17 @@
     return new File([blob], file.name, { type });
   };
   // While a call is up the composer is hidden: a picture pasted, dropped
-  // or picked then is shown to her on the call (voice.js), not staged.
+  // or picked then is shown on the call (voice.js), not staged.
   const onCall = () => document.getElementById('chat-call')?.hidden === false;
-  // A PDF rides as itself and is READ on the server - the documents
-  // service extracts it page by page and its text reaches the turn as a
-  // marker. Only an image is shrunk, and only an image has a thumbnail.
-  // What counts as either is the server's (``chat_composer``).
+  // A PDF rides as itself and is read on the server; only an image is
+  // shrunk, has a thumbnail, or can be shown on a call.
   const stage = async (file) => {
-    const { images, documents, max_bytes: maxBytes, max_files: maxFiles } = config().composer;
+    const { types, images, kinds, max_bytes: maxBytes, max_files: maxFiles } = config().composer;
     const isImage = images.includes(file.type);
     const showing = onCall();
-    if (showing && !isImage) {
-      toast(`${file.name || 'That'} is not a picture: only a picture can be shown on a call.`, 'error');
-      return;
-    }
-    if (!isImage && !documents.includes(file.type)) {
-      toast(`${file.name || 'That'} is not an image or a PDF.`, 'error');
-      return;
-    }
-    if (file.size > maxBytes) { toast(`${file.name} is over ${maxBytes / 1024 / 1024} MB.`, 'error'); return; }
+    if (showing && !isImage) { toast(`${file.name || 'That'} is not a picture: only a picture can be shown on a call.`, 'error'); return; }
+    if (!types.includes(file.type)) { toast(`${file.name || 'That'} is not one of the ${kinds} this chat takes.`, 'error'); return; }
+    if (file.size > maxBytes) { toast(`${file.name} is over ${formatValue(maxBytes, 'bytes')}.`, 'error'); return; }
     if (!showing && staged.length >= maxFiles) { toast(`Up to ${maxFiles} files per message.`, 'error'); return; }
     let payload = file;
     if (isImage) {
@@ -341,35 +329,34 @@
   });
   document.addEventListener('paste', (event) => {
     if (!chatComposer()) return;
-    const files = [...(event.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
-    if (files.length) { event.preventDefault(); files.forEach(stage); }
-    // A wall of text is stored now and stands in the box as its marker.
-    // Only the browser knows a paste was a paste: the same characters
-    // typed out are a message, and finished text cannot tell you which
-    // it was.
+    const { types, paste_threshold: threshold } = config().composer;
+    const files = [...(event.clipboardData?.files || [])].filter((f) => types.includes(f.type));
+    if (files.length) { event.preventDefault(); files.forEach(stage); return; }
+    // A wall of text is kept now and stands in the box as its marker: only
+    // the browser knows a paste was a paste.
     const text = event.clipboardData?.getData('text') || '';
-    if (text.length > config().composer.paste_threshold && event.target.matches?.('textarea')) {
+    const box = chatComposer().querySelector('textarea');
+    if (threshold && text.length > threshold && event.target === box) {
       event.preventDefault();
-      keepPaste(event.target, text);
+      keepPaste(box, text);
     }
   });
-
-  // The marker replaces the selection, so pasting twice leaves two
-  // markers where two pages went. A refusal puts the text in as text -
-  // the paste must land somewhere, and that is what used to happen to
-  // every one of them.
+  // The marker replaces the selection, so two pages pasted are two markers.
+  // A refusal puts the text in as text: the paste must land somewhere.
   const keepPaste = async (box, text) => {
+    const at = box.selectionStart ?? box.value.length;
+    const to = box.selectionEnd ?? at;
     const body = new FormData();
     body.append('text', text);
     let marker = text;
     try {
-      const answer = await fetch(config().urls.pastes, { method: 'POST', body });
+      const answer = await fetch(`${config().path}/pastes`, { method: 'POST', body });
       if (answer.ok) marker = (await answer.json()).marker;
     } catch (_) { /* offline: the text goes in as text */ }
-    const at = box.selectionStart ?? box.value.length;
-    const to = box.selectionEnd ?? at;
-    setBoxText(box, box.value.slice(0, at) + marker + box.value.slice(to));
+    box.value = box.value.slice(0, at) + marker + box.value.slice(to);
     box.selectionStart = box.selectionEnd = at + marker.length;
+    // Alpine's copy of the box (x-model) hears only an input event.
+    box.dispatchEvent(new Event('input', { bubbles: true }));
   };
   document.addEventListener('drop', (event) => {
     if (!event.target.closest?.('#chat')) return;
@@ -380,36 +367,29 @@
   // The composer's post carries only the names (for the note under the
   // bubble); the bytes go with the stream request.
   document.body.addEventListener('htmx:configRequest', (event) => {
-    if (event.detail.elt !== chatComposer()) return;
+    if (event.detail.elt.id !== 'chat-composer') return;
     event.detail.parameters.attachment_names = staged.map((f) => f.name);
   });
 
   // --- The turn -------------------------------------------------------------
   const setStreaming = (on) => {
-    const box = composerBox();
-    if (!box) return;
-    box.disabled = on;
+    const form = chatComposer();
+    if (!form) return;
+    form.querySelector('textarea').disabled = on;
     document.getElementById('chat-send').hidden = on;
     document.getElementById('chat-stop').hidden = !on;
-    if (!on) box.focus();
+    if (!on) form.querySelector('textarea').focus();
   };
 
   async function run(bubble) {
-    const { stream, defaults, urls } = config();
+    const { path } = config();
     const body = bubble.querySelector('[data-body]');
     const trail = bubble.querySelector('[data-trail]');
     const busy = bubble.querySelector('[data-busy]');
+    // A quiet stretch names itself (the server's words); anything arriving
+    // clears it.
     const waiting = bubble.querySelector('[data-waiting]');
-    // A pause names itself; anything arriving clears it. Silence that
-    // looks identical to a hang is what this exists to end.
-    const stillWaiting = (seconds, reason) => {
-      if (!waiting) return;
-      // The reason is the part that says it will finish: a model being
-      // loaded is a wait with an end, and silence alone reads as a hang.
-      waiting.textContent = reason ? `${reason} - ${seconds}s` : `waiting ${seconds}s`;
-      waiting.hidden = false;
-    };
-    const answered = () => { if (waiting) waiting.hidden = true; };
+    const answered = () => { waiting.hidden = true; };
     const writer = typewriter(body);
     const ids = { conversation: bubble.dataset.conversationId || null, message: null };
     const addTrail = (label) => {
@@ -419,33 +399,30 @@
       trail.hidden = false;
     };
     const attachments = staged.map(({ name, media_type, data_b64 }) => ({ name, media_type, data_b64 }));
-    // A spoken turn names its own agent (voice.js sets it from the server's
-    // transcript answer); this turn uses it, the next typed one does not.
-    const composer = chatComposer();
-    const agent = composer?.dataset.agent;
-    if (composer) delete composer.dataset.agent;
     controller = new AbortController();
     setStreaming(true);
-    document.getElementById('chat-empty')?.remove();
+    thread().querySelector('#chat-empty')?.remove();
     follow(true);
     let failed = null;
     try {
-      const resp = await fetch(stream, {
+      // Who the turn is for and what it is about are the server's to say
+      // (the mount's bind): the body carries only the turn.
+      const resp = await fetch(`${path}/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          ...defaults,
-          ...(agent && { agent_slug: agent }),
           message: bubble.dataset.text,
           conversation_id: ids.conversation,
           attachments,
+          page: chatPage(), // what it declares is the mount's to say
         }),
       });
       if (!resp.ok || !resp.body) throw new Error(`bad response ${resp.status}`);
       for await (const { event, data } of frames(resp.body)) {
         if (event === 'waiting') {
-          stillWaiting(data.seconds ?? 0, data.reason);
+          waiting.textContent = data.label;
+          waiting.hidden = false;
         } else if (event === 'chunk') {
           answered();
           busy.hidden = true;
@@ -462,28 +439,29 @@
           writer.reset();
           answered();
           busy.hidden = false;
+        } else if (event === 'page') {
+          pageAction(data);
         } else if (event === 'final') {
           ids.conversation = data.conversation_id || ids.conversation;
           ids.message = data.message_id;
         } else if (event === 'error') {
-          failed = data.detail || data.error || WENT_WRONG;
+          failed = data.detail || data.error || 'Something went wrong answering that.';
         }
       }
       await writer.drain();
     } catch (e) {
       writer.flush();
-      failed = e.name === 'AbortError' ? null : WENT_WRONG;
+      failed = e.name === 'AbortError' ? null : 'Something went wrong answering that.';
     } finally {
       controller = null;
-      answered();
       busy.hidden = true;
       setStreaming(false);
       announce('chat:end');
       setConversation(ids.conversation);
     }
     if (!failed && attachments.length) {
-      // Sent: the bytes rode this turn. A failed turn keeps them staged
-      // so a retry does not lose its images.
+      // Sent: the bytes rode this turn. A failed turn keeps them staged so
+      // a retry does not lose its images.
       for (const f of staged) URL.revokeObjectURL(f.url);
       staged = [];
       drawChips();
@@ -494,43 +472,57 @@
       p.textContent = failed;
       bubble.appendChild(p);
     } else if (ids.message && ids.conversation) {
-      htmx.ajax('GET', `${urls.messages}/${ids.conversation}/${ids.message}`, { target: bubble, swap: 'outerHTML' });
+      htmx.ajax('GET', `${path}/messages/${ids.conversation}/${ids.message}`, { target: bubble, swap: 'outerHTML' });
     }
     delete bubble.dataset.stream;
     follow();
   }
 
   // A streaming bubble the composer's post just appended starts its turn;
-  // any other swap into the thread (a resumed or loaded conversation)
-  // lands at its newest message.
+  // any other swap into the thread (a loaded conversation) lands at its
+  // newest message.
   document.body.addEventListener('htmx:afterSwap', (event) => {
-    if (event.detail.target !== chatThread()) return;
+    if (event.detail.target?.id !== 'chat-thread') return;
     watchGrowth();
-    const bubble = chatThread().querySelector('[data-stream]');
+    const bubble = thread().querySelector('[data-stream]');
     if (bubble && !controller) run(bubble);
     else follow(true);
   });
   document.body.addEventListener('htmx:load', (event) => {
     const elt = event.detail.elt;
-    if (!elt.contains?.(chatThread())) return;
+    if (!(elt.querySelector?.('#chat-thread') || elt.id === 'chat-thread')) return;
     watchGrowth();
     follow(true);
   });
 
-  // The Chat page arrives WITH the document rather than through a swap,
-  // so the cold path has to arm itself; the drawer's surface comes
-  // through htmx above. And `load` is the honest moment to land at the
-  // bottom: everything the thread carries has finished taking up room by
-  // then. Not forced - a reader who scrolled up while it loaded meant it.
+  // The Chat section can arrive WITH the document rather than through a
+  // swap, so the cold path arms itself; `load` is when everything the
+  // thread carries has finished taking up room.
   const arm = () => {
-    if (!chatThread()) return;
+    if (!thread()) return;
     watchGrowth();
     follow(true);
   };
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', arm);
-  } else {
-    arm();
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', arm);
+  else arm();
   window.addEventListener('load', () => follow());
+
+  // --- The drawer (components/chat_drawer.html) ---------------------------
+  // The AI page's Chat section IS the surface, so while it shows the drawer
+  // empties and its button steps aside: one surface per document.
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('chatDrawer', (path) => ({
+      open: false,
+      onChat: false,
+      init() { this.settled(); },
+      settled() {
+        this.onChat = !!document.querySelector('#app-content #chat');
+        if (this.onChat) { this.open = false; this.$refs.body.innerHTML = ''; }
+      },
+      show() {
+        this.open = true;
+        if (!this.$refs.body.children.length) htmx.ajax('GET', `${path}/drawer`, { target: '#chat-drawer-body', swap: 'innerHTML' });
+      },
+    }));
+  });
 })();

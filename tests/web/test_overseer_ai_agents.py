@@ -1,5 +1,5 @@
 """The Overseer AI page's Agents and Memory sections: the agent registry
-(each agent's definition, edited in the drawer), memory modules (edited,
+(each agent's definition, edited in the drawer), context modules (edited,
 with a preview of what they render), and the facts saved about a user
 (corrected and forgotten). Every write goes through the registry's own
 functions on the request's session."""
@@ -20,9 +20,12 @@ from app.components.web_frontend import overseer_ai_agents  # noqa: E402
 from app.components.web_frontend.routes.partials import (  # noqa: E402
     overseer_ai as partials,
 )
-from app.services.system.models import ComponentStatus  # noqa: E402
+from app.services.ai.domains.chat.context_modules import (  # noqa: E402
+    serialize_context_module,
+)
+from app.services.ai.models.agents import ContextModule  # noqa: E402
 from tests.web.dom import one, select, text, triggers  # noqa: E402
-from tests.web.overseer import sign_in, status_with  # noqa: E402
+from tests.web.overseer import AI, sign_in, status_with  # noqa: E402
 
 PAGE = "/overseer/services/ai"
 PARTIALS = "/partials/overseer/ai"
@@ -37,8 +40,9 @@ AGENT: dict[str, Any] = {
     "system_prompt": "You are careful with money.",
     "is_active": True,
     "code_mode": False,
+    "extends": "assistant",
     "tools": ["save_memory", "search_transactions"],
-    "memory_modules": ["user_facts"],
+    "context_modules": ["user_facts"],
     "knowledge_base_ids": [],
 }
 
@@ -59,8 +63,7 @@ def client(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         ]
 
     monkeypatch.setattr(overseer_ai_agents, "agent_rows", agents)
-    ai = ComponentStatus(name="ai", message="AI", metadata={"engine": "pydantic-ai"})
-    sign_in(app, monkeypatch, status_with(services=[ai]))
+    sign_in(app, monkeypatch, status_with(services=[AI]))
     return TestClient(app)
 
 
@@ -97,7 +100,9 @@ def test_the_drawer_edits_the_definition(
     assert one(form, "input[name=name]").get("value") == "Illiana"
     assert "careful with money" in text(one(form, "textarea[name=system_prompt]"))
     assert one(form, "input[name=is_active]").get("checked") is not None
-    assert "search_transactions" in text(one(html, "#ai-agent-grants"))
+    grants = text(one(html, "#ai-agent-grants"))
+    assert "search_transactions" in grants
+    assert "Extends" in grants and "assistant" in grants
     assert client.get(f"{PARTIALS}/agents/nobody/drawer").status_code == 404
 
 
@@ -123,7 +128,7 @@ def test_the_model_is_picked_from_the_models_this_install_can_call(
 ) -> None:
     """Grouped by vendor, blank for the active model; a model the catalog no
     longer lists stays chosen, so saving does not quietly drop it."""
-    from app.components.web_frontend.routes import chat_models
+    from app.components.web_frontend import chat_models
 
     async def one_agent(db: Any, slug: str) -> dict[str, Any] | None:
         return AGENT | {"model_id": model_id}
@@ -152,7 +157,7 @@ async def test_the_model_list_is_read_after_the_agent_is(
     its own request, and the drawer hangs, then comes up empty."""
     from sqlmodel import text as sql
 
-    from app.components.web_frontend.routes import chat_models
+    from app.components.web_frontend import chat_models
 
     async def read_agent(db: Any, slug: str) -> dict[str, Any] | None:
         await db.exec(sql("SELECT 1"))
@@ -200,6 +205,25 @@ def test_saving_an_agent_sends_only_its_fields(
     assert triggers(response)["toast"]["tone"] == "ok"
 
 
+def test_saving_from_the_chat_stays_in_the_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opened from a reply, Save keeps the drawer and the thread where they
+    are, instead of navigating to the Agents page."""
+
+    async def update(db: Any, slug: str, changes: dict[str, Any]) -> Any:
+        return SimpleNamespace(name="Illiana")
+
+    monkeypatch.setattr(partials, "update_agent", update)
+    response = client.post(
+        f"{PARTIALS}/agents/illiana", data={"name": "Illiana", "stay": "1"}
+    )
+    assert response.status_code == 200
+    assert "HX-Location" not in response.headers
+    assert "dialog:close" not in response.headers.get("HX-Trigger-After-Settle", "")
+    assert "Saved Illiana" in triggers(response)["toast"]["text"]
+
+
 def test_a_refused_agent_change_is_the_toast(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -223,20 +247,21 @@ def test_a_bad_number_is_refused_before_the_registry(client: TestClient) -> None
     assert triggers(response)["toast"]["tone"] == "error"
 
 
-MODULE: dict[str, Any] = {
-    "slug": "user_facts",
-    "name": "User facts",
-    "description": "What the user told it",
-    "category": "memory",
-    "prompt_content": None,
-    "fetch_function": "fetch_user_facts",
-    "context_key": "facts",
-    "supports_days_back": False,
-    "default_days_back": None,
-    "priority": 10,
-    "token_estimate": 200,
-    "is_active": True,
-}
+def _module_row(**fields: Any) -> dict[str, Any]:
+    """A module row as the Memory tab is handed it: by the one serializer."""
+    return serialize_context_module(ContextModule(**fields))
+
+
+MODULE = _module_row(
+    slug="user_facts",
+    name="User facts",
+    description="What the user told it",
+    category="memory",
+    fetch_function="fetch_user_facts",
+    context_key="facts",
+    priority=10,
+    token_estimate=200,
+)
 FACTS = [
     {
         "index": 0,
@@ -258,18 +283,23 @@ def memory(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     async def modules(db: Any) -> list[dict[str, Any]]:
         return [
             MODULE,
-            MODULE
-            | {
-                "slug": "persona",
-                "name": "Persona",
-                "fetch_function": None,
-                "prompt_content": "Be kind.",
-                "is_active": False,
-            },
+            _module_row(
+                slug="persona",
+                name="Persona",
+                description="What the user told it",
+                category="memory",
+                prompt_content="Be kind.",
+                context_key="facts",
+                priority=10,
+                token_estimate=200,
+                is_active=False,
+            ),
         ]
 
-    async def facts(db: Any) -> list[dict[str, Any]]:
-        return FACTS
+    from app.services.ai.domains.chat.user_memory import UserFact
+
+    async def facts(db: Any) -> list[UserFact]:
+        return [UserFact(**f) for f in FACTS]
 
     monkeypatch.setattr(overseer_ai_agents, "module_rows", modules)
     monkeypatch.setattr(overseer_ai_agents, "fact_rows", facts)

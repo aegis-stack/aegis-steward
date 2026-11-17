@@ -138,7 +138,7 @@ class TestUpdateAgent:
 
 
 class TestPromptHistory:
-    """#355: the row is the prompt, and every change to it is recorded."""
+    """The row is the prompt, and every change to it is recorded."""
 
     async def test_a_new_prompt_is_recorded_with_why(
         self, session: AsyncSession
@@ -183,7 +183,7 @@ class TestSerializeAgent:
         await _add_agent(
             session,
             "assistant",
-            memory_modules=["diet"],
+            context_modules=["diet"],
             knowledge_base_ids=["kb-food"],
         )
 
@@ -194,9 +194,10 @@ class TestSerializeAgent:
         assert payload["slug"] == "assistant"
         assert payload["is_active"] is True
         assert payload["tools"] == []
-        assert payload["memory_modules"] == ["diet"]
+        assert payload["context_modules"] == ["diet"]
         assert payload["knowledge_base_ids"] == ["kb-food"]
         assert payload["system_prompt"] == "You are helpful."
+        assert payload["extends"] is None
 
 
 class TestCodeModeField:

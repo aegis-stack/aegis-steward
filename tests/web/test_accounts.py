@@ -195,6 +195,7 @@ class TestRegister:
     ) -> None:
         none(client.get("/accounts/all").text, "#manage-menu")
 
+    @pytest.mark.real_clock  # seeded against the real clock
     def test_one_header_on_all_three_faces(
         self, client: TestClient, ledger: Ledger
     ) -> None:
@@ -301,6 +302,7 @@ async def quiet_link(
     return account.id
 
 
+@pytest.mark.real_clock  # seeded against the real clock
 class TestALinkSaysWhenItLastBroughtSomething:
     """A sync that runs and brings nothing is not fresh (#311): a linked
     account says when its last transaction arrived beside when it last

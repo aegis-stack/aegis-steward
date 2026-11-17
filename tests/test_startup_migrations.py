@@ -15,7 +15,6 @@ past.
 """
 
 from pathlib import Path
-import re
 
 import pytest
 
@@ -175,17 +174,24 @@ class TestAdoptingAPersistedDatabase:
         which is how the lag starts. Guarded here as well as in
         test_migration_signatures so the startup path owns the rule it
         depends on."""
+        from alembic.script import ScriptDirectory
         from app.components.backend.startup.migration_signatures import (
             SERVICE_MIGRATION_SIGNATURES,
         )
+        from app.components.backend.startup.migrations import (
+            _alembic_config,
+            _service_of,
+            _signature_for_revision,
+        )
 
-        versions = Path("alembic/versions")
-        named = {
-            match.group(1)
-            for path in versions.glob("*.py")
-            if (match := re.match(r"\d+_(.+)\.py$", path.name))
-        }
-        unsigned = sorted(named - set(SERVICE_MIGRATION_SIGNATURES))
+        # The hook's own question: a generated revision carries its
+        # signature, an older one is named in the legacy table.
+        script = ScriptDirectory.from_config(_alembic_config("sqlite://"))
+        unsigned = sorted(
+            _service_of(revision)
+            for revision in script.walk_revisions()
+            if _signature_for_revision(revision, SERVICE_MIGRATION_SIGNATURES) is None
+        )
         assert not unsigned, (
             "these migrations cannot prove they ran, so a persisted "
             f"database cannot adopt them: {unsigned}"

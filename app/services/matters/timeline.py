@@ -27,7 +27,7 @@ from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.schema import known, require_one_of
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.change_queue import ChangeDisplayRow
 from app.services.matters.models import MATTER_EVENT_KINDS, MatterEvent
 
 # Ties are broken by what must have happened first: a matter is opened

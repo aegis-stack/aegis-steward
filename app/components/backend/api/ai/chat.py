@@ -1,0 +1,255 @@
+"""Talking to the model, and reading a conversation back."""
+
+from typing import Any
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+)
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from app.components.backend.api.ai.service import ai_service, lifted_turn
+from app.components.backend.api.ai.sse import turn_stream
+from app.core.log import logger
+from app.services.ai.service import (
+    MAX_ATTACHMENTS,
+    AIServiceError,
+    ChatAttachment,
+    ConversationError,
+    ProviderError,
+)
+from app.services.shared.deps import get_optional_owner_user_id
+
+router = APIRouter()
+
+
+class ChatTurn(BaseModel):
+    """What a turn carries from the client: the message, the conversation
+    it continues, and its images. A chat surface's stream takes only this;
+    who it is for comes from the mount."""
+
+    message: str
+    conversation_id: str | None = None
+    # Files riding this turn (screenshots, receipts, a PDF where one is
+    # read) - generic across every agent and surface, as many as one turn
+    # takes; see domains/chat/attachments.py.
+    attachments: list[ChatAttachment] = Field(
+        default_factory=list, max_length=MAX_ATTACHMENTS
+    )
+
+
+class ChatRequest(ChatTurn):
+    """Request model for chat messages."""
+
+    user_id: str = "api-user"
+    agent_slug: str | None = None
+    surface: str | None = None
+
+
+class ChatResponse(BaseModel):
+    """Response model for chat messages."""
+
+    message_id: str
+    content: str
+    conversation_id: str
+    response_time_ms: float | None = None
+
+
+class ConversationSummary(BaseModel):
+    """Summary model for conversation listing."""
+
+    id: str
+    title: str | None
+    message_count: int
+    last_activity: str
+    provider: str
+    model: str
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(
+    request: ChatRequest,
+    owner_user_id: int | None = Depends(get_optional_owner_user_id),
+) -> ChatResponse:
+    """
+    Send a chat message and get AI response.
+
+    Args:
+        request: Chat request with message and optional conversation ID
+
+    Returns:
+        ChatResponse: AI response with conversation details
+
+    Raises:
+        HTTPException: If chat processing fails
+    """
+    try:
+        response_message = await ai_service.chat(
+            message=request.message,
+            conversation_id=request.conversation_id,
+            user_id=request.user_id,
+            owner_user_id=owner_user_id,
+            agent_slug=request.agent_slug,
+            surface=request.surface,
+            attachments=request.attachments,
+            lifted=await lifted_turn(
+                request.message, request.attachments, request.user_id, owner_user_id
+            ),
+        )
+
+        # Get updated conversation for metadata
+        conversation_id = response_message.metadata.get("conversation_id")
+        conversation = (
+            await ai_service.get_conversation(conversation_id)
+            if conversation_id
+            else None
+        )
+        response_time = None
+        if conversation and "last_response_time_ms" in conversation.metadata:
+            response_time = conversation.metadata["last_response_time_ms"]
+
+        return ChatResponse(
+            message_id=response_message.id,
+            content=response_message.content,
+            conversation_id=conversation.id if conversation else "unknown",
+            response_time_ms=response_time,
+        )
+
+    # Subclasses before AIServiceError, or their branches never run. A
+    # provider's or the service's text is logged, not returned: it can
+    # carry keys or URLs. A conversation error is ours and says what the
+    # caller got wrong.
+    except ProviderError:
+        logger.exception("Chat provider error")
+        raise HTTPException(status_code=502, detail="AI provider error") from None
+    except ConversationError as e:
+        raise HTTPException(status_code=400, detail=f"Conversation error: {e}")
+    except AIServiceError:
+        logger.exception("Chat service error")
+        raise HTTPException(status_code=503, detail="AI service error") from None
+    except Exception:
+        # Logged, not returned: the text can carry paths, keys or SQL.
+        logger.exception("Chat request failed")
+        raise HTTPException(status_code=500, detail="Unexpected error") from None
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    owner_user_id: int | None = Depends(get_optional_owner_user_id),
+) -> StreamingResponse:
+    """Stream a chat message as Server-Sent Events (``sse.turn_stream``)."""
+    lifted = await lifted_turn(
+        request.message, request.attachments, request.user_id, owner_user_id
+    )
+    return turn_stream(
+        ai_service.stream_chat(
+            message=request.message,
+            conversation_id=request.conversation_id,
+            user_id=request.user_id,
+            owner_user_id=owner_user_id,
+            stream_delta=True,
+            agent_slug=request.agent_slug,
+            surface=request.surface,
+            attachments=request.attachments,
+            lifted=lifted,
+        )
+    )
+
+
+@router.get("/conversations", response_model=list[ConversationSummary])
+async def list_conversations(
+    user_id: str = "api-user", surface: str | None = None, limit: int = 50
+) -> list[ConversationSummary]:
+    """
+    List conversations for a user, optionally scoped to one chat surface.
+
+    Args:
+        user_id: User identifier
+        surface: Originating surface to filter by (e.g. "finance")
+        limit: Maximum number of conversations to return
+
+    Returns:
+        List of conversation summaries
+    """
+    try:
+        conversations = (await ai_service.list_conversations(user_id, surface=surface))[
+            :limit
+        ]
+
+        return [
+            ConversationSummary(
+                id=conv.id,
+                title=conv.title,
+                message_count=conv.get_message_count(),
+                last_activity=conv.updated_at.isoformat(),
+                provider=conv.provider.value,
+                model=conv.model,
+            )
+            for conv in conversations
+        ]
+
+    except Exception:
+        logger.exception("Listing conversations failed")
+        raise HTTPException(
+            status_code=500, detail="Failed to list conversations"
+        ) from None
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str, user_id: str = "api-user"
+) -> dict[str, Any]:
+    """
+    Get a specific conversation with full message history.
+
+    Args:
+        conversation_id: The conversation identifier
+        user_id: User identifier for access control
+
+    Returns:
+        Full conversation details with messages
+
+    Raises:
+        HTTPException: If conversation not found or access denied
+    """
+    try:
+        conversation = await ai_service.get_conversation(conversation_id)
+
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        # Check access (basic user matching)
+        if conversation.metadata.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        return {
+            "id": conversation.id,
+            "title": conversation.title,
+            "provider": conversation.provider.value,
+            "model": conversation.model,
+            "created_at": conversation.created_at.isoformat(),
+            "updated_at": conversation.updated_at.isoformat(),
+            "message_count": conversation.get_message_count(),
+            "messages": [
+                {
+                    "id": msg.id,
+                    "role": msg.role.value,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp.isoformat(),
+                    "metadata": msg.metadata,
+                }
+                for msg in conversation.messages
+            ],
+            "metadata": conversation.metadata,
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Reading a conversation failed")
+        raise HTTPException(
+            status_code=500, detail="Failed to get conversation"
+        ) from None

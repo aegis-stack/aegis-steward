@@ -53,7 +53,7 @@ async def test_a_turn_through_chat_keeps_what_she_did(
     # does: the agent itself (prompt, tools, grants) is built the real way.
     monkeypatch.setattr(settings, "AI_PROVIDER", "ollama")
     monkeypatch.setattr(
-        "app.services.ai.domains.llm.agents._ollama_model",
+        "app.services.ai.domains.llm.agents._local_model",
         lambda config, settings: FunctionModel(stream_function=_stream),
     )
     reply = await AIService(settings).chat(
@@ -88,7 +88,7 @@ async def test_a_follow_up_that_names_no_agent_speaks_as_the_conversations(
 
     monkeypatch.setattr(settings, "AI_PROVIDER", "ollama")
     monkeypatch.setattr(
-        "app.services.ai.domains.llm.agents._ollama_model",
+        "app.services.ai.domains.llm.agents._local_model",
         lambda config, settings: FunctionModel(stream_function=_stream),
     )
     service = AIService(settings)

@@ -9,14 +9,15 @@
 
 const RAMP = 11; // --aegis-chart-1 .. -11 in tailwind.config.js; cycles past that
 
-// Colors come from the active theme's variables, read at mount time so a
-// theme switch repaints charts in the new palette. DaisyUI stores its
-// colors as oklch triplets (--p, --n, ...); the chart ramp is literal hex,
-// its alpha a byte on the end.
+// Colors come from the active theme's tokens, read at mount time so a
+// theme switch repaints charts in the new palette.
+// A chart token is a hex colour (its alpha a byte on the end); the rest
+// are oklch channels.
 function token(name, alpha) {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  if (!name.startsWith('--aegis-chart-')) return `oklch(${value} / ${alpha ?? 1})`;
-  return alpha === undefined ? value : `${value}${Math.round(alpha * 255).toString(16).padStart(2, '0')}`;
+  if (alpha === undefined) return name.startsWith('--aegis-chart-') ? value : `oklch(${value})`;
+  if (!name.startsWith('--aegis-chart-')) return `oklch(${value} / ${alpha})`;
+  return `${value}${Math.round(alpha * 255).toString(16).padStart(2, '0')}`;
 }
 function rampColor(i, alpha) {
   return token(`--aegis-chart-${(i % RAMP) + 1}`, alpha);
@@ -219,14 +220,12 @@ function datasets(kind, data) {
       fill: single && !banded,
       tension: 0.3,
       pointRadius: 0,
-      // A time chart answers from anywhere over it (see the interaction
-      // option in build); the point at the hovered time grows to show it.
-      ...(timed(data) ? {
-        pointHoverRadius: 5,
-        pointHoverBorderWidth: 2,
-        pointHoverBackgroundColor: token('--b2'),
-        pointHoverBorderColor: line(i),
-      } : {}),
+      // Hovering anywhere over the chart lands on the nearest time (see the
+      // interaction option in build); the point there grows to show it.
+      pointHoverRadius: 5,
+      pointHoverBorderWidth: 2,
+      pointHoverBackgroundColor: token('--b2'),
+      pointHoverBorderColor: line(i),
     };
   }).map((set, i) => stacked(data, i, set, rampColor(place(i), 0.35))).concat(kind === 'line' ? guides(data) : []);
 }
@@ -303,6 +302,23 @@ function markers(data, series, color) {
   };
 }
 
+// The lines a reader turned off or on in a chart's legend, by chart, kept
+// across its redraws (a range picked, the page loaded again); a ``dashed``
+// line (the host's in use) starts off. Storage that refuses keeps defaults.
+const HIDDEN = 'chart-hidden';
+function hiddenLines() {
+  try { return JSON.parse(localStorage.getItem(HIDDEN)) || {}; } catch (_) { return {}; }
+}
+function remember(id, label, hidden) {
+  const all = hiddenLines();
+  all[id] = { ...all[id], [label]: hidden };
+  try { localStorage.setItem(HIDDEN, JSON.stringify(all)); } catch (_) { /* Defaults next time. */ }
+}
+function withHidden(id, sets, series) {
+  const kept = hiddenLines()[id] || {};
+  return sets.map((set, i) => ({ ...set, hidden: kept[set.label] ?? Boolean(series[i]?.dashed) }));
+}
+
 function drilldownHandler(canvas, data) {
   const base = canvas.dataset.drilldown;
   if (!base || !data.slices) return undefined;
@@ -356,25 +372,38 @@ const eventMarks = {
   },
 };
 
-// A legend entry, unless it names a guide line. A doughnut's entries are
-// its slices, which carry ``index`` and no ``datasetIndex`` (issue 544).
-function legendShows(item, data) {
-  const set = data.datasets[item.datasetIndex];
-  return !set?.guide && !set?.band;
+
+// A chart's lines, and whether ``series`` are the same ones in the same
+// order: else the server sent the chart whole (its lines renamed or added,
+// overseer_container.events), and it is drawn from what was sent.
+function linesOf(chart) {
+  return chart.data.datasets.filter((dataset) => !dataset.guide);
+}
+function sameLines(lines, series) {
+  const names = (list) => list.map((line) => line.label).join('\n');
+  return names(lines) === names(series);
 }
 
-// A doughnut's legend beside it, where there is room: on a phone it
-// squeezed the ring to nothing, so there it goes below.
-function legendPosition(kind, width) {
-  if (kind !== 'doughnut') return 'top';
-  return width < 480 ? 'bottom' : 'right';
+// A live chart drawn again (the theme changed): its data script holds only
+// the newest tick's points (series.since), so each line is drawn from what
+// the chart gathered. A chart sent whole (its lines renamed), or none drawn
+// yet, reads the script.
+function gathered(data, chart) {
+  if (!chart || !timed(data) || !sameLines(linesOf(chart), data.series)) return data;
+  const lines = new Map(linesOf(chart)
+    .map((set) => [set.label, new Map(set.data.map((point) => [point.x, point.y]))]));
+  const labels = [...new Set([...lines.values()].flatMap((line) => [...line.keys()]))].sort((a, b) => a - b);
+  const series = data.series.map((line) => (
+    { ...line, values: labels.map((x) => lines.get(line.label).get(x) ?? null) }));
+  return { ...data, labels, series };
 }
 
 function build(Chart, canvas) {
-  const data = JSON.parse(document.getElementById(canvas.dataset.chartData).textContent);
   const kind = canvas.dataset.chart;
-  const format = formatOf(data);
+  const id = canvas.dataset.chartData;
   const existing = Chart.getChart(canvas);
+  const data = gathered(JSON.parse(document.getElementById(id).textContent), existing);
+  const format = formatOf(data);
   if (existing) existing.destroy();
   showEmpty(canvas, data);
   const muted = token('--n');
@@ -408,7 +437,7 @@ function build(Chart, canvas) {
     plugins: data.events ? [eventMarks] : [],
     data: {
       labels: timed(data) ? undefined : data.labels,
-      datasets: datasets(kind, data),
+      datasets: withHidden(id, datasets(kind, data), data.series),
       events: data.events,
     },
     options: {
@@ -416,46 +445,71 @@ function build(Chart, canvas) {
       maintainAspectRatio: false,
       // A stack's bands redraw whole on every frame: hovering animates none.
       animation: data.style === 'stacked' ? false : undefined,
-      // Hovering anywhere over the line answers, rather than only
-      // a direct hit on a point - a line of a few hundred points
-      // has none big enough to aim at.
-      interaction: { mode: 'index', intersect: false },
+      // Every value at the hovered spot, from anywhere over the chart, not
+      // only on a line's exact pixel.
+      interaction: kind === 'doughnut' ? { mode: 'nearest' } : { mode: 'index', intersect: false },
+      indexAxis: data.horizontal ? 'y' : 'x',
       plugins: {
         legend: {
           // A lone line's card title already names it; two or more
           // (or one read against another) need a legend.
           display:
+            !data.horizontal &&
             (kind !== 'line' || plainLines(data).length > 1 || data.series.some((s) => s.compare)) &&
             !data.series[0]?.tones,
           position: legendPosition(kind, canvas.clientWidth),
           labels: { color: muted, boxWidth: 10, filter: legendShows },
+          // A doughnut's legend toggles its slices, by Chart.js's own rule.
+          ...(kind === 'doughnut' ? {} : {
+            onClick: (event, item, legend) => {
+              Chart.defaults.plugins.legend.onClick.call(legend, event, item, legend);
+              remember(id, item.text, !legend.chart.isDatasetVisible(item.datasetIndex));
+            },
+          }),
         },
         tooltip: {
-          // A time chart's tooltip is drawn in the theme, its title the time.
-          ...(timed(data) ? {
-            backgroundColor: token('--b2'),
-            borderColor: token('--b3'),
-            borderWidth: 1,
-            titleColor: muted,
-            bodyColor: token('--bc'),
-            bodyFont: { weight: '600' },
-            padding: 10,
-            boxPadding: 4,
-          } : {}),
+          backgroundColor: token('--b2'),
+          borderColor: token('--b3'),
+          borderWidth: 1,
+          titleColor: muted,
+          bodyColor: token('--bc'),
+          bodyFont: { weight: '600' },
+          padding: 10,
+          boxPadding: 4,
           filter: (item) => !item.dataset.guide,
           callbacks: {
-            ...(timed(data) ? { title: (items) => (items.length ? clock(items[0].parsed.x) : '') } : {}),
+            title: (items) => (items.length && timed(data) ? clock(items[0].parsed.x) : items[0]?.label ?? ''),
             label: (ctx) => {
-              const value = kind === 'doughnut' ? ctx.parsed : ctx.parsed.y;
+              const value = kind === 'doughnut' ? ctx.parsed : ctx.parsed[data.horizontal ? 'x' : 'y'];
               return `${ctx.dataset.label ? `${ctx.dataset.label}: ` : ''}${formatValue(value, format)}`;
             },
           },
         },
       },
-      scales: kind === 'doughnut' ? {} : axes,
+      scales: kind === 'doughnut' ? {} : oriented(data, axes),
       onClick: drilldownHandler(canvas, data),
     },
   });
+}
+
+// ``"horizontal": true`` (a ranked list, a service's load cost): a bar a
+// row, its label on the left, the values' axis along the bottom.
+function oriented(data, axes) {
+  return data.horizontal ? { x: axes.y, y: axes.x } : axes;
+}
+
+// A legend entry, unless it names a guide line. A doughnut's entries are
+// its slices, which carry ``index`` and no ``datasetIndex`` (issue 544).
+function legendShows(item, data) {
+  const set = data.datasets[item.datasetIndex];
+  return !set?.guide && !set?.band;
+}
+
+// A doughnut's legend beside it, where there is room: on a phone it
+// squeezes the ring to nothing, so there it goes below.
+function legendPosition(kind, width) {
+  if (kind !== 'doughnut') return 'top';
+  return width < 480 ? 'bottom' : 'right';
 }
 
 // A time series moving on: the points older than the new window leave from
@@ -485,12 +539,9 @@ function refresh(Chart, script) {
   if (!chart) return false;
   let data = JSON.parse(script.textContent);
   showEmpty(canvas, data);
-  const lines = chart.data.datasets.filter((dataset) => !dataset.guide);
-  // Its lines renamed or added: the server sent it whole (its own rule in
-  // overseer_container.events), so draw it again.
-  const names = (list) => list.map((line) => line.label).join('\n');
-  if (names(lines) !== names(data.series)) {
-    chart.data.datasets = datasets(canvas.dataset.chart, data);
+  const lines = linesOf(chart);
+  if (!sameLines(lines, data.series)) {
+    chart.data.datasets = withHidden(script.id, datasets(canvas.dataset.chart, data), data.series);
   } else if (timed(data)) {
     // A tick sends only the newest points (series.since): each line keeps
     // the rest back to the window's start, and a byte axis steps by
@@ -548,4 +599,4 @@ if (typeof document !== 'undefined') {
   document.addEventListener('theme-changed', () => mount(document));
 }
 
-if (typeof module !== 'undefined') module.exports = { datasets, formatValue, fromZero, legendPosition, legendShows, refresh, timeTicks, byteStep };
+if (typeof module !== 'undefined') module.exports = { datasets, formatValue, refresh, timeTicks, byteStep, legendShows, legendPosition, fromZero, remember, withHidden, oriented, gathered };

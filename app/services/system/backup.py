@@ -23,6 +23,8 @@ BACKUP_FILE_PREFIX = "database_backup_"
 BACKUP_FILE_SUFFIX = ".db"
 BACKUP_FILE_PATTERNS = (f"{BACKUP_FILE_PREFIX}*{BACKUP_FILE_SUFFIX}",)
 
+# Kept for callers that imported the single-pattern name.
+BACKUP_FILE_PATTERN = BACKUP_FILE_PATTERNS[0]
 # Object storage snapshots, beside the database copies. Not in
 # BACKUP_FILE_PATTERNS: those are what a restore lists, and a tarball is
 # not a database.

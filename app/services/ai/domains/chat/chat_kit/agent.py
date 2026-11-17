@@ -21,11 +21,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import inspect
+import json
 import time
 from typing import Any, Generic, TypeVar
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -39,18 +42,25 @@ from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
+from app.core.chat_transcript import as_markers, card_component, trail_label
 from app.core.log import logger
 from app.services.ai.domains.chat.user_memory import memory_user
-from app.services.ai.domains.spend.recording import extract_usage, record_usage
+from app.services.ai.domains.spend.recording import (
+    chat_action,
+    extract_usage,
+    record_usage,
+)
 
 from .context import ContextProvider, compose_context, gather_context
 from .models import (
+    CardFrame,
     ChatMessage,
     ChatScope,
     DeltaFrame,
     DoneFrame,
     ErrorFrame,
     StreamFrame,
+    ToolFrame,
 )
 
 
@@ -89,7 +99,7 @@ class ToolChatAgent(Generic[DepsT]):
         context_providers: Sequence[ContextProvider[DepsT]] = (),
         model_settings: ModelSettings | None = None,
         tool_calls_limit: int = 4,
-        action: str = "chat:generic",
+        action: str = chat_action("generic"),
         recorder: Callable[..., float | Awaitable[float]] = record_usage,
         capabilities: Sequence[Any] = (),
         name: str | None = None,
@@ -152,19 +162,24 @@ class ToolChatAgent(Generic[DepsT]):
         model_history = to_model_history(history)
 
         answer_parts: list[str] = []
-        started = time.perf_counter()
         try:
             # Event-based streaming rather than ``run_stream``: the event
             # stream crosses tool boundaries, so a model that narrates
             # before calling a tool keeps streaming after the tool returns
             # instead of the early text ending the turn.
             result: Any = None
-            # Bind the turn's user so a save_memory call mid-stream knows
-            # whose fact it is; the scope is the only identity a turn has.
+            # Wall clock for the whole turn, tool pauses included: what a
+            # person waited, not what the model spent thinking.
+            started = time.perf_counter()
+            # Bind the turn's identity so a save_memory call mid-stream
+            # knows whose fact it is and the ledger groups its tool calls;
+            # the kit is generic over a deps type it never inspects, so
+            # there is nowhere on deps to hang it.
             with memory_user(
                 scope.user_id,
+                owner_user_id=scope.owner_user_id,
                 agent_slug=getattr(self._agent, "name", None),
-                conversation_id=getattr(scope, "conversation_id", None),
+                conversation_id=scope.conversation_id,
             ):
                 async with self._agent.run_stream_events(
                     message,
@@ -185,6 +200,12 @@ class ToolChatAgent(Generic[DepsT]):
                             delta = event.delta.content_delta
                         elif isinstance(event, AgentRunResultEvent):
                             result = event.result
+                        elif isinstance(event, FunctionToolCallEvent):
+                            yield _tool_frame(event)
+                        elif isinstance(event, FunctionToolResultEvent):
+                            cards = _card_frame(event)
+                            if cards is not None:
+                                yield cards
                         if delta:
                             answer_parts.append(delta)
                             yield DeltaFrame(delta)
@@ -201,15 +222,14 @@ class ToolChatAgent(Generic[DepsT]):
             return
 
         answer = "".join(answer_parts)
-        duration_ms = max(1, round((time.perf_counter() - started) * 1000))
-        # The ledger write is async (usage_recording); a test's recorder
+        # The ledger write is async (spend.recording); a test's recorder
         # may be a plain function returning the cost.
         cost = self._recorder(
             action=self._action,
             model_name=self._model_name,
             usage=usage,
             user_id=scope.user_id,
-            duration_ms=duration_ms,
+            duration_ms=(time.perf_counter() - started) * 1000,
             tool_calls=tool_calls,
         )
         if inspect.isawaitable(cost):
@@ -217,6 +237,36 @@ class ToolChatAgent(Generic[DepsT]):
         yield DoneFrame(
             answer=answer, usage=usage, cost_usd=cost, tool_calls=tool_calls
         )
+
+
+def _tool_frame(event: FunctionToolCallEvent) -> ToolFrame:
+    """A tool-call event as the frame the UI captions the pause with.
+
+    Arguments arrive as a JSON string or an already-parsed mapping
+    depending on the provider, so both are normalised to the string the
+    shared label builder expects.
+    """
+    part = event.part
+    raw = getattr(part, "args", "")
+    if isinstance(raw, str):
+        args = raw
+    elif raw is None:
+        args = ""
+    else:
+        try:
+            args = json.dumps(raw, default=str)
+        except (TypeError, ValueError):
+            args = str(raw)
+    name = str(getattr(part, "tool_name", "") or "")
+    return ToolFrame(tool=name, args=args, label=trail_label(name, args))
+
+
+def _card_frame(event: FunctionToolResultEvent) -> CardFrame | None:
+    """The approval cards a finished tool call proposed or listed, if any."""
+    part = event.part
+    name = str(getattr(part, "tool_name", "") or "")
+    markers = as_markers(card_component(name, getattr(part, "content", None)))
+    return CardFrame(markers=markers) if markers else None
 
 
 def _count_tool_calls(result: Any) -> int:

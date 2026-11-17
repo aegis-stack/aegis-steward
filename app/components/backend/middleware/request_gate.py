@@ -29,6 +29,7 @@ from starlette.responses import PlainTextResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketClose
 
+from app.components.backend.security.operator_auth import LOOPBACK
 from app.components.backend.startup.finance_webhook_tunnel import (
     PLAID_WEBHOOK_PATH,
     tunnel_metrics_url,
@@ -74,6 +75,11 @@ def _cross_site(conn: HTTPConnection) -> bool:
     site = conn.headers.get("sec-fetch-site")
     if site is not None and site != "same-origin":
         return True
+    # The dashboard's own client, in this process: it asks at loopback and
+    # sends the page's address as its Origin, which the API judges itself
+    # (``refusal_at``). A browser's write always says where it came from.
+    if site is None and conn.client is not None and conn.client.host in LOOPBACK:
+        return False
     origin = conn.headers.get("origin")
     return origin is not None and urlsplit(origin).netloc != conn.headers.get("host")
 

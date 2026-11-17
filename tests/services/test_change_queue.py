@@ -1,0 +1,830 @@
+"""The propose/approve queue as a primitive any service can use.
+
+Nothing here is finance: a change type registered by the test itself is
+proposed, then approved or rejected through the same HTTP surface the
+chat card calls. That is the whole contract a new service relies on.
+"""
+
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager
+from pathlib import Path
+from typing import Any
+
+from fastapi.testclient import TestClient
+import pytest
+from sqlmodel import col, select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.tools import result_data
+from app.services import change_queue
+from app.services.change_queue import ChangeDisplayRow, PendingChange, follow_ups
+from tests._change_queue import (
+    BREAKS_AT_FLUSH,
+    GONE,
+    LetterPayload,
+    executed,
+    note_type,
+)
+
+NOTE = "test.note"
+LETTER = "test.letter"
+
+
+def _letter(**options: Any) -> AbstractContextManager[None]:
+    """A type whose card the reader may edit, registered for the block."""
+    return note_type(LETTER, payload_model=LetterPayload, editable=True, **options)
+
+
+@pytest.fixture(autouse=True)
+def _note() -> Iterator[None]:
+    with note_type(NOTE):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_a_registered_type_proposes_without_executing(
+    async_db_session: AsyncSession,
+) -> None:
+    row = await change_queue.propose(
+        async_db_session,
+        NOTE,
+        {"text": "hello"},
+        owner_user_id=None,
+        proposed_by_agent="helper",
+    )
+
+    assert isinstance(row, PendingChange)
+    assert row.status == "pending"
+    assert executed == []
+    assert NOTE in change_queue.registered_change_types()
+
+
+@pytest.mark.asyncio
+async def test_the_changes_aggregate_counts_each_status_and_type(
+    async_db_session: AsyncSession,
+) -> None:
+    """``change_queue.changes``: cards by status and by type, proposed in
+    the window; never a payload."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.change_queue import aggregates
+
+    rows = [
+        await change_queue.propose(
+            async_db_session, NOTE, {"text": "private"}, owner_user_id=None
+        )
+        for _ in range(3)
+    ]
+    await change_queue.reject_rows(async_db_session, rows[:1])
+    rows[2].created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=60)
+    await async_db_session.commit()
+
+    week = await aggregates.changes(async_db_session, 7)
+    ever = await aggregates.changes(async_db_session, None)
+
+    assert week.by_status == {"pending": 1, "rejected": 1}
+    assert week.by_type == {NOTE: 2}
+    assert ever.by_type == {NOTE: 3}
+    assert "private" not in week.model_dump_json()
+
+
+def test_each_type_carries_its_contract() -> None:
+    """What an agent reads to propose one (#1414): the title, when to use
+    it, and the payload's JSON schema, from the model itself."""
+    contract = change_queue.change_type_contracts()[NOTE]
+
+    assert contract.title == "Write a note"
+    assert contract.description == "A note, for the tests."
+    assert contract.payload_schema["properties"]["text"]["type"] == "string"
+    assert contract.payload_schema["required"] == ["text"]
+
+
+def test_a_services_change_types_module_registers_itself(
+    fake_service: Callable[..., Path],
+) -> None:
+    """A service registers its types in ``app/services/<service>/change_types.py``
+    (#1415): the queue imports it, so nothing edits the queue's own files."""
+    from app.services.change_queue import registry
+
+    fake_service(
+        "demo_service",
+        change_types=(
+            "from app.services.change_queue.registry import ChangeExecutor, register\n"
+            "from tests._change_queue import NotePayload, _describe, _execute\n"
+            "register(ChangeExecutor(change_type='demo.note', title='Demo',"
+            " payload_model=NotePayload, execute=_execute, describe=_describe))\n"
+        ),
+    )
+    try:
+        loaded = registry.load_change_types()
+
+        assert "app.services.demo_service.change_types" in loaded
+        assert "demo.note" in change_queue.registered_change_types()
+    finally:
+        registry._EXECUTORS.pop("demo.note", None)
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_payload_dies_at_the_door(
+    async_db_session: AsyncSession,
+) -> None:
+    with pytest.raises(ValueError, match="invalid test.note payload"):
+        await change_queue.propose(
+            async_db_session, NOTE, {"txt": "typo"}, owner_user_id=None
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_card_whose_world_moved_says_why_and_can_be_rejected(
+    async_db_session: AsyncSession,
+) -> None:
+    """A stored card ``describe`` now refuses renders the reason, and the
+    rest of its group still renders: the pending list, reject and withdraw
+    all read it."""
+    rows = [
+        await change_queue.propose(
+            async_db_session, NOTE, {"text": text}, owner_user_id=None
+        )
+        for text in ("still here", GONE + "the post was deleted")
+    ]
+
+    bodies = await change_queue.describe_changes(async_db_session, rows)
+    rejected = await change_queue.reject_row(async_db_session, rows[1])
+
+    assert bodies[0] == [
+        change_queue.ChangeDisplayRow(label="Note", value="still here")
+    ]
+    assert bodies[1][-1] == change_queue.ChangeDisplayRow(
+        label="No longer applies", value="the post was deleted"
+    )
+    assert rejected.status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_one_failing_approval_leaves_the_others_landed(
+    async_db_session: AsyncSession,
+) -> None:
+    """A row whose write fails at flush is undone alone: the batch's other
+    approvals land, and the failed one stays pending with its error."""
+    rows = [
+        await change_queue.propose(
+            async_db_session, NOTE, {"text": text}, owner_user_id=None
+        )
+        for text in ("first", BREAKS_AT_FLUSH, "last")
+    ]
+    ids = [row.id for row in rows]
+
+    outcome = await change_queue.approve_rows(async_db_session, rows)
+    await async_db_session.commit()
+
+    landed = (
+        await async_db_session.exec(
+            select(PendingChange)
+            .where(col(PendingChange.id).in_(ids))
+            .order_by(col(PendingChange.id))
+        )
+    ).all()
+    assert (outcome.approved, outcome.failed) == (2, 1)
+    assert [row.status for row in landed] == ["approved", "pending", "approved"]
+    assert "error" in landed[1].result
+
+
+@pytest.mark.asyncio
+async def test_a_reader_revises_an_editable_card_before_approving(
+    async_db_session: AsyncSession,
+) -> None:
+    """A card is a proposal: the reader may put their own words on it first
+    (``editable``). The fields named change, the rest stay, the card still
+    waits, and approving runs what it now says."""
+    with _letter():
+        row = await change_queue.propose(
+            async_db_session,
+            LETTER,
+            {"text": "Sweat shop", "to": "the shop"},
+            owner_user_id=None,
+        )
+        revised = await change_queue.revise(
+            async_db_session, row.id, {"text": "Sweet shop"}, owner_user_id=None
+        )
+        assert revised.status == "pending"
+        assert revised.payload == {
+            "text": "Sweet shop",
+            "to": "the shop",
+            "kind": "note",
+        }
+
+        await change_queue.approve_row(async_db_session, revised)
+
+    assert executed == ["Sweet shop"]
+
+
+@pytest.mark.asyncio
+async def test_a_bad_revision_is_refused_and_a_blank_field_cleared(
+    async_db_session: AsyncSession,
+) -> None:
+    """The contract ``propose`` validated against validates the revision, so
+    a revised card is as safe to approve as a fresh one; a bad one dies
+    and leaves the card as it was. A field given blank is cleared."""
+    with _letter():
+        row = await change_queue.propose(
+            async_db_session,
+            LETTER,
+            {"text": "hi", "to": "the shop"},
+            owner_user_id=None,
+        )
+        with pytest.raises(ValueError, match="invalid test.letter payload"):
+            await change_queue.revise_row(async_db_session, row, {"to": "x" * 21})
+        assert row.payload["to"] == "the shop"
+
+        cleared = await change_queue.revise_row(async_db_session, row, {"to": " "})
+
+    assert cleared.payload["to"] is None
+
+
+@pytest.mark.asyncio
+async def test_only_a_waiting_card_of_an_editable_type_is_revised(
+    async_db_session: AsyncSession,
+) -> None:
+    note = await change_queue.propose(
+        async_db_session, NOTE, {"text": "hi"}, owner_user_id=None
+    )
+    with pytest.raises(ValueError, match="answered, not edited"):
+        await change_queue.revise_row(async_db_session, note, {"text": "bye"})
+    with _letter():
+        row = await change_queue.propose(
+            async_db_session, LETTER, {"text": "hi"}, owner_user_id=None
+        )
+        await change_queue.reject_row(async_db_session, row)
+        with pytest.raises(ValueError, match="already rejected"):
+            await change_queue.revise_row(async_db_session, row, {"text": "bye"})
+
+
+@pytest.mark.asyncio
+async def test_edits_names_the_only_fields_a_reader_may_change(
+    async_db_session: AsyncSession,
+) -> None:
+    """Every text field is the reader's by default; ``edits`` narrows it to
+    those, where the rest is the card's own."""
+    with _letter():
+        every = change_queue.editable_fields(change_queue.executor_for(LETTER))
+    with _letter(edits=("to",)):
+        only = change_queue.editable_fields(change_queue.executor_for(LETTER))
+        row = await change_queue.propose(
+            async_db_session, LETTER, {"text": "hi"}, owner_user_id=None
+        )
+        with pytest.raises(ValueError, match="text cannot be edited .* only to"):
+            await change_queue.revise_row(async_db_session, row, {"text": "bye"})
+
+    assert every == ["text", "to", "kind"]
+    assert only == ["to"]
+    assert change_queue.editable_fields(change_queue.executor_for(NOTE)) == []
+
+
+@pytest.mark.asyncio
+async def test_an_approvals_follow_up_runs_once_after_the_commit(
+    async_db_session: AsyncSession,
+) -> None:
+    """``after_commit``: work that needs the change committed first runs with
+    its result once the approval lands. It runs for the rows that action
+    landed (never a vetoed one), once, and a follow-up that fails never
+    fails the approval."""
+    followed: list[str] = []
+
+    async def follow(result: dict[str, Any]) -> None:
+        followed.append(result["noted"])
+        if result["noted"] == "loud":
+            raise RuntimeError("the follow-up broke")
+
+    with _letter(after_commit=follow):
+        rows = await change_queue.propose_many(
+            async_db_session,
+            LETTER,
+            [{"text": text} for text in ("keep", "veto", "loud")],
+            owner_user_id=None,
+        )
+        await change_queue.approve_rows(
+            async_db_session, rows, exclude_ids=[int(rows[1].id or 0)]
+        )
+        assert followed == []
+        await async_db_session.commit()
+
+        landed = await change_queue.after_commit(async_db_session)
+        again = await change_queue.after_commit(async_db_session)
+
+    assert followed == ["keep", "loud"]
+    assert [row.id for row in landed] == [rows[0].id, rows[2].id]
+    assert again == []
+
+
+@pytest.mark.asyncio
+async def test_a_card_whose_type_is_gone_still_draws_and_can_be_rejected(
+    async_db_session: AsyncSession,
+) -> None:
+    """A change type can leave (retired, or not built where the app runs)
+    while its card waits: the list it is on stays up, the card names itself
+    by its type and payload, and it can be rejected from there."""
+    row = await change_queue.propose(
+        async_db_session, NOTE, {"text": "a"}, owner_user_id=None
+    )
+    row.change_type = "test.retired"
+
+    (card,) = await change_queue.cards(async_db_session, [row])
+    await change_queue.reject_row(async_db_session, row)
+
+    assert "test.retired" in card.title
+    assert not card.editable
+    assert [line.value for line in card.display] == ["test.retired", "{'text': 'a'}"]
+    assert row.status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_an_executor_knows_which_card_it_runs(
+    async_db_session: AsyncSession,
+) -> None:
+    """``approving``: while a card executes, the row is in hand, so the
+    mutation can say whose proposal it carries out (an edit log naming the
+    agent that asked); outside an approval there is none."""
+    seen: list[tuple[int | None, str | None]] = []
+
+    async def execute(
+        db: AsyncSession, payload: LetterPayload, owner_user_id: int | None
+    ) -> Any:
+        row = change_queue.approving.get()
+        seen.append((row.id, row.proposed_by_agent) if row else (None, None))
+        return LetterPayload(text=payload.text)
+
+    with _letter(execute=execute):
+        row = await change_queue.propose(
+            async_db_session,
+            LETTER,
+            {"text": "a"},
+            owner_user_id=None,
+            proposed_by_agent="helper",
+        )
+        await change_queue.approve_row(async_db_session, row)
+
+    assert seen == [(row.id, "helper")]
+    assert change_queue.approving.get() is None
+
+
+@pytest.mark.asyncio
+async def test_whoever_listens_hears_every_approval_that_landed(
+    async_db_session: AsyncSession,
+) -> None:
+    """``on_landed``: after the commit, a listener hears the rows the action
+    landed, all at once (one message per approval, not per card), after each
+    row's own follow-up; one that fails never fails the approval."""
+    heard: list[list[int | None]] = []
+
+    async def listen(db: AsyncSession, rows: list[PendingChange]) -> None:
+        heard.append([row.id for row in rows])
+
+    async def loud(db: AsyncSession, rows: list[PendingChange]) -> None:
+        raise RuntimeError("the listener broke")
+
+    change_queue.on_landed(loud)
+    change_queue.on_landed(listen)
+    try:
+        rows = await change_queue.propose_many(
+            async_db_session, NOTE, [{"text": "a"}, {"text": "b"}], owner_user_id=None
+        )
+        await change_queue.approve_rows(async_db_session, rows)
+        await async_db_session.commit()
+        landed = await change_queue.after_commit(async_db_session)
+        await change_queue.after_commit(async_db_session)
+    finally:
+        follow_ups.LISTENERS.remove(loud)
+        follow_ups.LISTENERS.remove(listen)
+
+    assert heard == [[rows[0].id, rows[1].id]]
+    assert landed == rows
+
+
+@pytest.mark.asyncio
+async def test_a_card_line_keeps_its_figures_once_decided(
+    async_db_session: AsyncSession,
+) -> None:
+    """A line carries what its sentence is about beside it (an amount, a
+    date, the page it was read off, where the value came from), and the
+    frozen card keeps them: a decided card reads as it did."""
+
+    async def describe(
+        db: AsyncSession, payloads: list[Any], owner_user_id: int | None
+    ) -> list[list[ChangeDisplayRow]]:
+        return [
+            [
+                ChangeDisplayRow(
+                    label="Charge",
+                    value=p.text,
+                    amount_cents=1250,
+                    at="2026-11-01",
+                    note="read off the statement",
+                    document_id=7,
+                    page=2,
+                )
+            ]
+            for p in payloads
+        ]
+
+    with _letter(describe=describe):
+        row = await change_queue.propose(
+            async_db_session, LETTER, {"text": "a"}, owner_user_id=None
+        )
+        await change_queue.approve_row(async_db_session, row)
+        (line,) = await change_queue.describe_change(async_db_session, row)
+
+    assert (line.amount_cents, line.at, line.note, line.document_id, line.page) == (
+        1250,
+        "2026-11-01",
+        "read off the statement",
+        7,
+        2,
+    )
+    # A card frozen before the money was named in cents still reads.
+    old = {"label": "a", "value": "b", "amount": 5}
+    assert ChangeDisplayRow.model_validate(old).amount_cents == 5
+    # A line that carries none of them says none of them.
+    assert ChangeDisplayRow(label="a", value="b").model_dump() == {
+        "label": "a",
+        "value": "b",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cards_aimed_at_what_is_going_expire_saying_why(
+    async_db_session: AsyncSession,
+) -> None:
+    """``expire_naming``: a waiting card aimed at something about to be
+    removed would apply to nothing. It expires with the reason, its card
+    frozen while the thing is still there to describe; other cards, and
+    decided ones, stay as they are."""
+    with _letter():
+        going, staying, decided = [
+            await change_queue.propose(
+                async_db_session, LETTER, {"text": text, "to": to}, owner_user_id=None
+            )
+            for text, to in (("a", "box 1"), ("b", "box 2"), ("c", "box 1"))
+        ]
+        await change_queue.reject_row(async_db_session, decided)
+
+        expired = await change_queue.expire_naming(
+            async_db_session,
+            "to",
+            ["box 1"],
+            owner_user_id=None,
+            note="Box 1 was removed.",
+        )
+
+    assert expired == 1
+    assert [row.status for row in (going, staying, decided)] == [
+        "expired",
+        "pending",
+        "rejected",
+    ]
+    assert going.result["note"] == "Box 1 was removed."
+    assert going.result["display"] == [{"label": "Note", "value": "a"}]
+    assert change_queue.outcome_of(going) == "expired"
+
+
+@pytest.mark.asyncio
+async def test_approving_in_the_ui_executes_once(
+    authenticated_client: TestClient, acting_owner_user_id: int | None
+) -> None:
+    change = authenticated_client.post(
+        "/api/v1/changes", json={"change_type": NOTE, "payload": {"text": "hi"}}
+    ).json()
+    assert change["status"] == "pending"
+    assert change["display"] == [{"label": "Note", "value": "hi"}]
+
+    approved = authenticated_client.post(f"/api/v1/changes/{change['id']}/approve")
+
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved"
+    assert executed == ["hi"]
+
+
+@pytest.mark.asyncio
+async def test_rejecting_in_the_ui_executes_nothing(
+    authenticated_client: TestClient, acting_owner_user_id: int | None
+) -> None:
+    change = authenticated_client.post(
+        "/api/v1/changes", json={"change_type": NOTE, "payload": {"text": "no"}}
+    ).json()
+
+    rejected = authenticated_client.post(f"/api/v1/changes/{change['id']}/reject")
+
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "rejected"
+    assert executed == []
+    trail = authenticated_client.get(
+        "/api/v1/changes", params={"status": "rejected"}
+    ).json()["items"]
+    assert [c["id"] for c in trail] == [change["id"]]
+
+
+@pytest.mark.asyncio
+async def test_the_api_revises_an_editable_card(
+    authenticated_client: TestClient, acting_owner_user_id: int | None
+) -> None:
+    """The JSON surface's edit: the card says it is editable while it waits,
+    and a revision that breaks its contract is a 400."""
+    with _letter():
+        change = authenticated_client.post(
+            "/api/v1/changes", json={"change_type": LETTER, "payload": {"text": "hi"}}
+        ).json()
+        revised = authenticated_client.post(
+            f"/api/v1/changes/{change['id']}/revise", json={"fields": {"text": "bye"}}
+        )
+        refused = authenticated_client.post(
+            f"/api/v1/changes/{change['id']}/revise", json={"fields": {"to": "x" * 21}}
+        )
+
+    assert change["editable"] is True
+    assert revised.status_code == 200
+    assert revised.json()["display"] == [{"label": "Note", "value": "bye"}]
+    assert refused.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_approving_in_the_api_runs_the_follow_up(
+    authenticated_client: TestClient, acting_owner_user_id: int | None
+) -> None:
+    followed: list[str] = []
+
+    async def follow(result: dict[str, Any]) -> None:
+        followed.append(result["noted"])
+
+    with _letter(after_commit=follow):
+        change = authenticated_client.post(
+            "/api/v1/changes", json={"change_type": LETTER, "payload": {"text": "hi"}}
+        ).json()
+        authenticated_client.post(f"/api/v1/changes/{change['id']}/approve")
+
+    assert followed == ["hi"]
+
+
+# Counts two statuses on purpose, so the count repeats by construction
+# rather than by a loop.
+@pytest.mark.queryspy(allow_n_plus_one=True)
+@pytest.mark.asyncio
+async def test_the_count_reads_no_cards(
+    authenticated_client: TestClient, acting_owner_user_id: int | None
+) -> None:
+    """A banner needs a number, not every card described to count them."""
+    ids = [
+        authenticated_client.post(
+            "/api/v1/changes", json={"change_type": NOTE, "payload": {"text": t}}
+        ).json()["id"]
+        for t in ("a", "b")
+    ]
+    authenticated_client.post(f"/api/v1/changes/{ids[0]}/reject")
+
+    pending = authenticated_client.get("/api/v1/changes/count")
+    rejected = authenticated_client.get(
+        "/api/v1/changes/count", params={"status": "rejected"}
+    )
+
+    assert pending.json() == {"count": 1}
+    assert rejected.json() == {"count": 1}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("get", "/api/v1/changes/999999"),
+        ("post", "/api/v1/changes/999999/approve"),
+        ("post", "/api/v1/changes/999999/reject"),
+        ("post", "/api/v1/changes/999999/revise"),
+        ("get", "/api/v1/changes/batch/no-such-batch"),
+        ("post", "/api/v1/changes/batch/no-such-batch/approve"),
+        ("post", "/api/v1/changes/batch/no-such-batch/reject"),
+    ],
+)
+def test_a_change_that_is_not_yours_is_not_found(
+    authenticated_client: TestClient, method: str, path: str
+) -> None:
+    """Missing and another user's answer alike, on every route: 404."""
+    kwargs = (
+        {"json": {"fields": {}} if path.endswith("revise") else {}}
+        if path.endswith(("batch/no-such-batch/approve", "revise"))
+        else {}
+    )
+    response = getattr(authenticated_client, method)(path, **kwargs)
+
+    assert response.status_code == 404
+    assert executed == []
+
+
+@pytest.fixture
+def chat_tools(async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The chat's queue tools, writing through the test session."""
+    from tests._change_queue import queue_tools_on
+
+    return queue_tools_on(async_db_session, monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_the_chat_tool_proposes_a_registered_type(
+    async_db_session: AsyncSession,
+    chat_tools: Any,
+    acting_owner_user_id: int | None,
+) -> None:
+    """The model's one write door files a card for any registered type,
+    attributed to the agent and conversation of the turn."""
+    from app.core.tools import native_write_tool_names
+    from app.services.ai.domains.chat.user_memory import memory_user
+
+    with memory_user(
+        "1",
+        owner_user_id=acting_owner_user_id,
+        agent_slug="helper",
+        conversation_id="conv-1",
+    ):
+        result = result_data(await chat_tools.propose(NOTE, {"text": "from chat"}))
+
+    assert result["status"] == "pending"
+    assert result["title"] == "Write a note"
+    assert result["display"] == [{"label": "Note", "value": "from chat"}]
+    row = await change_queue.get_change(
+        async_db_session, result["pending_change_id"], owner_user_id=None
+    )
+    assert row is not None
+    assert (row.proposed_by_agent, row.conversation_id) == ("helper", "conv-1")
+    assert executed == []
+    assert {
+        "propose",
+        "propose_many",
+        "pending",
+        "withdraw",
+        "withdraw_batch",
+        "revise",
+    } <= native_write_tool_names()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_reads_each_contract_from_its_model(
+    chat_tools: Any, acting_owner_user_id: int | None
+) -> None:
+    """The ``change_types`` tool hands the model every type's schema, and a
+    proposal that misses one says what the types are (#1414)."""
+    from app.services.ai.domains.chat.user_memory import memory_user
+
+    listed = result_data(await chat_tools.change_types())
+    with memory_user("1", owner_user_id=acting_owner_user_id):
+        refused = result_data(await chat_tools.propose("no.such.type", {}))
+
+    assert listed[NOTE]["payload_schema"]["required"] == ["text"]
+    assert "unknown change type" in refused["error"]
+    assert refused["change_types"][NOTE]["title"] == "Write a note"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_revises_every_waiting_card_that_misread_a_phrase(
+    async_db_session: AsyncSession,
+    chat_tools: Any,
+    acting_owner_user_id: int | None,
+) -> None:
+    """ "It is Sweet shop": ``revise`` puts the user's correction on every
+    waiting card that says the phrase and may be edited, whoever filed it;
+    a card that is answered rather than edited is left alone, and one named
+    by id that cannot take it says why."""
+    from app.services.ai.domains.chat.user_memory import memory_user
+
+    note = await change_queue.propose(
+        async_db_session,
+        NOTE,
+        {"text": "sweat shop"},
+        owner_user_id=acting_owner_user_id,
+    )
+    with _letter():
+        rows = [
+            await change_queue.propose(
+                async_db_session,
+                LETTER,
+                {"text": text},
+                owner_user_id=acting_owner_user_id,
+            )
+            for text in ("Sweat shop", "the sweat shop", "Bakery")
+        ]
+        await async_db_session.commit()
+        with memory_user("1", owner_user_id=acting_owner_user_id, agent_slug="helper"):
+            found = result_data(
+                await chat_tools.revise({"text": "Sweet shop"}, about="sweat shop")
+            )
+            named = result_data(
+                await chat_tools.revise({"text": "x"}, pending_change_ids=[note.id])
+            )
+
+    assert sorted(found["revised"]) == [rows[0].id, rows[1].id]
+    assert "errors" not in found
+    assert [row.payload["text"] for row in rows] == [
+        "Sweet shop",
+        "Sweet shop",
+        "Bakery",
+    ]
+    assert named["revised"] == []
+    assert "answered, not edited" in named["errors"][str(note.id)]
+
+
+# Lists ``pending`` three ways on purpose, so its read repeats by
+# construction rather than by a loop.
+@pytest.mark.queryspy(allow_n_plus_one=True)
+@pytest.mark.asyncio
+async def test_pending_draws_only_when_asked(
+    chat_tools: Any, acting_owner_user_id: int | None
+) -> None:
+    """A check before filing a replacement must stay invisible: it draws
+    nothing. Asked to (the user wants to see a card), it nominates what is
+    still waiting, or with ``about`` whatever matched, decided included."""
+    from app.services.ai.domains.chat.user_memory import memory_user
+
+    with memory_user("1", owner_user_id=acting_owner_user_id, agent_slug="helper"):
+        waiting = result_data(await chat_tools.propose(NOTE, {"text": "waiting"}))
+        withdrawn = result_data(await chat_tools.propose(NOTE, {"text": "taken back"}))
+        await chat_tools.withdraw(withdrawn["pending_change_id"])
+        quiet = result_data(await chat_tools.pending())
+        shown = result_data(await chat_tools.pending(draw=True))
+        asked = result_data(await chat_tools.pending(about="taken", draw=True))
+
+    def ids(cards: list[dict[str, Any]]) -> list[list[int]]:
+        return [card["pending_change_ids"] for card in cards]
+
+    assert quiet["draw"] == [] and len(quiet["pending"]) == 1
+    assert ids(shown["draw"]) == [[waiting["pending_change_id"]]]
+    assert ids(asked["draw"]) == [[withdrawn["pending_change_id"]]]
+
+
+# Lists ``pending`` for two users on purpose, so its read repeats by
+# construction rather than by a loop.
+@pytest.mark.queryspy(allow_n_plus_one=True)
+@pytest.mark.asyncio
+async def test_a_chat_proposal_belongs_to_the_turns_owner(
+    async_db_session: AsyncSession,
+    chat_tools: Any,
+    acting_owner_user_id: int | None,
+) -> None:
+    """A card is filed under the turn's owner (#1367), whatever ``user_id``
+    names, and ``pending`` lists only that owner's cards."""
+    from app.services.ai.domains.chat.user_memory import memory_user
+
+    with memory_user("api-user", owner_user_id=acting_owner_user_id):
+        result = result_data(await chat_tools.propose(NOTE, {"text": "mine"}))
+        mine = result_data(await chat_tools.pending())
+    other = 424242
+    with memory_user("api-user", owner_user_id=other):
+        theirs = result_data(await chat_tools.pending())
+
+    row = await change_queue.get_change(
+        async_db_session, result["pending_change_id"], owner_user_id=None
+    )
+    assert row is not None
+    assert row.owner_user_id == acting_owner_user_id
+    assert [c["pending_change_ids"] for c in mine["pending"]] == [[row.id]]
+
+    # Another user's turn sees none of this user's cards.
+    assert theirs["pending"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_an_owner_touches_no_cards(
+    chat_tools: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With auth, a turn nobody signed in to (an anonymous call, the CLI)
+    declines: unscoped, it would reach every user's cards. Unless unowned
+    rows are the household's (``UNOWNED_IS_HOUSEHOLD``): then it is the
+    household's turn, which the tests above run as."""
+    from app.services.shared import deps
+
+    monkeypatch.setattr(deps, "UNOWNED_IS_HOUSEHOLD", False)
+    proposed = result_data(await chat_tools.propose(NOTE, {"text": "orphan"}))
+    listed = result_data(await chat_tools.pending())
+
+    assert "no signed-in user" in proposed["error"]
+    assert "no signed-in user" in listed["error"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "propose",
+        "propose_many",
+        "approve",
+        "reject",
+        "revise",
+        "expire_naming",
+        "withdraw",
+        "withdraw_batch",
+        "get_change",
+        "batch_rows",
+        "list_changes",
+    ],
+)
+def test_with_auth_every_queue_call_names_its_owner(call: str) -> None:
+    """owner_user_id=None reads every user's rows. Each public call
+    makes its caller say whose rows it means, so a new one (the MCP server,
+    a CLI command, a worker) cannot act on everyone's by forgetting."""
+    import inspect
+
+    owner = inspect.signature(getattr(change_queue, call)).parameters["owner_user_id"]
+
+    assert owner.default is inspect.Parameter.empty

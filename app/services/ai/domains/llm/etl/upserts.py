@@ -17,7 +17,7 @@ from app.services.ai.domains.llm.etl.queries import (  # noqa: F401
     CatalogStats,
     catalog_is_populated,
     get_catalog_stats,
-    ollama_models_present,
+    local_models_present,
 )
 from app.services.ai.domains.llm.etl.results import SyncResult
 from app.services.ai.domains.llm.etl.vendor_metadata import (
@@ -156,9 +156,9 @@ class UpsertMixin:
                 enabled=True,
                 color=VENDOR_METADATA.get(data.vendor, {}).get("color", "#6B7280"),
                 family=data.family,
+                mode=data.mode,
                 served_by_org_id=vendor.id,
                 released_on=data.created_at,
-                mode=data.mode,
             )
 
             if not dry_run:

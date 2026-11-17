@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import ChangeDisplayRow
 from app.services.documents.domains.reading.figures import MONEY
 from app.services.documents.domains.reading.findings import Page
 from app.services.documents.domains.reading.waiting import (
@@ -31,7 +32,6 @@ from app.services.documents.domains.reading.waiting import (
     WAIT_DAYS,
     flag_once,
 )
-from app.services.finance.schemas import ChangeDisplayRow
 from app.services.finance.utils import same_payee
 
 RECEIPT = "receipt.attach"
@@ -194,7 +194,7 @@ async def match_waiting(
     """Look again for every waiting receipt's charge; propose the ones
     found as one batch, and put the ones done waiting in front of a
     person. Returns how many cards were made."""
-    from app.services.finance.service import propose_many
+    from app.services.change_queue import propose_many
     from app.services.finance.utils import current_date
 
     today = today or current_date()
@@ -319,7 +319,7 @@ async def _waiting(
 async def _asked(db: AsyncSession) -> tuple[set[int], set[tuple[int, int]]]:
     """Receipts with a card still pending, and the matches already
     turned down - neither is asked again."""
-    from app.services.finance.service import FinancePendingChange as C
+    from app.services.change_queue import PendingChange as C
 
     rows = (
         await db.exec(

@@ -318,7 +318,7 @@ async def paper(document_id: int) -> dict[str, Any]:
         document = await DocumentService(db).get(document_id)
         if document is None:
             return {"error": f"No document with id {document_id}"}
-        text = await document_text(document_id, db)
+        text = await document_text(db, document_id, None)
     reading = None
     if text is None:
         job_id = await start_extraction(document_id, owner_user_id=None, force=False)
@@ -326,7 +326,7 @@ async def paper(document_id: int) -> dict[str, Any]:
             reading = job_id
         else:
             async with get_async_session() as db:
-                text = await document_text(document_id, db)
+                text = await document_text(db, document_id, None)
     return {
         "id": document.id,
         "title": document.title,

@@ -120,7 +120,7 @@ async def test_another_writer_can_work_while_the_model_is_thinking(
 
     async with maker() as setup:
         await demo_seed.seed_demo(setup, owner_user_id=OWNER)
-        setup.add(analyst.MemoryModule(**analyst.snapshot_module_definition()))
+        setup.add(analyst.ContextModule(**analyst.snapshot_module_definition()))
         setup.add(analyst.Agent(**analyst.analyst_agent_definition()))
         await setup.commit()
 
@@ -177,7 +177,7 @@ async def test_another_writer_can_work_while_the_deep_dive_is_thinking(
 
     async with maker() as setup:
         await demo_seed.seed_demo(setup, owner_user_id=OWNER)
-        setup.add(analyst.MemoryModule(**analyst.snapshot_module_definition()))
+        setup.add(analyst.ContextModule(**analyst.snapshot_module_definition()))
         setup.add(analyst.Agent(**analyst.seeds.deep_dive_agent_definition()))
         await setup.commit()
 
@@ -196,9 +196,9 @@ async def test_another_writer_can_work_while_the_deep_dive_is_thinking(
 
     monkeypatch.setattr("app.services.ai.domains.llm.providers.model_for", _model_for)
 
-    dive = await run_deep_dive(
-        _opens_new(maker), owner_user_id=OWNER, today=date(2026, 7, 20)
-    )
+    async with maker() as db:
+        dive = await run_deep_dive(db, owner_user_id=OWNER, today=date(2026, 7, 20))
+        await db.commit()
 
     assert "error" in other_writer, "the fake model was never called"
     assert other_writer["error"] is None, (
@@ -304,7 +304,7 @@ async def test_another_writer_can_work_while_a_conversation_is_scored(
 
     other_writer: dict[str, Any] = {}
 
-    async def _fake_llm_score(transcript: str) -> dict[str, Any]:
+    async def _fake_llm_score(transcript: str, *_: Any) -> dict[str, Any]:
         other_writer["error"] = await _a_second_writer(maker, "sentiment-1")
         return {
             "overall_sentiment": "positive",

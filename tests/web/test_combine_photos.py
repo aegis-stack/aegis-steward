@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.finance.domains.writes.queue import propose
+from app.services.change_queue import propose
 from tests.web.conftest import Ledger
 from tests.web.dom import one, select
 from tests.web.test_check_review import _jpeg
@@ -37,12 +37,12 @@ async def test_each_page_is_drawn_and_served(
     card = one(client.get("/review").text, f"#change-{change.id}")
     srcs = [img.get("src") for img in select(card, "img[data-scan]")]
     assert srcs == [
-        f"/review/changes/{change.id}/scan",
-        f"/review/changes/{change.id}/scan?page=1",
+        f"/partials/changes/{change.id}/scan",
+        f"/partials/changes/{change.id}/scan?page=1",
     ]
-    second = client.get(f"/review/changes/{change.id}/scan?page=1")
+    second = client.get(f"/partials/changes/{change.id}/scan?page=1")
     assert second.status_code == 200 and second.content[:3] == b"\xff\xd8\xff"
-    assert client.get(f"/review/changes/{change.id}/scan?page=2").status_code == 404
+    assert client.get(f"/partials/changes/{change.id}/scan?page=2").status_code == 404
 
 
 @pytest.mark.asyncio

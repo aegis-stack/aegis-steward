@@ -25,6 +25,7 @@ from app.components.frontend.controls.views.legacy_dashboard import (
     LegacyDashboardView,
 )
 from app.components.frontend.core import events as frontend_events
+from app.components.frontend.core.changes import dashboard_client
 from app.components.frontend.core.routes import (
     DASHBOARD_ROUTE,
     LOGIN_ROUTE,
@@ -41,7 +42,6 @@ from app.components.frontend.state.session_state import (
     get_session_state,
     init_session_state,
 )
-from app.core.client import APIClient
 
 from .overseer.body import DashboardViews
 from .overseer.chrome import build_chrome, toggle_theme
@@ -99,7 +99,7 @@ async def setup_dashboard(view: BaseView) -> None:
         dashboard._is_page_connected,
     )
 
-    view.controls = [chrome.header, ft.SelectionArea(content=views.body)]
+    view.controls = [chrome.header, views.body]
     view.update()
 
     # Single HTTP client for the whole session. Pulled from SessionState so
@@ -148,13 +148,15 @@ def create_frontend_app() -> Callable[[ft.Page], Awaitable[None]]:
         # APIClient: the single canonical HTTP client for the frontend.
         # The HttpOnly ``<project>_session`` cookie rides on the underlying
         # httpx cookie jar — there is no manual token plumbing in Python.
-        # A 401 from any call routes the user back to /login.
+        # A 401 from any call routes the user back to /login. It calls its
+        # own process, speaking for this page (``dashboard_client``).
         async def _on_unauthorized() -> None:
             # A 401 is a stale session, not a logout: keep the persisted
             # token so the next check can resume with it.
             await sign_out(page, forget_token=False)
 
-        api_client = APIClient(
+        api_client = dashboard_client(
+            page,
             on_unauthorized=_on_unauthorized,
             # The jar dies with the process; the newest refresh token is
             # the one value that outlives it.

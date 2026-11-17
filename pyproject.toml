@@ -68,7 +68,7 @@ dependencies = [
     "resend>=2.4.0,<3",
     "twilio>=9.3.7,<10",
     "ofxtools>=0.9.5,<2",
-    "cryptography>=42.0.0,<51", # AES-GCM at-rest encryption (app.core.encryption)
+    "cryptography>=42.0.0,<51",  # AES-GCM at-rest encryption (app.core.encryption)
     # Official client (signs every request with the partner HMAC). Ceiling is
     # deliberate: 13.x renamed the positions call the finance sync depends on
     # (get_user_account_positions -> get_all_account_positions, a new response
@@ -151,7 +151,11 @@ line-ending = "auto"
 [tool.ruff.lint.isort]
 force-single-line = false
 force-sort-within-sections = true
-known-first-party = ["app"]
+# ``alembic`` is the library, but ruff counts the ``alembic/`` directory a
+# project's first migration brings as first-party. Pinned to the side it
+# lands on once that directory exists, so an add that brings it does not
+# re-sort every module importing the library.
+known-first-party = ["app", "alembic"]
 
 [tool.ruff.lint.per-file-ignores]
 # deps.py is a re-export shim that exposes FastAPI dependency-injection
@@ -200,7 +204,6 @@ exclude = [".venv", "venv", ".tox", "build", "dist"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# Parallel by default; loadgroup keeps xdist_group-marked tests together.
 # One worker per CPU. ``logical``, not ``auto``: with psutil installed (it is,
 # for the runtime probes) ``auto`` counts physical cores, which is half a
 # GitHub runner. loadgroup keeps an ``xdist_group`` on one worker.
@@ -389,7 +392,6 @@ cmd = "uv run pytest --queryspy-strict --queryspy-baseline .queryspy-baseline.js
 
 [tool.poe.tasks.check-queries-baseline]
 help = "Rewrite .queryspy-baseline.json from the current suite"
-# -n 0: under xdist the controller writes the baseline and runs no tests, so it comes out empty.
 cmd = "uv run pytest -n 0 --queryspy-strict --queryspy-baseline .queryspy-baseline.json --queryspy-baseline-update"
 
 [tool.poe.tasks.check]

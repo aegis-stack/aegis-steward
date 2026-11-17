@@ -59,7 +59,7 @@ GROUPS: dict[str, tuple[str, str]] = {
     "rag": ("app.cli.rag", "app"),
     "llm": ("app.cli.llm", "app"),
     "agents": ("app.cli.agents", "app"),
-    "memory-modules": ("app.cli.agents", "modules_app"),
+    "context-modules": ("app.cli.agents", "modules_app"),
 }
 
 
@@ -69,7 +69,7 @@ def _group(name: str) -> click.Command | None:
     module, attribute = GROUPS[name]
     try:
         found = getattr(importlib.import_module(module), attribute)
-    except ImportError, AttributeError:
+    except (ImportError, AttributeError):
         return None
     if not isinstance(found, typer.Typer):  # one command, not a group
         single = typer.Typer(add_completion=False)

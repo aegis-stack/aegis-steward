@@ -5,7 +5,7 @@ import pickle
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, DateTime, Float, LargeBinary, String, Text
+from sqlalchemy import Column, DateTime, Float, Index, LargeBinary, String, Text
 from sqlmodel import Field as SQLField
 from sqlmodel import SQLModel
 
@@ -56,6 +56,7 @@ class JobExecution(SQLModel, table=True):
     """
 
     __tablename__ = "job_execution"
+    __table_args__ = (Index("ix_job_execution_job_started", "job_id", "started_at"),)
 
     id: int | None = SQLField(default=None, primary_key=True)
     job_id: str = SQLField(sa_column=Column(String(191), index=True, nullable=False))

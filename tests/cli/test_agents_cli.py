@@ -8,7 +8,7 @@ from app.services.ai.domains.chat.agent_loader import AgentConfig
 from app.services.ai.models.agents import (
     Agent,
     AgentPromptChange,
-    MemoryModule,
+    ContextModule,
     Tool,
 )
 from tests._cli import invoke
@@ -59,7 +59,7 @@ class TestAgentsList:
 class TestAgentsShow:
     @patch("app.cli.agents._load_agent")
     def test_shows_agent_definition(self, mock_load) -> None:
-        agent = _agent(memory_modules=["diet"], knowledge_base_ids=["kb-food"])
+        agent = _agent(context_modules=["diet"], knowledge_base_ids=["kb-food"])
         agent.tools = [Tool(name="save_memory")]
         mock_load.return_value = agent
 
@@ -155,7 +155,7 @@ class TestATestTurnIsAChatTurn:
 
 
 class TestAgentsPrompt:
-    """#355: one way to change a prompt, and it says why."""
+    """One way to change a prompt, and it says why."""
 
     @patch("app.cli.agents._set_prompt")
     def test_set_from_a_file_records_the_note(self, mock_set, tmp_path) -> None:
@@ -220,18 +220,18 @@ class TestAgentsPrompt:
         assert "seed" in result.output
 
 
-class TestMemoryModulesCli:
+class TestContextModulesCli:
     @patch("app.cli.agents._load_modules")
     def test_lists_modules_with_kind(self, mock_load) -> None:
         mock_load.return_value = [
-            MemoryModule(
+            ContextModule(
                 slug="diet",
                 name="Diet",
                 context_key="diet",
                 prompt_content="rules",
                 fetch_function="fetch_meals",
             ),
-            MemoryModule(
+            ContextModule(
                 slug="static-only",
                 name="Static",
                 context_key="static-only",
@@ -239,17 +239,16 @@ class TestMemoryModulesCli:
             ),
         ]
 
-        result = invoke(["memory-modules", "list"])
+        result = invoke(["context-modules", "list"])
 
         assert result.exit_code == 0
         assert "diet" in result.output
-        assert "hybrid" in result.output
-        assert "static" in result.output
+        assert "static + dynamic" in result.output
 
     @patch("app.cli.agents._load_modules")
     def test_show_module(self, mock_load) -> None:
         mock_load.return_value = [
-            MemoryModule(
+            ContextModule(
                 slug="diet",
                 name="Diet",
                 context_key="diet",
@@ -258,7 +257,7 @@ class TestMemoryModulesCli:
             )
         ]
 
-        result = invoke(["memory-modules", "show", "diet"])
+        result = invoke(["context-modules", "show", "diet"])
 
         assert result.exit_code == 0
         assert "THE DIET RULES" in result.output
@@ -268,6 +267,6 @@ class TestMemoryModulesCli:
     def test_show_unknown_module_exits_nonzero(self, mock_load) -> None:
         mock_load.return_value = []
 
-        result = invoke(["memory-modules", "show", "ghost"])
+        result = invoke(["context-modules", "show", "ghost"])
 
         assert result.exit_code == 1

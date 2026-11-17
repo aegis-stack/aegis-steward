@@ -283,9 +283,9 @@ async def propose_checks(
     Reads the scans outside any session: the model is slow, and an open
     session is the whole app's write lock."""
     from app.core.storage import get_storage
+    from app.services.change_queue.queue import MAX_BATCH_SIZE, propose_many
     from app.services.documents.domains.reading import checks_waiting
     from app.services.documents.service import DocumentService
-    from app.services.finance.service import MAX_BATCH_SIZE, propose_many
 
     async with open_session() as db:
         document = await DocumentService(db).get(document_id)
@@ -399,9 +399,9 @@ async def the_ledger(
     payees' names, which a misread payee is snapped to."""
     from sqlmodel import col, or_, select
 
+    from app.services.change_queue import PendingChange as C
     from app.services.documents.queries import tagged_with
     from app.services.finance.constants import transaction_tag
-    from app.services.finance.service import FinancePendingChange as C
     from app.services.finance.service import FinanceTransaction as T
     from app.services.finance.service import merchants_for_owner, not_duplicate
 

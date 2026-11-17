@@ -10,7 +10,7 @@ backup dir is there for the reason its comment gives.
 from pathlib import Path
 import re
 
-import yaml
+from tests._compose import load_compose
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_ENV = ("STORAGE_ROOT", "DATABASE_BACKUP_DIR")
@@ -38,7 +38,7 @@ def test_no_compose_environment_list_carries_it() -> None:
         "docker-compose.dev.yml",
         "docker-compose.prod.yml",
     ):
-        compose = yaml.safe_load((ROOT / name).read_text()) or {}
+        compose = load_compose(name)
         for service, spec in (compose.get("services") or {}).items():
             for entry in (spec or {}).get("environment") or []:
                 key = str(entry).split("=", 1)[0]
@@ -48,7 +48,7 @@ def test_no_compose_environment_list_carries_it() -> None:
 def test_every_app_service_shares_the_database_and_store() -> None:
     # A service-level ``volumes`` list replaces the anchor's the same way,
     # which once left the scheduler on its own empty SQLite file.
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    compose = load_compose("docker-compose.yml")
     backups = f"backup-data:{_dockerfile_env('DATABASE_BACKUP_DIR')}"
     for service, spec in compose["services"].items():
         if spec.get("image") != compose["x-app"]["image"]:

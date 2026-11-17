@@ -1,6 +1,6 @@
 """The AI service's models, re-exported: its tables (``agents``, ``llm``,
-``sentiment``, ``voice``) where it keeps them, its providers
-(``providers``) and its in-memory conversations (``conversation``)."""
+``sentiment``) where it keeps them, its providers (``providers``) and its
+in-memory conversations (``conversation``)."""
 
 from .agents import Agent, AgentTool, Tool
 from .conversation import (
@@ -32,7 +32,6 @@ from .providers import (
     get_provider_capabilities,
 )
 from .sentiment import SentimentAnalysis
-from .voice import STTUsage, TTSUsage, VoiceProfile
 
 __all__ = [
     # Agent registry models
@@ -41,10 +40,6 @@ __all__ = [
     "Tool",
     # Sentiment analysis
     "SentimentAnalysis",
-    # Voice usage (STT / TTS)
-    "STTUsage",
-    "TTSUsage",
-    "VoiceProfile",
     # LLM tracking models
     "LLMOrg",
     "LargeLanguageModel",

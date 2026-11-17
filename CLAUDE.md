@@ -47,6 +47,14 @@ the right port.
 - `app/components/` is infrastructure (backend, frontend, worker, scheduler,
   database, redis) and defines WHEN and WHERE.
 - `app/services/` is business logic (auth, AI, and the rest) and defines WHAT.
+  Each service keeps one layout: its standard files at the top (`service.py`,
+  `models.py`, `queries.py`, `health.py`...), its logic in packages under
+  `domains/`, what it talks to under `adapters/`; callers outside a service,
+  and its own router, tools, jobs and pages, import from its `service.py`. The `patterns` command flags a module that
+  strays. Before finishing a change, run
+  `uv run aegis-steward patterns check` and fix each new finding it
+  lists; `--update` drops the fixed ones from `.patterns-baseline.json`, the
+  known debt.
 - `tests/` mirrors the app layout: unit tests beside the code they cover, API
   tests under `tests/api/`.
 

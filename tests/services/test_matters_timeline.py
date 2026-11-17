@@ -271,6 +271,6 @@ class TestSheCanRecordWhatHappened:
 
     def test_it_is_registered_as_a_change_type(self) -> None:
         """Registered, or she can propose it and nothing can execute it."""
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
-        assert "matter.event" in writes.registered_change_types()
+        assert "matter.event" in change_queue.registered_change_types()

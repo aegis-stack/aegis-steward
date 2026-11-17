@@ -38,8 +38,8 @@ EXPECTED_COMMANDS = {
     "use-provider",
     "voice",
 }
-# Usage and sentiment read tables, so they ship only with a database.
-EXPECTED_COMMANDS |= {"usage", "sentiment"}
+# Usage, costs and sentiment read tables, so they ship only with a database.
+EXPECTED_COMMANDS |= {"usage", "costs", "sentiment"}
 
 
 def _registered() -> set[str]:

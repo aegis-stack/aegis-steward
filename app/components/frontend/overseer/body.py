@@ -52,6 +52,7 @@ class DashboardViews:
                 ft.Container(
                     content=self.status_overview_panel,
                     col={"xs": 12, "sm": 12, "md": 6, "lg": 6, "xl": 6},
+                    expand=True,
                 ),
                 ft.Container(
                     content=self.activity_feed,
@@ -99,9 +100,10 @@ class DashboardViews:
 
         view_toggle_button.on_click = self.toggle
 
-        # Header stays fixed; content scrolls inside one selection region
-        # (text controls are plain - see controls/text.py).
-        self.body = ft.Container(
+        # Header stays fixed; below it the views share one selection region
+        # (text controls are plain - see controls/text.py), each scrolling
+        # what it holds: an outer scroll would leave them no height to fill.
+        views = ft.Container(
             content=ft.Column(
                 [
                     self.stack_view_container,  # Stack + Activity view (default)
@@ -110,11 +112,13 @@ class DashboardViews:
                 ],
                 spacing=20,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                scroll=ft.ScrollMode.AUTO,
             ),
             alignment=ft.alignment.top_center,
             expand=True,
         )
+        # A selection area takes no ``expand``: the window's height is
+        # given around it.
+        self.body = ft.Container(ft.SelectionArea(content=views), expand=True)
 
     async def toggle(self, _: Any) -> None:
         """Cycle through Stack, Cards, and Diagram views."""

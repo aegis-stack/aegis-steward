@@ -5,11 +5,12 @@ These tests focus on the pure logic of health checking, warning propagation,
 and component hierarchy without external dependencies like Redis or system metrics.
 """
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.system import ComponentStatus, ComponentStatusType
+from app.services.system import ComponentStatus, ComponentStatusType, SystemStatus
 from app.services.system.health import (
     get_system_status,
 )
@@ -226,6 +227,40 @@ class TestSystemStatusWarningPropagation:
                 )
 
     @pytest.mark.asyncio
+    async def test_the_root_answers_for_what_overall_healthy_counts(self) -> None:
+        """A host metric leaves the Server's own status alone but counts
+        overall, so the root says so too: "not healthy" and a "healthy"
+        status would disagree."""
+        checks = {
+            "backend": AsyncMock(
+                return_value=ComponentStatus(name="backend", message="active")
+            )
+        }
+        metrics = {
+            "memory": ComponentStatus(
+                name="memory",
+                status=ComponentStatusType.WARNING,
+                message="Memory usage: 90%",
+            ),
+        }
+        with (
+            patch("app.services.system.health._health_checks", checks),
+            patch("app.services.system.health._service_health_checks", {}),
+            patch(
+                "app.services.system.health._get_cached_system_metrics",
+                return_value=metrics,
+            ),
+            patch(
+                "app.services.system.health._get_system_info",
+                return_value={"test": "info"},
+            ),
+        ):
+            system_status = await get_system_status(force_refresh=True)
+
+        assert system_status.overall_healthy is False
+        assert system_status.overall_status == ComponentStatusType.WARNING
+
+    @pytest.mark.asyncio
     async def test_system_status_with_only_warnings_is_not_healthy(self) -> None:
         """Test that system with warnings is not considered overall healthy."""
 
@@ -319,6 +354,16 @@ class TestWorkerHealthLogic:
         healthy, status = check_empty_worker_status("load_test", True, False, 0)
         assert healthy is False
         assert status == ComponentStatusType.UNHEALTHY
+
+    @pytest.mark.parametrize("status", list(ComponentStatusType))
+    def test_the_overall_status_is_the_roots(self, status: ComponentStatusType) -> None:
+        root = ComponentStatus(name="aegis", status=status, message="root")
+        system = SystemStatus(
+            components={"aegis": root},
+            overall_healthy=status == ComponentStatusType.HEALTHY,
+            timestamp=datetime.now(UTC),
+        )
+        assert system.overall_status == status
 
     def test_warning_propagation_to_parent_components(self) -> None:
         """Test warning propagation from queue -> queues -> worker."""

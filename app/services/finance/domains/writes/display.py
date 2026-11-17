@@ -8,13 +8,12 @@ from typing import Any
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import format_date, payee_label
-from app.core.money import cents_named
+from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.domains.detection.insights.formatting import format_usd
 from app.services.finance.domains.ledger import transactions
-from app.services.finance.schemas import ChangeDisplayRow
 
 # How a card names a row its payload points at and the ledger does not
-# have. Proposing one is refused (``ai_write_tools``): an id made up.
+# have: an id made up, or a row gone since.
 MISSING = "(missing)"
 
 
@@ -57,7 +56,7 @@ async def txn_row(
     return txn, ChangeDisplayRow(
         label="Transaction",
         value=subject,
-        amount=abs(txn.amount) if txn is not None else None,
+        amount_cents=abs(txn.amount) if txn is not None else None,
         at=txn.date_.isoformat() if txn is not None else None,
     )
 
@@ -85,9 +84,3 @@ def candidate_row(txn: Any) -> dict[str, Any]:
         "amount_cents": txn.amount,
         "account_id": txn.account_id,
     }
-
-
-def for_model(row: Any) -> dict[str, Any]:
-    """A card's display row as a tool result carries it: its money named
-    as the cents it is (#291), so the model is told dollars beside it."""
-    return cents_named(row.model_dump(), "amount")

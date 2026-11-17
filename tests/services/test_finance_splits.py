@@ -18,7 +18,7 @@ from datetime import date
 
 import pytest
 
-from app.services.finance.domains import writes
+from app.services import change_queue
 from app.services.finance.domains.ledger import queries as ledger_queries
 from app.services.finance.domains.planning import queries as planning_queries
 from app.services.finance.domains.planning.budgets import (
@@ -308,7 +308,7 @@ class TestSplitChangeType:
     ) -> None:
         txn_id, _, food_id = await _target_run(svc)
 
-        row = await writes.propose(
+        row = await change_queue.propose(
             svc.db,
             "transaction.split",
             {
@@ -320,7 +320,7 @@ class TestSplitChangeType:
             owner_user_id=1,
             proposed_by_agent="finance-assistant",
         )
-        card = await writes.describe_change(svc.db, row)
+        card = await change_queue.describe_change(svc.db, row)
 
         # Itemized: one row per line, so the approval card reads as the
         # split the user is about to authorize - remainder included.
@@ -331,7 +331,7 @@ class TestSplitChangeType:
         assert "Aug 15, 2026" in card[0].value
         assert "2026-08-15" not in card[0].value
 
-        await writes.approve(svc.db, row.id, owner_user_id=1)
+        await change_queue.approve(svc.db, row.id, owner_user_id=1)
 
         by_parent = await svc.transaction_splits([txn_id])
         assert [s.amount for s in by_parent[txn_id]] == [-2_500, -5_100]
@@ -347,7 +347,7 @@ class TestSplitChangeType:
         txn_id, _, food_id = await _target_run(svc)
 
         with pytest.raises(ValueError, match="positive magnitudes"):
-            await writes.propose(
+            await change_queue.propose(
                 svc.db,
                 "transaction.split",
                 {
@@ -357,7 +357,7 @@ class TestSplitChangeType:
                 owner_user_id=1,
             )
         with pytest.raises(ValueError, match="at least one part"):
-            await writes.propose(
+            await change_queue.propose(
                 svc.db,
                 "transaction.split",
                 {"transaction_id": txn_id, "parts": []},
@@ -371,7 +371,7 @@ class TestSplitChangeType:
         """Magnitude rules are the service's; the queue's job is to
         surface the failure as audit and leave the decision open."""
         txn_id, _, food_id = await _target_run(svc)
-        row = await writes.propose(
+        row = await change_queue.propose(
             svc.db,
             "transaction.split",
             {
@@ -382,7 +382,7 @@ class TestSplitChangeType:
         )
 
         with pytest.raises(ValueError, match="exceed"):
-            await writes.approve(svc.db, row.id, owner_user_id=1)
+            await change_queue.approve(svc.db, row.id, owner_user_id=1)
 
         assert row.status == "pending"
         assert "exceed" in (row.result or {}).get("error", "")

@@ -1,12 +1,4 @@
-"""The voice pipeline: hear the turn, answer it as text would, say the answer.
-
-A spoken turn is a typed turn with a microphone in front of it. The
-transcript is the user's message and goes through ``chat`` with the same
-agent, surface, user and conversation a typed turn would carry, so tools,
-memory, approvals and history are the text path's own. Audio is not kept:
-the conversation holds the words, and speech usage is recorded by the STT
-and TTS services against the same user.
-"""
+"""The voice pipeline: transcribe, chat, optionally speak the answer."""
 
 from app.core.log import logger
 from app.services.ai.domains.voice import (
@@ -20,13 +12,14 @@ from app.services.ai.service.streaming import StreamingMixin
 
 
 class VoiceMixin(StreamingMixin):
-    """STT -> chat -> TTS on top of the chat mixins."""
+    """STT -> chat -> TTS orchestration on top of the chat mixins."""
 
     async def voice_chat(
         self,
         audio: AudioInput,
         conversation_id: str | None = None,
         user_id: str = "default",
+        owner_user_id: int | None = None,
         agent_slug: str | None = None,
         surface: str | None = None,
         transcription_hint: str | None = None,
@@ -35,10 +28,18 @@ class VoiceMixin(StreamingMixin):
     ) -> VoiceChatResponse:
         """Transcribe ``audio``, run it as a chat turn, optionally speak the answer.
 
-        ``agent_slug`` and ``surface`` are the caller's, exactly as it would
-        pass them for a typed turn. ``transcription_hint`` spells names the
-        STT model cannot guess. ``voice_mode`` returns the answer as plain
-        spoken sentences; ``return_audio`` also synthesizes them.
+        A spoken turn is the typed turn: the transcript is the user's message
+        in the same conversation, answered by the same agent. ``agent_slug``
+        and ``surface`` are the caller's, exactly as it would pass them for a
+        typed turn; the stack never picks one. ``transcription_hint`` spells
+        names the STT model cannot guess. ``voice_mode`` returns the answer
+        as plain spoken sentences; ``return_audio`` also synthesizes them.
+        Audio is not stored, and STT/TTS usage is recorded against
+        ``user_id``.
+
+        Raises:
+            AIServiceError: If the service is disabled or the turn fails
+            ProviderError: If the AI provider fails
         """
         if not self.config.enabled:
             raise AIServiceError("AI service is disabled")
@@ -52,6 +53,7 @@ class VoiceMixin(StreamingMixin):
                 message=transcription.text,
                 conversation_id=conversation_id,
                 user_id=user_id,
+                owner_user_id=owner_user_id,
                 agent_slug=agent_slug,
                 surface=surface,
             )
@@ -78,12 +80,16 @@ class VoiceMixin(StreamingMixin):
             )
         except AIServiceError:
             # ProviderError / ConversationError subclasses carry meaning for
-            # callers (the API router maps them to distinct status codes).
+            # callers (the API router maps them to distinct status codes);
+            # wrapping them here would collapse that distinction.
             raise
         except Exception as e:
+            # Logged, not returned: a provider's text can carry keys or URLs.
             logger.exception("Voice chat processing failed")
             raise AIServiceError("Voice chat processing failed") from e
 
     async def prepare_for_voice(self, text: str, max_chars: int = 4096) -> str:
-        """The answer as it should be said; see ``domains.voice.spoken``."""
+        """The answer as it should be said: the agent's own words, without
+        the markdown, cut at a sentence end within ``max_chars``. No model
+        call and no conversation: ``to_spoken`` strips the layout."""
         return to_spoken(text, max_chars)

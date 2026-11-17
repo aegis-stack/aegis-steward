@@ -1,57 +1,33 @@
-{# Her models (P8.3, issue 273), in the one modal: ONE list of every role's
-   models (chat, live call), grouped by vendor, narrowed by modality (All,
-   Text, Voice) and searched in one box; the recently used lead it. A row's
-   kind says which role a pick of it sets. Kept quiet: teal means exactly
-   one thing, a role's model, and says it once (the check). Every control
-   re-requests this partial into the dialog. #}
+{# The model picker, in the modal: ONE list of the chat models this install
+   can call, grouped by vendor and searched in one box; the recently used
+   lead it. What a live call runs on is picked with the voice (the Calls
+   chip). Kept quiet: teal means exactly one thing, the model in use, and
+   says it once (the check). A search re-requests only the list. #}
 {% from "components/macros/icons.html" import icon %}
-{% from "components/macros/layout.html" import avatar %}
-{% from "components/macros/chat.html" import model_chip %}
-{% from "components/macros/form.html" import control %}
-{% from "components/macros/layout.html" import dialog_title %}
-{# One section's rows: a pick posts the model id and its kind with the
-   search and the filter, so the dialog re-renders in the same view. #}
+{% from "components/macros/chat.html" import model_chip, model_row %}
+{% from "components/macros/layout.html" import avatar, dialog_title %}
+{# One section's rows: a pick posts the model id with the search, so the
+   dialog re-renders in the same view. #}
 {% macro rows(section, picker) %}
+{% set form %}hx-post="{{ picker.path }}" hx-target="#dialog-body" hx-swap="innerHTML"{% endset %}
+{% set hidden %}<input type="hidden" name="q" value="{{ picker.query }}">{% endset %}
 <ul class="pb-2">
   {% for row in section.rows %}
-  <li>
-    <form hx-post="{{ picker.path }}">
-      <input type="hidden" name="q" value="{{ picker.query }}"><input type="hidden" name="show" value="{{ picker.show }}"><input type="hidden" name="kind" value="{{ row.kind }}">{% if row.engine %}<input type="hidden" name="engine" value="{{ row.engine }}">{% endif %}
-      {% set current = (row.engine or row.model_id) in picker.active %}
-      <button type="submit" name="model_id" value="{{ row.model_id }}" data-model-id="{{ row.model_id }}" data-kind="{{ row.kind }}" {% if row.engine %}data-engine="{{ row.engine }}"{% endif %} {% if current %}aria-current="true"{% endif %}
-              class="w-full flex items-center gap-3 px-2 py-2 rounded text-left hover:bg-aegis-border/20 transition-colors">
-        {% if row.icon_url or row.icon_name %}{{ avatar(row.icon_name, row.icon_url) }}{% else %}<span class="w-5 shrink-0"></span>{% endif %}
-        <span class="min-w-0 flex-1">
-          <span class="block text-sm text-aegis-text truncate">{{ row.title }}</span>
-          <span class="block text-xs text-aegis-muted truncate">{{ row.model_id }}{% if row.note %} · {{ row.note }}{% endif %}</span>
-        </span>
-        {% if row.voice %}<span class="micro-label text-aegis-muted" data-voice>Voice</span>{% endif %}
-        {% if row.facts %}<span class="text-xs text-aegis-muted whitespace-nowrap">{{ row.facts }}</span>{% endif %}
-        {% if current %}{{ icon("check", "w-4 h-4 text-aegis-teal shrink-0", 2) }}{% endif %}
-      </button>
-    </form>
-  </li>
+  {{ model_row(row, row.model_id == picker.current, "data-model-id", form, hidden) }}
   {% endfor %}
   {% if section.hidden %}<li class="px-2 py-1.5 text-xs text-aegis-muted" data-more>{{ section.hidden }} more - search to narrow</li>{% endif %}
 </ul>
 {% endmacro %}
 {% if chip_only %}{{ model_chip(chip, path) }}{% else %}
 {% if chip_oob %}{{ model_chip(chip, picker.path, oob=True) }}{% endif %}
-<div id="model-picker" hx-target="#dialog-body" hx-swap="innerHTML">
-  {{ dialog_title("Models", "What she runs on, for the whole app. A pick takes effect on the next message or call.") }}
+<div id="model-picker">
+  {{ dialog_title("Models", "What the assistant writes with, for the whole app. A pick takes effect on the next message.") }}
   {# Only the list moves: swapping the search box mid-keystroke takes the
-     caret with it (the ``hx_filter`` recipe). #}
-  <form {{ hx_filter(picker.path, "#model-list") }}
-        hx-trigger="input changed delay:200ms from:input[name=q], change from:input[name=show]" class="space-y-3">
-    <input type="search" name="q" value="{{ picker.query }}" placeholder="Search models" aria-label="Search models" autofocus class="{{ control('input') }} w-full">
-    <fieldset class="flex gap-1" aria-label="Show">
-      {% for option, text in picker.filters %}
-      <label class="cursor-pointer">
-        <input type="radio" name="show" value="{{ option }}" class="sr-only peer" {% if option == picker.show %}checked{% endif %}>
-        <span class="chip">{{ text }}</span>
-      </label>
-      {% endfor %}
-    </fieldset>
+     caret with it. #}
+  <form hx-get="{{ picker.path }}" hx-target="#model-list" hx-select="#model-list" hx-swap="outerHTML"
+        hx-trigger="input changed delay:200ms from:input[name=q]" class="space-y-3">
+    <input type="search" name="q" value="{{ picker.query }}" placeholder="Search models" aria-label="Search models" autofocus
+           class="input input-bordered input-sm w-full bg-aegis-bg">
   </form>
   <div id="model-list" class="mt-3 h-[60vh] overflow-y-auto divide-y divide-aegis-border/60" data-models>
     {% if picker.empty %}
@@ -61,7 +37,7 @@
     {% if section.name %}
     <details class="group">
       <summary class="list-none cursor-pointer flex items-center gap-3 py-2.5">
-        {{ avatar(section.name, section.icon_url, "lg") }}
+        {{ avatar(section.name, section.icon_url, size="lg") }}
         <span class="micro-label text-aegis-text flex-1">{{ section.name }}</span>
         <span class="text-xs text-aegis-muted">{{ section.count }}</span>
         {{ icon("chevron-down", "w-4 h-4 text-aegis-muted transition-transform group-open:rotate-180", 2) }}

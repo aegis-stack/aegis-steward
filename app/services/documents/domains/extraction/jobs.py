@@ -2,23 +2,20 @@
 
 The worker task and the in-process runner both call ``run_extraction``;
 they differ only in how progress gets back to whoever is watching, which
-is the ``report`` callable each passes in.
+is the ``report`` callable each passes in. The worker's entry
+(``run_extraction_job``) ships only with a worker to run it.
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
 from typing import Any
 
 from app.core.db import get_async_session
 from app.services.documents.domains.extraction.pages import extract_document
 from app.services.documents.domains.extraction.vision import vision_reader
 from app.services.documents.domains.reading.proposals import read_and_propose
-
-# Sync on purpose: extract_document calls it between pages from inside its
-# own loop. A store that writes asynchronously schedules the write.
-Report = Callable[[str], None]
+from app.services.system.job_store import narrate
+from app.services.system.jobs import Report
 
 
 def progress_label(page: int, total: int) -> str:
@@ -58,30 +55,9 @@ async def run_extraction_job(
     job_id: str, document_id: int, owner_user_id: int | None, force: bool
 ) -> dict[str, Any]:
     """The worker's entry: narrate into the shared job store, then finish."""
-    from app.services.system.job_store import RedisJobStore
-
-    store = RedisJobStore.shared()
-    loop = asyncio.get_running_loop()
-    # Labels are written without waiting, so the page being read is never
-    # held up by Redis - but they are held here, because closing the client
-    # out from under a write in flight loses the progress it carried.
-    writes: set[asyncio.Task[None]] = set()
-
-    def report(label: str) -> None:
-        task = loop.create_task(store.set_label(job_id, label))
-        writes.add(task)
-        task.add_done_callback(writes.discard)
-
-    try:
-        result = await run_extraction(
+    return await narrate(
+        job_id,
+        lambda report: run_extraction(
             document_id, owner_user_id=owner_user_id, force=force, report=report
-        )
-        await store.finish(job_id, result)
-        return result
-    except Exception as exc:
-        await store.fail(job_id, str(exc) or type(exc).__name__)
-        raise
-    finally:
-        if writes:
-            await asyncio.gather(*writes, return_exceptions=True)
-        await store.aclose()
+        ),
+    )

@@ -1,9 +1,10 @@
 """Speech over HTTP: a spoken turn, transcription, synthesis."""
 
-from typing import Annotated, Any
+from typing import Any
 
 from fastapi import (
     APIRouter,
+    Depends,
     File,
     Form,
     HTTPException,
@@ -13,20 +14,18 @@ from fastapi import (
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+from app.components.backend.api.ai.service import ai_service
 from app.core.log import logger
-from app.core.uploads import read_upload
-from app.core.voice_settings import TTS_SPEED_MAX, TTS_SPEED_MIN, setting_default
-from app.services.ai.deps import ai_service
-from app.services.ai.domains.voice import (
-    AudioFormat,
-    AudioInput,
-    SpeechRequest,
-    TranscriptionResult,
-)
 from app.services.ai.service import (
     AIServiceError,
+    AudioFormat,
+    AudioInput,
     ProviderError,
+    SpeechRequest,
+    SpeechResult,
+    unsaid,
 )
+from app.services.shared.deps import get_optional_owner_user_id
 
 router = APIRouter()
 
@@ -61,46 +60,6 @@ class VoiceChatApiResponse(BaseModel):
     has_audio: bool = False  # Indicates if audio_response is available
 
 
-# A speech speed, as both synthesize routes take it.
-Speed = Annotated[
-    float, Form(ge=TTS_SPEED_MIN, le=TTS_SPEED_MAX, description="Speech speed")
-]
-
-
-async def _audio_input(audio: UploadFile, language: str | None = None) -> AudioInput:
-    """An upload as audio the STT takes: its format from the filename (wav
-    when it has none); refused when the format is unsupported or it is empty."""
-    audio_format = AudioFormat.of(audio.filename) if audio.filename else AudioFormat.WAV
-    if audio_format is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported audio format: {audio.filename}. "
-            f"Supported: {', '.join(f.value for f in AudioFormat)}",
-        )
-    content = await read_upload(audio)
-    if not content:
-        raise HTTPException(status_code=400, detail="Empty audio file")
-    return AudioInput(content=content, format=audio_format, language=language)
-
-
-def _transcription(result: TranscriptionResult) -> TranscriptionResponse:
-    """A transcription as the API answers with it."""
-    return TranscriptionResponse(
-        text=result.text,
-        language=result.language,
-        duration_seconds=result.duration_seconds,
-        confidence=result.confidence,
-        provider=result.provider.value,
-        segments=[
-            TranscriptionSegmentResponse(
-                text=seg.text, start=seg.start, end=seg.end, confidence=seg.confidence
-            )
-            for seg in result.segments or []
-        ]
-        or None,
-    )
-
-
 @router.post("/voice-chat", response_model=None)
 async def voice_chat(
     audio: UploadFile = File(..., description="Audio file to transcribe"),
@@ -115,6 +74,7 @@ async def voice_chat(
     transcription_hint: str | None = Query(
         None, description="Names the transcriber should spell right"
     ),
+    owner_user_id: int | None = Depends(get_optional_owner_user_id),
 ) -> VoiceChatApiResponse | Response:
     """
     Process voice input: transcribe → chat → return response.
@@ -136,20 +96,46 @@ async def voice_chat(
 
     Returns:
         If return_audio=False: VoiceChatApiResponse with transcription and text
-        If return_audio=True: Audio file (MP3) of the response
+        If return_audio=True: Audio file (its model's format: MP3 or WAV) of the response
 
     Raises:
         HTTPException: 400 if audio format not supported
         HTTPException: 503 if AI/STT service error
     """
     try:
-        audio_input = await _audio_input(audio)
+        # Determine audio format from filename
+        if audio.filename:
+            ext = audio.filename.rsplit(".", 1)[-1].lower()
+        else:
+            ext = "wav"  # Default
+
+        try:
+            audio_format = AudioFormat(ext)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported audio format: {ext}. "
+                f"Supported: {', '.join(f.value for f in AudioFormat)}",
+            )
+
+        # Read audio content
+        audio_content = await audio.read()
+
+        if len(audio_content) == 0:
+            raise HTTPException(status_code=400, detail="Empty audio file")
+
+        # Create AudioInput
+        audio_input = AudioInput(
+            content=audio_content,
+            format=audio_format,
+        )
 
         # Process voice chat
         result = await ai_service.voice_chat(
             audio=audio_input,
             conversation_id=conversation_id,
             user_id=user_id,
+            owner_user_id=owner_user_id,
             agent_slug=agent_slug,
             surface=surface,
             transcription_hint=transcription_hint,
@@ -161,9 +147,9 @@ async def voice_chat(
         if return_audio and result.audio_response:
             return Response(
                 content=result.audio_response,
-                media_type="audio/mpeg",
+                media_type=ai_service.tts.media_type,
                 headers={
-                    "Content-Disposition": 'attachment; filename="response.mp3"',
+                    "Content-Disposition": "attachment; filename=response",
                     "X-Transcription": result.transcription.text[
                         :100
                     ],  # First 100 chars
@@ -171,8 +157,28 @@ async def voice_chat(
                 },
             )
 
+        # Convert to API response
+        transcription_segments = None
+        if result.transcription.segments:
+            transcription_segments = [
+                TranscriptionSegmentResponse(
+                    text=seg.text,
+                    start=seg.start,
+                    end=seg.end,
+                    confidence=seg.confidence,
+                )
+                for seg in result.transcription.segments
+            ]
+
         return VoiceChatApiResponse(
-            transcription=_transcription(result.transcription),
+            transcription=TranscriptionResponse(
+                text=result.transcription.text,
+                language=result.transcription.language,
+                duration_seconds=result.transcription.duration_seconds,
+                confidence=result.transcription.confidence,
+                provider=result.transcription.provider.value,
+                segments=transcription_segments,
+            ),
             full_response=result.full_response,
             voice_response=result.voice_response,
             conversation_id=result.conversation_id,
@@ -181,10 +187,14 @@ async def voice_chat(
 
     except HTTPException:
         raise
-    except AIServiceError as e:
-        raise HTTPException(status_code=503, detail=f"AI service error: {e}")
-    except ProviderError as e:
-        raise HTTPException(status_code=502, detail=f"AI provider error: {e}")
+    # ProviderError before AIServiceError when it subclasses it. Each is
+    # logged, not returned: a provider's text can carry keys or URLs.
+    except ProviderError:
+        logger.exception("Voice chat provider error")
+        raise HTTPException(status_code=502, detail="AI provider error") from None
+    except AIServiceError:
+        logger.exception("Voice chat service error")
+        raise HTTPException(status_code=503, detail="AI service error") from None
     except Exception:
         logger.exception("Voice chat failed")
         raise HTTPException(status_code=500, detail="Voice chat failed") from None
@@ -217,12 +227,58 @@ async def transcribe_audio(
         HTTPException: 503 if STT service error
     """
     try:
-        audio_input = await _audio_input(audio, language)
+        # Determine audio format from filename
+        if audio.filename:
+            ext = audio.filename.rsplit(".", 1)[-1].lower()
+        else:
+            ext = "wav"
+
+        try:
+            audio_format = AudioFormat(ext)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported audio format: {ext}. "
+                f"Supported: {', '.join(f.value for f in AudioFormat)}",
+            )
+
+        # Read audio content
+        audio_content = await audio.read()
+
+        if len(audio_content) == 0:
+            raise HTTPException(status_code=400, detail="Empty audio file")
+
+        # Create AudioInput
+        audio_input = AudioInput(
+            content=audio_content,
+            format=audio_format,
+            language=language,
+        )
 
         # Transcribe
         result = await ai_service.stt.transcribe(audio_input)
 
-        return _transcription(result)
+        # Convert to API response
+        segments = None
+        if result.segments:
+            segments = [
+                TranscriptionSegmentResponse(
+                    text=seg.text,
+                    start=seg.start,
+                    end=seg.end,
+                    confidence=seg.confidence,
+                )
+                for seg in result.segments
+            ]
+
+        return TranscriptionResponse(
+            text=result.text,
+            language=result.language,
+            duration_seconds=result.duration_seconds,
+            confidence=result.confidence,
+            provider=result.provider.value,
+            segments=segments,
+        )
 
     except HTTPException:
         raise
@@ -239,7 +295,7 @@ async def stt_status() -> dict[str, Any]:
     Returns current STT configuration and availability.
     """
     try:
-        status = ai_service.stt.get_status()
+        status = await ai_service.stt.get_status()
         return {
             "service": "stt",
             "status": "available",
@@ -254,7 +310,7 @@ async def stt_status() -> dict[str, Any]:
 async def synthesize_speech(
     text: str = Form(..., description="Text to synthesize into speech"),
     voice: str | None = Form(None, description="Voice to use (provider-specific)"),
-    speed: Speed = setting_default("TTS_SPEED"),
+    speed: float = Form(1.0, ge=0.25, le=4.0, description="Speech speed (0.25-4.0)"),
 ) -> Response:
     """
     Synthesize speech from text.
@@ -264,36 +320,43 @@ async def synthesize_speech(
     Args:
         text: Text to synthesize
         voice: Optional voice ID (uses provider default if not specified)
-        speed: Speech speed multiplier, within the TTS speed bounds
+        speed: Speech speed multiplier (0.25 to 4.0, default 1.0)
 
     Returns:
-        Audio file response (MP3 format)
+        Audio file response (its model's format: MP3 or WAV)
 
     Raises:
         HTTPException: 503 if TTS service error
     """
+    result = await said(SpeechRequest(text=text, voice=voice, speed=speed))
+    return Response(
+        content=result.audio,
+        media_type=result.media_type,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="speech.{result.format.value}"'
+            ),
+        },
+    )
+
+
+async def said(request: SpeechRequest, tts: Any = None) -> SpeechResult:
+    """``request`` said aloud by ``tts`` (the configured voice when None),
+    or a 503 with why not (``unsaid``): every route that speaks comes here,
+    so a provider's own text, which can carry a key or a URL, stays in the
+    log."""
     try:
-        request = SpeechRequest(text=text, voice=voice, speed=speed)
-        result = await ai_service.tts.synthesize(request)
-
-        return Response(
-            content=result.audio,
-            media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": 'attachment; filename="speech.mp3"',
-            },
-        )
-
-    except Exception:
+        return await (tts or ai_service.tts).synthesize(request)
+    except Exception as exc:
         logger.exception("Speech synthesis failed")
-        raise HTTPException(status_code=503, detail="Speech synthesis failed") from None
+        raise HTTPException(status_code=503, detail=unsaid(exc)) from None
 
 
 @router.post("/synthesize/stream")
 async def synthesize_speech_stream(
     text: str = Form(..., description="Text to synthesize into speech"),
     voice: str | None = Form(None, description="Voice to use (provider-specific)"),
-    speed: Speed = setting_default("TTS_SPEED"),
+    speed: float = Form(1.0, ge=0.25, le=4.0, description="Speech speed (0.25-4.0)"),
 ) -> StreamingResponse:
     """
     Stream synthesized speech.
@@ -303,32 +366,37 @@ async def synthesize_speech_stream(
     Args:
         text: Text to synthesize
         voice: Optional voice ID (uses provider default if not specified)
-        speed: Speech speed multiplier, within the TTS speed bounds
+        speed: Speech speed multiplier (0.25 to 4.0, default 1.0)
 
     Returns:
-        Streaming audio response (MP3 format)
+        Streaming audio response (its model's format: MP3 or WAV)
 
     Raises:
         HTTPException: 503 if TTS service error
     """
     request = SpeechRequest(text=text, voice=voice, speed=speed)
 
+    # The first chunk before the response starts: once headers are out a
+    # failure can no longer be a 503, only a cut-off body.
+    try:
+        stream = ai_service.tts.synthesize_stream(request)
+        first = await anext(stream, b"")
+    except Exception as exc:
+        logger.exception("Speech synthesis streaming failed")
+        raise HTTPException(status_code=503, detail=unsaid(exc)) from None
+
     async def generate():
+        yield first
         try:
-            async for chunk in ai_service.tts.synthesize_stream(request):
+            async for chunk in stream:
                 yield chunk
         except Exception:
-            logger.exception("Speech synthesis streaming failed")
-            raise HTTPException(
-                status_code=503, detail="Speech synthesis failed"
-            ) from None
+            logger.exception("Speech synthesis stream broke off")
 
     return StreamingResponse(
         generate(),
-        media_type="audio/mpeg",
-        headers={
-            "Content-Disposition": 'attachment; filename="speech.mp3"',
-        },
+        media_type=ai_service.tts.media_type,
+        headers={"Content-Disposition": "attachment; filename=speech"},
     )
 
 
@@ -340,7 +408,7 @@ async def tts_status() -> dict[str, Any]:
     Returns current TTS configuration and availability.
     """
     try:
-        status = ai_service.tts.get_status()
+        status = await ai_service.tts.get_status()
         return {
             "service": "tts",
             "status": "available",

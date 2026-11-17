@@ -1,5 +1,5 @@
 """The built-in save_memory tool works end-to-end in the tool loop: it
-files an approval card for the turn's user and saves nothing yet (#484)."""
+files an approval card for the turn's user, and remembers nothing yet."""
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -15,8 +15,8 @@ from app.services.ai.domains.chat.tools import resolve_tools
 import app.services.ai.domains.chat.user_memory as user_memory_module
 from app.services.ai.domains.chat.user_memory import current_user_id
 from app.services.ai.models.agents import AgentUserMemory
-from app.services.finance import ai_write_tools
-from app.services.finance.models import FinancePendingChange
+from app.services.change_queue import PendingChange
+from tests._change_queue import queue_tools_on
 
 
 @dataclass
@@ -24,9 +24,10 @@ class _Deps:
     subject_id: int
 
 
-async def test_model_driven_save_memory_files_a_card(
+async def test_model_driven_save_memory_persists_a_fact(
     async_db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    acting_owner_user_id: int | None,
 ) -> None:
     # The root conftest's session: a bare local engine cannot create the
     # project's schema-qualified tables (finance, scheduler, ...).
@@ -35,7 +36,7 @@ async def test_model_driven_save_memory_files_a_card(
         yield async_db_session
 
     monkeypatch.setattr(user_memory_module, "get_async_session", fake_session)
-    monkeypatch.setattr(ai_write_tools, "get_async_session", fake_session)
+    queue_tools_on(async_db_session, monkeypatch)
 
     agent: ToolChatAgent[_Deps] = ToolChatAgent(
         model=TestModel(call_tools=["save_memory"]),
@@ -52,7 +53,9 @@ async def test_model_driven_save_memory_files_a_card(
     frames = [
         f
         async for f in agent.stream_turn(
-            scope=ChatScope(user_id="u7", surface="test"),
+            scope=ChatScope(
+                user_id="u7", surface="test", owner_user_id=acting_owner_user_id
+            ),
             deps=_Deps(1),
             message="remember this",
         )
@@ -64,17 +67,8 @@ async def test_model_driven_save_memory_files_a_card(
     assert isinstance(done, DoneFrame)
     assert done.tool_calls == 1
 
-    card = (
-        await async_db_session.exec(
-            select(FinancePendingChange).where(
-                FinancePendingChange.change_type == "memory.save"
-            )
-        )
-    ).one()
-    assert card.status == "pending"
+    (card,) = (await async_db_session.exec(select(PendingChange))).all()
+    assert card.change_type == "memory.save"
     assert card.payload["user_id"] == "u7"
-
-    result = await async_db_session.exec(
-        select(AgentUserMemory).where(AgentUserMemory.user_id == "u7")
-    )
-    assert result.first() is None
+    remembered = await async_db_session.exec(select(AgentUserMemory))
+    assert remembered.first() is None

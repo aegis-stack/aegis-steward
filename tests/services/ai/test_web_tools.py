@@ -1,4 +1,4 @@
-"""Her way onto the web (#593): a search, and a page read as text.
+"""The assistant's way onto the web (#1997): a search, and a page read as text.
 
 Both ride what the contact lookup already had - Brave search, keyed and
 budgeted, and the guarded fetch that refuses any host off the public

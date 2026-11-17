@@ -94,11 +94,9 @@ class Settings(
     # Port for the web server
     PORT: int = 8000
 
-    # The host port compose actually published. ``make serve`` shifts it
-    # when 8000 is taken and writes the choice to ``.env.ports``; the
-    # container still listens on PORT. Anything running on the host
-    # (every CLI command that calls this app's API) needs this one, not
-    # PORT. None means nothing shifted it.
+    # The host port compose published: ``make serve`` shifts it when 8000 is
+    # taken, writing ``.env.ports``, while the container stays on PORT. A CLI
+    # command on the host calling this app's API needs this one. None if unshifted.
     WEBSERVER_HOST_PORT: int | None = None
 
     # Where this app's own CLI reaches its API. Left empty it follows the
@@ -136,7 +134,11 @@ class Settings(
     AEGIS_STACK_VERSION: str = "dev"
     AEGIS_STACK_SOURCE: str | None = None
     DEPLOY_AGENT_SSH_SOCK: str | None = None
-    BUILD_ID: str = "dev"  # the deployed commit; namespaces cached payloads
+    # Deployed commit, stamped by ``aegis deploy``; cached payloads are
+    # namespaced by it. See ``services/insights/constants.py``.
+    BUILD_ID: str = "dev"
+    # Stamped too: a server has no ``.aegis/deploy.yml`` to read its address from.
+    SERVER_HOST: str | None = None
 
     # Health monitoring: checks answer on /health/ for any monitor to poll
     HEALTH_CHECK_TIMEOUT_SECONDS: Annotated[
@@ -219,12 +221,11 @@ class Settings(
     # build writes fingerprinted output into its ``dist/`` subdirectory.
     WEB_TEMPLATES_DIR: str = "app/components/web_frontend/templates"
     WEB_STATIC_DIR: str = "app/components/web_frontend/static"
-    # One-liner describing the project. Rendered in the landing hero and
-    # in its SEO meta description; defaults to what you typed when
-    # generating the project.
+    # One line on the project: the landing hero and its SEO description.
     PROJECT_DESCRIPTION: str = (
         "A production-ready async Python application built with Aegis Stack"
     )
+    WEB_THEME: str = "aegis"  # the Overseer's theme: a file in web_frontend/themes/
 
     # Authentication settings
     # Set false in .env (dev only) and a dev user is synthesized
@@ -366,7 +367,7 @@ class Settings(
     REDIS_URL: str = "redis://redis:6379"  # Docker service name by default
     REDIS_URL_LOCAL: str | None = None  # Manual override for local CLI usage
     # Host publish port chosen by `make serve` (loaded from .env.ports).
-    # None = use the container port. See `_localhost_url`.
+    # None = use the container port. See `localhost_url`.
     REDIS_HOST_PORT: int | None = None
     REDIS_DB: int = 0
     # Logical Redis DB for the application cache (view caches, bulk
@@ -381,7 +382,7 @@ class Settings(
         if self.REDIS_URL_LOCAL and not self.is_docker:
             return self.REDIS_URL_LOCAL
         if not self.is_docker:
-            return self._localhost_url(self.REDIS_URL, {"redis"}, self.REDIS_HOST_PORT)
+            return self.localhost_url(self.REDIS_URL, {"redis"}, self.REDIS_HOST_PORT)
         return self.REDIS_URL
 
     # Worker settings; per-queue ones are modelled in app/core/queue_workers.py
@@ -420,7 +421,6 @@ class Settings(
     DATABASE_CONNECT_ARGS: dict[str, Any] = {"check_same_thread": False}
 
     # AI Service Configuration
-    # Primary service settings
     AI_ENABLED: bool = True
     AI_PROVIDER: str = "public"  # Default to public provider
     AI_MODEL: str = "auto"  # Default model (public provider uses available models)
@@ -443,6 +443,12 @@ class Settings(
         Field(gt=0),
         Configurable("service_ai", "Seconds the model has to answer"),
     ] = 120.0
+    AI_CHAT_SHOW_CALLS: Annotated[
+        bool,
+        Configurable(
+            "service_ai", "Show each step's call in chat, not only what it is doing"
+        ),
+    ] = True
 
     # Batch sentiment scoring of conversations. OFF by default: the job
     # spends model tokens on every unscored conversation.
@@ -471,10 +477,6 @@ class Settings(
     GOOGLE_API_KEY: str | None = None
     GROQ_API_KEY: str | None = None
     MISTRAL_API_KEY: str | None = None
-    # OpenRouter aggregates many models behind the OpenAI API. Its own
-    # variable, never OPENAI_API_KEY: both can be set, and one must not
-    # stand in for the other.
-    OPEN_ROUTER_API_KEY: str | None = None
     COHERE_API_KEY: str | None = None
 
     # Ollama settings (local LLM inference)
@@ -482,7 +484,7 @@ class Settings(
     OLLAMA_BASE_URL_LOCAL: str | None = None  # Manual override for local CLI usage
     LLAMACPP_BASE_URL: str | None = None  # set: chat goes to this llama-server
     # Host publish port chosen by `make serve` (loaded from .env.ports).
-    # None = use the container port. See `_localhost_url`.
+    # None = use the container port. See `localhost_url`.
     OLLAMA_HOST_PORT: int | None = None
     OLLAMA_API_KEY: str | None = None  # Optional, usually not needed
 
@@ -570,9 +572,8 @@ class Settings(
     # separately in .env; these flags say which connect flows exist at all,
     # so the UI can offer them (and prompt for missing credentials) rather
     # than hide the feature on a fresh project.
-    # The scheduled bill-due email (comms' first finance use). Unset
-    # recipient means the job does nothing, so a fresh project never
-    # mails anyone by accident.
+    # The scheduled bill-due email: no recipient, no mail, so a fresh
+    # project never mails anyone by accident.
     FINANCE_BILL_EMAIL_TO: str | None = None
     FINANCE_BILL_EMAIL_DAYS: int = 7
 
@@ -610,7 +611,7 @@ class Settings(
     INGRESS_DASHBOARD_PORT: int | None = None
 
     @staticmethod
-    def _localhost_url(
+    def localhost_url(
         url: str, docker_hostnames: set[str], host_port: int | None = None
     ) -> str:
         """Rewrite a Docker-network URL for access from the host.
@@ -647,7 +648,7 @@ class Settings(
         if self.OLLAMA_BASE_URL_LOCAL and not self.is_docker:
             return self.OLLAMA_BASE_URL_LOCAL
         if not self.is_docker:
-            return self._localhost_url(
+            return self.localhost_url(
                 self.OLLAMA_BASE_URL,
                 {"ollama", "host.docker.internal"},
                 self.OLLAMA_HOST_PORT,
@@ -664,7 +665,7 @@ class Settings(
         if self.TRAEFIK_API_URL_LOCAL and not self.is_docker:
             return self.TRAEFIK_API_URL_LOCAL
         if not self.is_docker:
-            return self._localhost_url(
+            return self.localhost_url(
                 self.TRAEFIK_API_URL, {"traefik"}, self.INGRESS_DASHBOARD_PORT
             )
         return self.TRAEFIK_API_URL

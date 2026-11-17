@@ -4,7 +4,13 @@ import asyncio
 
 import pytest
 
-from app.services.system.jobs import JobHandle, JobRunner, JobSnapshot, now_iso
+from app.services.system.jobs import (
+    JobHandle,
+    JobRunner,
+    JobSnapshot,
+    now_iso,
+    progress_of,
+)
 
 
 class TestJobRunner:
@@ -21,6 +27,23 @@ class TestJobRunner:
         assert snapshot.status == "done"
         assert snapshot.result == {"answer": 42}
         assert snapshot.error is None
+
+    @pytest.mark.asyncio
+    async def test_the_latest_job_of_a_name_is_found_without_waiting(self) -> None:
+        """No await: a caller checks it and starts one as a single step."""
+        runner = JobRunner()
+
+        async def work(handle: JobHandle) -> dict:
+            return {}
+
+        first = runner.start("index:docs", work)
+        await runner.wait(first)
+        second = runner.start("index:docs", work)
+        runner.start("index:code", work)
+
+        assert runner.latest("index:docs").job_id == second  # type: ignore[union-attr]
+        assert runner.latest("index:gone") is None
+        await runner.wait(second)
 
     @pytest.mark.asyncio
     async def test_a_raising_job_fails_with_the_real_error(self) -> None:
@@ -284,3 +307,10 @@ class TestSharedStore:
         assert isinstance(
             RedisJobStore.from_url("redis://redis:6379")._redis, FakeRedis
         )
+
+
+def test_how_far_a_job_is_is_read_off_its_label() -> None:
+    """The first "N of M" a label says, whatever the words around it."""
+    assert progress_of("Indexing 50 of 200 files...") == (50, 200)
+    assert progress_of("3 of 12 · reads 1 of 2 pages") == (3, 12)
+    assert progress_of("Reading...") is None

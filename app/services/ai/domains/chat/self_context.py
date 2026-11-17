@@ -4,8 +4,8 @@ An agent's answer is only ever as good as what rode into the model with
 it, and until now nothing could say what that was. "Do you still have
 the page I pasted?" was unanswerable from the inside: history is
 budgeted by SIZE and the oldest turns drop silently, so an agent that
-had lost four Amazon pages sounded exactly like one that had them and
-found no match.
+had lost four pasted pages sounded exactly like one that still had them
+and found nothing in them.
 
 ``record_turn_context`` stamps the assembled shape at the moment the
 prompt is built; the ``context`` tool reads it back. The stamp holds
@@ -45,9 +45,10 @@ class TurnContext:
     history_budget: int = 0
     messages_kept: int = 0
     messages_dropped: int = 0
-    # Index of the oldest message the turn still showed: where the
-    # running summary (``summary``) has to reach to cover what fell out.
-    first_kept: int = 0
+    # The running summary of the dropped turns that rode (``summary``), and
+    # how far a fold is due to take it (0: none due).
+    summary_chars: int = 0
+    fold_to: int = 0
     tools: list[str] = field(default_factory=list)
     code_mode: bool = False
 
@@ -79,7 +80,8 @@ def begin_turn_context() -> TurnContext:
 
 
 def current_turn() -> TurnContext | None:
-    """This turn's stamp, once assembled, for what runs after the reply."""
+    """This turn's stamp, if one is open: what is read back after the turn
+    (a fold due, ``_finalize_conversation``)."""
     return _turn.get()
 
 
@@ -136,7 +138,12 @@ async def context() -> str:
     if stamp.messages_dropped:
         lines.append(
             f"{stamp.messages_dropped} older message(s) did NOT fit and are "
-            "not in front of me - anything only stated there is gone."
+            "not in front of me - "
+            + (
+                "only a running summary of them is, so a detail may need repeating."
+                if stamp.summary_chars
+                else "anything only stated there is gone."
+            )
         )
     else:
         lines.append("Nothing was dropped; the whole conversation is in front of me.")
@@ -153,6 +160,6 @@ register_tool(
     "context",
     context,
     description="Report what is in your own context window this turn",
-    effect="read",
     replace=True,
+    effect="read",
 )

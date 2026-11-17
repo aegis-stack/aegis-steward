@@ -332,8 +332,8 @@ async def propose_look_up(open_session: OpenSession, party_id: int) -> Any | Non
     of somebody else's server, and an open session is the whole app's
     write lock (see ``OpenSession``).
     """
+    from app.services.change_queue import list_changes, propose
     from app.services.documents.service import DocumentService
-    from app.services.finance.service import list_changes, propose
     from app.services.matters.domain_lookup import on_record, web_offers
     from app.services.matters.service import PartyService
 
@@ -343,7 +343,7 @@ async def propose_look_up(open_session: OpenSession, party_id: int) -> Any | Non
             return None
         # A card still waiting from an earlier press IS the answer: a
         # second press stacked a second, identical card (2026-09-24).
-        for change in await list_changes(db, status="pending"):
+        for change in await list_changes(db, owner_user_id=None, status="pending"):
             if change.change_type == "contact.amend" and (
                 change.payload.get("party_id") == party_id
                 and change.proposed_by_agent == "look-up"
@@ -389,6 +389,7 @@ async def propose_look_up(open_session: OpenSession, party_id: int) -> Any | Non
                 **{field: value for field, (value, _) in found.items()},
                 "sources": {field: cited for field, (_, cited) in found.items()},
             },
+            owner_user_id=None,
             proposed_by_agent="look-up",
         )
         await db.commit()

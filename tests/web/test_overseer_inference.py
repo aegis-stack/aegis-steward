@@ -89,7 +89,7 @@ def _rows(html: str) -> dict[str, str]:
 def test_models_lists_every_installed_model(signed_in: TestClient) -> None:
     rows = _rows(_get(signed_in, "models"))
     assert set(rows) == {"qwen2.5:7b", "llama3.1:8b"}
-    assert "4-bit" in rows["llama3.1:8b"] and "33k" in rows["llama3.1:8b"]
+    assert "4-bit" in rows["llama3.1:8b"] and "32k" in rows["llama3.1:8b"]
 
 
 def test_a_loaded_model_offers_unload_and_an_idle_one_load(

@@ -5,6 +5,8 @@ the name, maker and price are the catalog's.
 
 The rows are the app's once seeded: an edit (a tighter cap, other
 instructions) is never overwritten. A new engine is a new entry here.
+Seeded in place of the template's defaults (``startup/live_engine.py``):
+the same keys, with her finance instructions.
 """
 
 from typing import Any
@@ -23,7 +25,6 @@ REALTIME_REPLY_CAP = 1_200
 ENGINE_SEEDS: tuple[dict[str, Any], ...] = (
     {
         "key": "gpt-live",
-        "transport": "gpt_live",
         "model": "gpt-live-1",
         "note": "full duplex, hums while she works; billed by the minute plus her answers",
         "instructions": FINANCE_LIVE_INSTRUCTIONS,
@@ -31,7 +32,6 @@ ENGINE_SEEDS: tuple[dict[str, Any], ...] = (
     },
     {
         "key": "gpt-realtime-2.1",
-        "transport": "realtime",
         "model": "gpt-realtime-2.1",
         "note": "turn-taking, her agent's own brain; billed by its tokens",
         "instructions": FINANCE_REALTIME_INSTRUCTIONS,
@@ -40,7 +40,6 @@ ENGINE_SEEDS: tuple[dict[str, Any], ...] = (
     },
     {
         "key": "gpt-realtime-2.1-mini",
-        "transport": "realtime",
         "model": "gpt-realtime-2.1-mini",
         "note": "turn-taking, cheapest",
         "warning": "cannot use her code mode yet (spike, #272)",
@@ -50,22 +49,10 @@ ENGINE_SEEDS: tuple[dict[str, Any], ...] = (
     },
     {
         "key": "gemini-live",
-        "transport": "relay",
         "model": "gemini-3.8-live",
-        "note": "turn-taking, her agent's own brain, through our server",
+        "note": "turn-taking, her agent's own brain; billed by its tokens",
         "instructions": FINANCE_REALTIME_INSTRUCTIONS,
         "max_output_tokens": REALTIME_REPLY_CAP,
         "sort_order": 3,
-    },
-    {
-        # #274's trial: the same GPT-Live, run by Pydantic AI over our
-        # relay instead of hand-built. If it holds up, the hand-built path
-        # retires.
-        "key": "gpt-live-pydantic",
-        "transport": "relay",
-        "model": "gpt-live-1",
-        "note": "GPT-Live through Pydantic AI, carried by our server (trial)",
-        "instructions": FINANCE_LIVE_INSTRUCTIONS,
-        "sort_order": 4,
     },
 )

@@ -15,11 +15,11 @@ pytest.importorskip("app.services.ai", reason="no AI service in this stack")
 from app.components.web_frontend import (  # noqa: E402
     overseer_ai_catalog,
     overseer_settings,
-    ranges,
 )
+from app.core import ranges  # noqa: E402
 from app.core.config import settings  # noqa: E402
-from app.services.ai.domains.llm import llm_service  # noqa: E402
 from app.services.ai.models import PROVIDERS  # noqa: E402
+from app.services.ai.schemas import UsageStatsResponse  # noqa: E402
 from app.services.system.models import ComponentStatus  # noqa: E402
 from tests.web.dom import checked, one, select, text, triggers  # noqa: E402
 from tests.web.overseer import sign_in, status_with  # noqa: E402
@@ -114,13 +114,14 @@ def test_sections(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.components.web_frontend.overseer_ai import PERSISTED
 
     activity = ["Usage", "Costs", "Sentiment"] if PERSISTED else []
-    from app.components.web_frontend.overseer_ai_common import HAS_RAG
+    from app.components.web_frontend.overseer_ai_common import HAS_EVALS, HAS_RAG
 
     agents = ["Agents", "Memory"] if PERSISTED else []
     knowledge = ["Knowledge", "Search"] if HAS_RAG else []
-    from app.components.web_frontend.overseer_ai_common import HAS_VOICE
+    from app.components.web_frontend.chat_surface import HAS_VOICE
 
     voice = ["Voice"] if HAS_VOICE else []
+    evals = ["Evals"] if HAS_EVALS else []
     catalog = ["Catalog"] if PERSISTED else []
     assert [text(a) for a in select(html, "#overseer-subnav nav a")] == [
         "Overview",
@@ -129,6 +130,7 @@ def test_sections(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
         *agents,
         *knowledge,
         *voice,
+        *evals,
         *catalog,
         "Providers",
         # Its settings group, when this stack has one (a database backend or voice).
@@ -216,6 +218,7 @@ USAGE: dict[str, Any] = {
             "model_id": "claude-haiku-4-5",
             "model_title": "Claude Haiku 4.5",
             "vendor": "anthropic",
+            "vendor_color": "#D4A27F",
             "requests": 30,
             "tokens": 100_000,
             "cost": 1.5,
@@ -223,8 +226,9 @@ USAGE: dict[str, Any] = {
         },
         {
             "model_id": "gpt-4o-mini",
-            "model_title": None,
+            "model_title": "gpt-4o-mini",  # the query falls back to the id
             "vendor": "openai",
+            "vendor_color": "#10A37F",
             "requests": 10,
             "tokens": 50_000,
             "cost": 1.0,
@@ -254,10 +258,10 @@ USAGE: dict[str, Any] = {
 def _usage(monkeypatch: pytest.MonkeyPatch, seen: list[Any] | None = None) -> None:
     from app.components.web_frontend import overseer_ai
 
-    async def usage_stats(**kwargs: Any) -> dict[str, Any]:
+    async def usage_stats(**kwargs: Any) -> UsageStatsResponse:
         if seen is not None:
             seen.append(kwargs)
-        return USAGE
+        return UsageStatsResponse.model_validate(USAGE)
 
     monkeypatch.setattr(overseer_ai, "usage_stats", usage_stats)
 
@@ -285,7 +289,9 @@ def test_the_window_chips_narrow_the_range(
     client = _client(app, monkeypatch)
     _usage(monkeypatch, seen)
     client.get(f"{PAGE}/usage?days=7")
-    assert seen[-1]["start_time"] is not None
+    # The window's start on the timestamp columns' clock (naive UTC):
+    # an aware one is refused by Postgres, and the page reads empty.
+    assert seen[-1]["start_time"] == ranges.start(7)
     client.get(f"{PAGE}/usage?days={ranges.ALL}")
     assert seen[-1]["start_time"] is None
 
@@ -331,26 +337,28 @@ def test_a_recent_call_expands_to_its_detail(
 def test_sentiment_is_a_chart_and_the_negatives(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from datetime import datetime
     import json
 
     from app.components.web_frontend import overseer_ai
+    from app.services.ai.domains.chat.sentiment import RecentNegative, SentimentStats
 
-    async def sentiment_stats() -> dict[str, Any]:
-        return {
-            "enabled": True,
-            "total": 5,
-            "distribution": {"positive": 3, "neutral": 1, "negative": 1},
-            "performance": {},
-            "average_score": 0.42,
-            "recent_negatives": [
-                {
-                    "conversation_id": "c1",
-                    "overall_sentiment": "negative",
-                    "summary": "Could not find the invoice",
-                    "created_at": "2026-09-29T19:00:00",
-                }
+    async def sentiment_stats(db: Any) -> SentimentStats:
+        return SentimentStats(
+            enabled=True,
+            total=5,
+            distribution={"positive": 3, "neutral": 1, "negative": 1},
+            performance={},
+            average_score=0.42,
+            recent_negatives=[
+                RecentNegative(
+                    conversation_id="c1",
+                    overall_sentiment="negative",
+                    summary="Could not find the invoice",
+                    created_at=datetime(2026, 9, 29, 19),
+                )
             ],
-        }
+        )
 
     client = _client(app, monkeypatch)
     monkeypatch.setattr(overseer_ai, "sentiment_stats", sentiment_stats)
@@ -365,16 +373,17 @@ def test_sentiment_says_when_scoring_is_off(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from app.components.web_frontend import overseer_ai
+    from app.services.ai.domains.chat.sentiment import SentimentStats
 
-    async def sentiment_stats() -> dict[str, Any]:
-        return {
-            "enabled": False,
-            "total": 0,
-            "distribution": {},
-            "performance": {},
-            "average_score": 0.0,
-            "recent_negatives": [],
-        }
+    async def sentiment_stats(db: Any) -> SentimentStats:
+        return SentimentStats(
+            enabled=False,
+            total=0,
+            distribution={},
+            performance={},
+            average_score=0.0,
+            recent_negatives=[],
+        )
 
     client = _client(app, monkeypatch)
     monkeypatch.setattr(overseer_ai, "sentiment_stats", sentiment_stats)
@@ -628,7 +637,9 @@ def test_a_model_opens_in_the_drawer_with_use(
     client = _client(app, monkeypatch)
     _catalog(monkeypatch)
     monkeypatch.setattr(overseer_ai_catalog, "get_model_info", get_model_info)
-    monkeypatch.setattr(llm_service, "usable_providers", usable_providers)
+    monkeypatch.setattr(
+        "app.services.ai.domains.llm.llm_service.usable_providers", usable_providers
+    )
     link = one(select(_get(client, "catalog"), "#ai-catalog tbody tr")[1], "a")
     assert "model=openai%2Fgpt-4o-mini" in link.get("href")
     drawer = client.get("/partials/overseer/ai/models/drawer?model=openai/gpt-4o-mini")

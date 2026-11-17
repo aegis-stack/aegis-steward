@@ -174,3 +174,6 @@ async def check_auth_service_health() -> ComponentStatus:
                 "error_type": "health_check_failure",
             },
         )
+
+
+HEALTH = check_auth_service_health

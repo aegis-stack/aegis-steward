@@ -19,10 +19,10 @@ from typing import Any
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import approve, list_changes
 from app.services.documents.domains.reading import checks
 from app.services.documents.service import DocumentService
 from app.services.finance.constants import transaction_tag
-from app.services.finance.domains.writes.queue import approve, list_changes
 from app.services.finance.models import FinanceTransaction
 from app.services.finance.service import FinanceService
 from tests._session import opens
@@ -284,7 +284,9 @@ class TestProposingTheCards:
         assert len(asked) == 1
         cards = {
             c.payload["transaction_id"]: c.payload
-            for c in await list_changes(async_db_session, status="pending")
+            for c in await list_changes(
+                async_db_session, status="pending", owner_user_id=None
+            )
             if c.change_type == checks.CHECK
         }
         assert set(cards) == {ids["1524"], ids["1802"]}
@@ -297,7 +299,7 @@ class TestProposingTheCards:
         self, async_db_session: AsyncSession
     ) -> None:
         from app.core.storage import get_storage
-        from app.services.finance.domains.writes.queue import propose
+        from app.services.change_queue import propose
 
         ids = await _rows(async_db_session)
         store = get_storage()
@@ -320,7 +322,7 @@ class TestProposingTheCards:
             async_db_session, checks.CHECK, payload, owner_user_id=None
         )
 
-        await approve(async_db_session, card.id)
+        await approve(async_db_session, card.id, owner_user_id=None)
 
         filed, _ = await DocumentService(async_db_session).list_documents(
             tag=transaction_tag(ids["1802"])

@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import describe_change, propose, reject
 from app.services.documents.service import DocumentService
-from app.services.finance.domains.writes.queue import describe_change, propose, reject
 
 
 async def _stale_title_card(db: AsyncSession) -> int:
@@ -45,10 +45,12 @@ class TestACardThatNoLongerApplies:
     async def test_it_says_why_instead_of_raising(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains.writes.queue import get_change
+        from app.services.change_queue import get_change
 
         card = await get_change(
-            async_db_session, await _stale_title_card(async_db_session)
+            async_db_session,
+            await _stale_title_card(async_db_session),
+            owner_user_id=None,
         )
         assert card is not None
 
@@ -62,6 +64,6 @@ class TestACardThatNoLongerApplies:
     async def test_it_can_be_rejected(self, async_db_session: AsyncSession) -> None:
         card_id = await _stale_title_card(async_db_session)
 
-        rejected = await reject(async_db_session, card_id)
+        rejected = await reject(async_db_session, card_id, owner_user_id=None)
 
         assert rejected.status == "rejected"

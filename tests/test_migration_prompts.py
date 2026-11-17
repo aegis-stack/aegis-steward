@@ -1,9 +1,11 @@
-"""The migration prompt works when nothing can answer it: ``make
-migrate-fix`` applies what it wrote."""
+"""The migration prompts work when nothing can answer them: ``make
+migrate-fix`` applies what it wrote, ``make migrate-reset`` destroys nothing."""
 
 import io
 
 import pytest
+
+from scripts import dev_tasks
 
 migrate_fix = pytest.importorskip(
     "app.cli.migrate_fix",
@@ -31,3 +33,13 @@ def test_at_a_terminal_it_asks(
     monkeypatch.setattr("sys.stdin", _Terminal(f"{answer}\n"))
 
     assert migrate_fix._apply_now() is applies
+
+
+def test_reset_without_a_terminal_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    monkeypatch.setattr("subprocess.run", pytest.fail)
+
+    with pytest.raises(SystemExit) as exit_:
+        dev_tasks.migrate_reset()
+
+    assert exit_.value.code == 1

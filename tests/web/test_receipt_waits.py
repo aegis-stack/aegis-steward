@@ -56,7 +56,7 @@ class TestTheCard:
         self, client: TestClient, receipt_card: int
     ) -> None:
         page = client.get("/review").text
-        card = one(page, "li[id^=batch-]")
+        card = one(page, "[data-change-batch]")
         assert "A receipt on its charge" in text(card)
         assert "CVS receipt, $10.80" in text(card)
         drawn = one(card, "img[data-page]")

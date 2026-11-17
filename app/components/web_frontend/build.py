@@ -38,10 +38,9 @@ TAILWIND_OUTPUT = "dist/app.css"
 # gets a URL of its own, not the old drawing from a cache.
 APP_ICON = "app-icon.png"
 
-# Directories scanned for assets, and the extension each holds. Add a file
-# to one and it is fingerprinted automatically; no list to keep in sync.
-# ``vendor`` holds third-party scripts byte for byte, outside ``js`` so
-# Biome neither lints nor reformats them.
+# Directories scanned for hand-authored assets, and the extension each
+# holds. Add a file to either and it is fingerprinted automatically; no
+# list to keep in sync.
 SOURCE_TREES: tuple[tuple[str, str], ...] = (
     ("css", ".css"),
     ("js", ".js"),

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
-from app.components.backend.api import events as worker_events
 from app.components.backend.api import (
+    changes,
     health,
     jobs,
     kept_requests,
@@ -14,6 +14,7 @@ from app.components.backend.api import (
     traffic,
     worker,
 )
+from app.components.backend.api import events as worker_events
 from app.components.backend.api.ai.router import router as ai_router
 from app.components.backend.api.auth.router import router as auth_router
 from app.components.backend.api.comms.router import router as comms_router
@@ -50,3 +51,4 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(database_router, prefix="/api/v1")
     app.include_router(deploy_router, prefix="/api/v1")
     app.include_router(finance_router, prefix="/api/v1")
+    app.include_router(changes.router, prefix="/api/v1")

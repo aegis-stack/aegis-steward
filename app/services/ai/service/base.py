@@ -39,6 +39,7 @@ class AIServiceBase:
         """Initialize AI service with configuration."""
         self.settings = settings
         self.conversation_manager = ConversationManager()
+
         self._stt_service: STTService | None = None
         self._tts_service: TTSService | None = None
 
@@ -62,15 +63,3 @@ class AIServiceBase:
         if self._tts_service is None:
             self._tts_service = TTSService(self.settings)
         return self._tts_service
-
-    def refresh_config(self) -> None:
-        """Point the service at the live settings singleton, so ``config``
-        reads the values a runtime override or a slash command applied.
-
-        Reads the process-wide ``settings`` rather than a fresh ``Settings()``:
-        re-reading .env here would discard a runtime override, which lives in
-        the database and is applied onto this object.
-        """
-        from app.core.config import settings as live_settings
-
-        self.settings = live_settings

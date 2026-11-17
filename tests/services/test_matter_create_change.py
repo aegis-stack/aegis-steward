@@ -124,10 +124,10 @@ class TestOpeningAMatter:
 
 
 def test_it_is_registered_and_advertised() -> None:
-    from app.services.finance.domains import writes
+    from app.services import change_queue
     from app.services.finance.domains.detection.analyst.prompt_changes import (
         PROPOSING_CHANGES,
     )
 
-    assert "matter.create" in writes.registered_change_types()
+    assert "matter.create" in change_queue.registered_change_types()
     assert "`matter.create`" in PROPOSING_CHANGES

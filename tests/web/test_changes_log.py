@@ -170,7 +170,7 @@ class TestWhoAndWhat:
     async def test_an_approved_card_is_the_assistants(
         self, finance: FinanceService, async_db_session: AsyncSession, ledger: Ledger
     ) -> None:
-        from app.services.finance.domains.writes import approve, propose
+        from app.services.change_queue import approve, propose
 
         mystery, groceries = await _mystery(finance)
         card = await propose(

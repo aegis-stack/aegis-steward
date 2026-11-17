@@ -13,8 +13,8 @@ from fastapi.testclient import TestClient
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import propose
 from app.services.documents.domains.reading import checks
-from app.services.finance.domains.writes.queue import propose
 from tests.web.conftest import Ledger
 from tests.web.dom import none, one
 
@@ -78,11 +78,11 @@ class TestTheCheckOnTheCard:
     ) -> None:
         card = one(client.get("/review").text, f"#change-{check_card}")
         scan = one(card, "img[data-scan]")
-        assert scan.get("src") == f"/review/changes/{check_card}/scan"
+        assert scan.get("src") == f"/partials/changes/{check_card}/scan"
         none(card, "img[data-page]")
 
     def test_the_scan_is_served(self, client: TestClient, check_card: int) -> None:
-        served = client.get(f"/review/changes/{check_card}/scan")
+        served = client.get(f"/partials/changes/{check_card}/scan")
         assert served.status_code == 200
         assert served.headers["content-type"] == "image/jpeg"
         assert served.content[:3] == b"\xff\xd8\xff"
@@ -90,14 +90,14 @@ class TestTheCheckOnTheCard:
     def test_a_card_without_a_scan_has_none_to_serve(
         self, client: TestClient, review: object
     ) -> None:
-        assert client.get(f"/review/changes/{review.change}/scan").status_code == 404  # type: ignore[attr-defined]
+        assert client.get(f"/partials/changes/{review.change}/scan").status_code == 404  # type: ignore[attr-defined]
 
 
 class TestFixingThePayee:
     def test_the_edit_dialog_offers_the_payee_and_nothing_else(
         self, client: TestClient, check_card: int
     ) -> None:
-        dialog = client.get(f"/review/changes/{check_card}/edit").text
+        dialog = client.get(f"/partials/changes/{check_card}/edit").text
         assert one(dialog, 'input[name="payee"]').get("value") == "Sweat Scoop"
         none(dialog, 'input[name="front_key"]')
         none(dialog, 'input[name="number"]')
@@ -106,7 +106,9 @@ class TestFixingThePayee:
     def test_saving_it_changes_only_the_payee(
         self, client: TestClient, check_card: int
     ) -> None:
-        client.post(f"/review/changes/{check_card}/edit", data={"payee": "Sweet Scoop"})
+        client.post(
+            f"/partials/changes/{check_card}/edit", data={"payee": "Sweet Scoop"}
+        )
         card = one(client.get("/review").text, f"#change-{check_card}")
         assert "Sweet Scoop" in card.text_content()
         # The line it was read from stays, whichever shape it was filed in.
@@ -121,18 +123,18 @@ class TestAFiledPhotoOnItsCard:
     ) -> None:
         """A photo filed from chat shows on its card, as a check does (#430)."""
         from app.core.storage import get_storage
-        from app.services.ai.domains.chat.pastes import store_image
         from app.services.matters.matters import MatterService
+        from tests._pastes import keep_photo
 
         matter = await MatterService(async_db_session).open(title="2025 Tax Return")
         key = await get_storage().put(_jpeg(), content_type="image/jpeg")
-        photo = await store_image(
-            "0", key, "image/jpeg", "IMG_6611.jpeg", async_db_session
+        photo = await keep_photo(
+            async_db_session, "0", key, "image/jpeg", "IMG_6611.jpeg"
         )
         change = await propose(
             async_db_session,
             "document.file",
-            {"paste_id": photo["id"], "matter_id": matter.id},
+            {"paste_id": photo.id, "matter_id": matter.id},
             owner_user_id=None,
         )
         await async_db_session.commit()
@@ -140,7 +142,7 @@ class TestAFiledPhotoOnItsCard:
         card = one(client.get("/review").text, f"#change-{change.id}")
         assert (
             one(card, "img[data-scan]").get("src")
-            == f"/review/changes/{change.id}/scan"
+            == f"/partials/changes/{change.id}/scan"
         )
-        served = client.get(f"/review/changes/{change.id}/scan")
+        served = client.get(f"/partials/changes/{change.id}/scan")
         assert served.status_code == 200 and served.content[:3] == b"\xff\xd8\xff"

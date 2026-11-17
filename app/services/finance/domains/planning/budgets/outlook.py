@@ -175,7 +175,11 @@ _BASELINE_DAYS = 30 * _BASELINE_MONTHS
 
 
 async def parse_budget_goal(
-    db: AsyncSession, *, owner_user_id: int | None, text: str
+    db: AsyncSession,
+    *,
+    owner_user_id: int | None,
+    text: str,
+    today: date | None = None,
 ) -> GoalParseResponse:
     """Deterministic (not LLM-backed) reading of a natural-language
     goal: "I wanna cut back on Starbucks" -> a payee match against the
@@ -192,7 +196,7 @@ async def parse_budget_goal(
     percent_match = re.search(r"(?<!\d)(\d{1,3})\s*%", text)
     fraction = int(percent_match.group(1)) / 100 if percent_match else 0.5
 
-    cutoff = current_date() - timedelta(days=_BASELINE_DAYS)
+    cutoff = (today or current_date()) - timedelta(days=_BASELINE_DAYS)
     txn_rows = await queries.outflow_tuples(
         db, owner_user_id=owner_user_id, start=cutoff
     )

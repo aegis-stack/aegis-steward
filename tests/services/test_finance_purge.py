@@ -131,7 +131,7 @@ async def test_a_proposal_naming_a_deleted_account_is_set_aside(
 ) -> None:
     """A pending change aimed at an account that is gone would apply to
     nothing, or fail when approved: it is expired, saying why (#389)."""
-    from app.services.finance.domains.writes import queue
+    from app.services import change_queue as queue
 
     service = FinanceService(async_db_session)
     gone = await service.create_manual_account(

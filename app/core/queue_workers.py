@@ -25,14 +25,29 @@ class QueueWorker(BaseModel):
     concurrency: PositiveInt = 10  # jobs one worker process runs at once
     # The oldest waiting job past this marks the queue backed up.
     max_wait_seconds: PositiveInt = 300
+    # How long a job may run, unless its task names its own ``timeout``
+    # (a taskiq ``timeout``, a dramatiq ``time_limit``; arq's ``job_timeout``).
+    timeout_seconds: PositiveInt = 300
 
 
-# The queues the stack ships with; override any of them, or add others,
-# with ``WORKER_QUEUES='{"load_test": {"concurrency": 100}}'``.
-DEFAULT_QUEUES: dict[str, QueueWorker] = {
-    QueueName.LOAD_TEST: QueueWorker(concurrency=50),
+# The queues the stack ships with; then the ones plugins brought, with the
+# concurrency their plugin asked for (``app/core/plugin_queue_defaults.py``,
+# rendered from the plugins in ``.copier-answers.yml``). Override any of
+# them, or add others, with ``WORKER_QUEUES='{"load_test": {"concurrency": 100}}'``.
+_STACK_QUEUES: dict[str, QueueWorker] = {
+    QueueName.LOAD_TEST: QueueWorker(concurrency=50, timeout_seconds=60),
     QueueName.SYSTEM: QueueWorker(concurrency=15),
 }
+
+# Guarded: a project generated before plugins could ship queue defaults
+# gains the module on its next ``aegis add``/``update``, and must keep
+# importing until then.
+try:
+    from app.core.plugin_queue_defaults import PLUGIN_QUEUE_DEFAULTS
+except ImportError:  # pragma: no cover - projects predating the hook
+    PLUGIN_QUEUE_DEFAULTS = {}
+
+DEFAULT_QUEUES: dict[str, QueueWorker] = {**_STACK_QUEUES, **PLUGIN_QUEUE_DEFAULTS}
 
 
 def queue_worker(

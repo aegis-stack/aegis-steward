@@ -6,16 +6,56 @@ configuration management, and streaming support.
 """
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 import logging
 import time
 from typing import Any
 
-from ..models import SpeechRequest, SpeechResult, TTSProvider
+from ..models import (
+    MEDIA_TYPES,
+    CannotRunError,
+    SpeechRequest,
+    SpeechResult,
+    SpeechTokens,
+    TTSProvider,
+    speech_format,
+)
+from ..spoken import pronounced
+from . import length
 from .config import TTSConfig, get_tts_config
 from .providers import BaseTTSProvider, get_tts_provider
 
 logger = logging.getLogger(__name__)
+
+# What a provider's answer means, by the HTTP status it answered with: said
+# on the page in place of its own text, which can carry a key or a URL.
+UNSAID = {
+    **dict.fromkeys((401, 403), "The voice's provider refused its key."),
+    404: "The voice's provider does not have this model.",
+    429: "The voice's provider is out of quota for now. Try later, or another voice.",
+    **dict.fromkeys(
+        (500, 502, 503, 504), "The voice's provider is busy. Try again in a moment."
+    ),
+}
+
+
+def unsaid(exc: BaseException) -> str:
+    """Why speech could not be made, safe to show: the app's own refusal,
+    or what the provider's answer means (``UNSAID``), found down the chain
+    of causes; never the provider's text, which the log has."""
+    seen: set[int] = set()
+    cause: BaseException | None = exc
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, CannotRunError):
+            return str(cause)
+        if said := UNSAID.get(getattr(cause, "status_code", None) or 0):
+            return said
+        if isinstance(cause, TimeoutError):
+            return "The voice's provider did not answer in time."
+        if isinstance(cause, ConnectionError):  # a speech server not running
+            return "The voice's provider could not be reached."
+        cause = cause.__cause__
+    return "The voice could not be made. The log says why."
 
 
 class TTSService:
@@ -66,6 +106,7 @@ class TTSService:
         self._settings = settings
         self._explicit_api_key = api_key
         self._provider_instance: BaseTTSProvider | None = None
+        self._provider_key: str | None = None
 
         # Build config from settings or explicit values
         if provider or model or voice:
@@ -98,27 +139,35 @@ class TTSService:
         return self._config.get_model()
 
     @property
+    def media_type(self) -> str:
+        """What its audio is served as, known before any is made (a stream's
+        response starts before its first byte)."""
+        return MEDIA_TYPES[speech_format(self.provider_type, self.model)]
+
+    @property
     def voice(self) -> str:
         """Get the configured voice (with provider default fallback)."""
         return self._config.get_voice()
 
-    def _get_api_key(self) -> str | None:
+    async def _get_api_key(self) -> str | None:
         """Get API key for the current provider."""
         if self._explicit_api_key:
             return self._explicit_api_key
 
         if self._settings:
-            return self._config.get_api_key(self._settings)
+            return await self._config.get_api_key(self._settings)
 
         return None
 
-    def _get_provider(self) -> BaseTTSProvider:
-        """Get or create the TTS provider instance."""
-        if self._provider_instance is None:
+    async def _get_provider(self) -> BaseTTSProvider:
+        """Get or create the TTS provider instance; rebuilt when the
+        key changes, so one saved while the app runs takes effect."""
+        api_key = await self._get_api_key()
+        if self._provider_instance is None or api_key != self._provider_key:
+            self._provider_key = api_key
             provider_type = self.provider_type
             model = self.model
             voice = self.voice
-            api_key = self._get_api_key()
 
             logger.info(f"Initializing TTS provider: {provider_type.value}")
 
@@ -127,16 +176,20 @@ class TTSService:
                 api_key=api_key,
                 model=model,
                 voice=voice,
+                server_url=self._config.server_url,
+                server=self._config.server,
             )
 
         return self._provider_instance
 
     def _configured(self, request: SpeechRequest) -> SpeechRequest:
         """The request with what it leaves unset taken from the settings.
-        TTS_SPEED used to be read and then never sent: every request carried
-        its own default of 1.0 (2026-09-25)."""
+        The settings' speed and delivery instructions are sent unless the
+        request names its own; the text is said the pronunciation list's way
+        (``spoken.pronounced``), whoever asked for it."""
         return request.model_copy(
             update={
+                "text": pronounced(request.text),
                 "speed": request.speed or self._config.speed,
                 "instructions": request.instructions or self._config.instructions,
             }
@@ -159,7 +212,7 @@ class TTSService:
         Raises:
             RuntimeError: If synthesis fails.
         """
-        provider = self._get_provider()
+        provider = await self._get_provider()
 
         logger.debug(
             f"Synthesizing speech ({len(request.text)} chars, "
@@ -190,9 +243,8 @@ class TTSService:
             latency_ms = int((time.perf_counter() - start_time) * 1000)
             await self._record_usage(
                 input_characters=len(request.text),
-                output_bytes=len(result.audio) if result else None,
                 output_duration_seconds=result.duration_seconds if result else None,
-                voice=request.voice or self.voice,
+                tokens=result.tokens if result else None,
                 latency_ms=latency_ms,
                 user_id=user_id,
                 success=success,
@@ -215,7 +267,14 @@ class TTSService:
         Raises:
             RuntimeError: If synthesis fails.
         """
-        provider = self._get_provider()
+        from ..catalog import streams  # the catalog imports this package
+
+        if not streams(self.model):
+            # Whole (its tokens and length recorded as ``synthesize`` records
+            # them): a realtime model's WAV, Gemini's.
+            yield (await self.synthesize(request, user_id)).audio
+            return
+        provider = await self._get_provider()
 
         logger.debug(
             f"Streaming speech synthesis ({len(request.text)} chars) "
@@ -223,11 +282,11 @@ class TTSService:
         )
 
         start_time = time.perf_counter()
-        sent = 0
         error_message: str | None = None
+        said = bytearray()
         try:
             async for chunk in provider.synthesize_stream(self._configured(request)):
-                sent += len(chunk)
+                said += chunk
                 yield chunk
         except Exception as e:
             error_message = str(e)
@@ -235,9 +294,9 @@ class TTSService:
         finally:
             await self._record_usage(
                 input_characters=len(request.text),
-                output_bytes=sent,
-                output_duration_seconds=None,
-                voice=request.voice or self.voice,
+                output_duration_seconds=length.seconds(
+                    bytes(said), speech_format(self.provider_type, self.model)
+                ),
                 latency_ms=int((time.perf_counter() - start_time) * 1000),
                 user_id=user_id,
                 success=error_message is None,
@@ -251,34 +310,34 @@ class TTSService:
         """
         self._provider_instance = None
 
-    def validate(self) -> list[str]:
+    async def validate(self) -> list[str]:
         """Validate the TTS configuration.
 
         Returns:
             List of validation error messages (empty if valid).
         """
         if self._settings:
-            return self._config.validation_errors(self._settings)
+            return await self._config.validation_errors(self._settings)
         return []
 
-    def is_available(self) -> bool:
+    async def is_available(self) -> bool:
         """Check if the configured TTS provider is available.
 
         Returns:
             True if the provider is properly configured and available.
         """
         if self._settings:
-            return self._config.is_available(self._settings)
+            return await self._config.is_available(self._settings)
         # Without settings, assume available (will fail at runtime if not)
         return True
 
-    def get_status(self) -> dict[str, Any]:
+    async def get_status(self) -> dict[str, Any]:
         """Get TTS service status information.
 
         Returns:
             Dictionary with provider type, model, voice, availability, and validation info.
         """
-        errors = self.validate()
+        errors = await self.validate()
         return {
             "provider": self.provider_type.value,
             "model": self.model,
@@ -292,78 +351,38 @@ class TTSService:
     async def _record_usage(
         self,
         input_characters: int,
-        output_bytes: int | None,
         output_duration_seconds: float | None,
-        voice: str | None,
         latency_ms: int,
         user_id: str | None,
         success: bool,
         error_message: str | None,
+        tokens: SpeechTokens | None = None,
     ) -> None:
-        """Record TTS usage to database.
-
-        Args:
-            input_characters: Length of input text.
-            output_bytes: Size of output audio in bytes.
-            output_duration_seconds: Duration of output audio.
-            voice: Voice ID used for synthesis.
-            latency_ms: Request latency in milliseconds.
-            user_id: Optional user identifier.
-            success: Whether synthesis succeeded.
-            error_message: Error message if synthesis failed.
-        """
+        """The spoken reply's row in the usage ledger, priced at the
+        catalog's rates (by the character, the second of speech, or a
+        realtime model's tokens).
+        Never fails the request."""
         try:
-            from app.core.db import get_async_session
             from app.services.ai.domains.spend import recording as usage_recording
-            from app.services.ai.models.voice.usage import TTSUsage
         except ImportError:
-            # A project generated without a database has no tts_usage table
-            # (and no app.core.db at all). The recording call stays in the
-            # synthesis path so the code is one shape everywhere; there is
-            # simply nowhere to write, and a warning per request would be
-            # worse than silence.
+            # A project generated without a database has no ledger (and no
+            # app.core.db at all). The recording call stays in the path so
+            # the code is one shape everywhere; there is simply nowhere to
+            # write, and a warning per request would be worse than silence.
             return
-
-        # Priced at the catalog's rates (by the character, or by the
-        # second of speech), and written to the usage ledger beside every
-        # other model cost (#270).
-        cost = await usage_recording.speech_cost(
+        await usage_recording.record_speech(
+            usage_recording.TTS_ACTION,
             self.model,
-            characters=input_characters,
-            output_seconds=output_duration_seconds,
-        )
-        try:
-            async with get_async_session() as session:
-                usage = TTSUsage(
-                    provider=self.provider_type.value,
-                    model=self.model,
-                    voice=voice,
-                    user_id=user_id,
-                    timestamp=datetime.now(UTC),
-                    input_characters=input_characters,
-                    output_duration_seconds=output_duration_seconds,
-                    output_bytes=output_bytes,
-                    latency_ms=latency_ms,
-                    total_cost=cost,
-                    success=success,
-                    error_message=error_message,
-                )
-                session.add(usage)
-            await usage_recording.record_speech(
-                "tts",
+            cost=await usage_recording.speech_cost(
                 self.model,
-                cost=cost,
-                seconds=output_duration_seconds,
-                user_id=user_id,
-                success=success,
-                error_message=error_message,
-            )
-
-            logger.debug(
-                f"TTS usage recorded: {input_characters} chars, "
-                f"{latency_ms}ms, success={success}"
-            )
-
-        except Exception as e:
-            # Don't fail the request if usage tracking fails
-            logger.warning(f"Failed to record TTS usage: {e}")
+                characters=input_characters,
+                output_seconds=output_duration_seconds,
+                tokens=tokens,
+            ),
+            seconds=output_duration_seconds,
+            duration_ms=latency_ms,
+            tokens=tokens,
+            user_id=user_id,
+            success=success,
+            error_message=error_message,
+        )

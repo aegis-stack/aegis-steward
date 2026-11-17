@@ -554,14 +554,15 @@ class TestGoals:
         documented way to tint a ``<progress>`` and Chrome paints its
         own colour anyway, so the tone never reached the screen. The
         fill is painted from ``currentColor`` now, which means the tone
-        has to arrive as a text-* class."""
+        has to arrive as a text colour: ``.toned`` reads it from
+        ``data-tone`` (input.css, the one home of the tone colours)."""
         from app.components.web_frontend.rendering import templates
 
         macros = templates.get_template("components/macros/layout.html").module
 
-        assert "text-aegis-teal" in macros.progress(0.5, "ok")
-        assert "text-aegis-amber" in macros.progress(0.85, "warn")
-        assert "text-error" in macros.progress(1.2, "error")
+        for fill, tone in ((0.5, "ok"), (0.85, "warn"), (1.2, "error")):
+            bar = one(str(macros.progress(fill, tone)), "progress.toned")
+            assert bar.get("data-tone") == tone
         assert "accent-" not in macros.progress(0.5, "warn")
 
     def test_pause_toggles_in_place(self, client: TestClient, budget: Budget) -> None:

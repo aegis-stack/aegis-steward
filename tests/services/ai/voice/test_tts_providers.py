@@ -1,11 +1,24 @@
 """Tests for TTS providers."""
 
-from app.services.ai.domains.voice.models import TTSProvider
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from app.services.ai.domains.voice.models import (
+    DEFAULT_TTS_MODEL,
+    AudioFormat,
+    SpeechRequest,
+    SpeechTokens,
+    TTSProvider,
+)
 from app.services.ai.domains.voice.tts import (
     BaseTTSProvider,
+    GeminiTTSProvider,
     OpenAITTSProvider,
     get_tts_provider,
 )
+from tests._voice_errors import AnsweredError
 
 
 class TestGetTTSProvider:
@@ -63,10 +76,9 @@ class TestOpenAITTSProvider:
     """Test OpenAITTSProvider class."""
 
     def test_default_model(self) -> None:
-        """Test default model is tts-1."""
         provider = OpenAITTSProvider()
 
-        assert provider.model == "tts-1"
+        assert provider.model == DEFAULT_TTS_MODEL
 
     def test_custom_model(self) -> None:
         """Test custom model can be set."""
@@ -156,84 +168,320 @@ class TestBaseTTSProviderInterface:
             assert provider_class.provider_type == expected_type
 
 
-class TestOpenAIStreamsForReal:
-    """``synthesize_stream`` used to await OpenAI's whole response and then
-    slice it, so an 843-character answer took 31s before the first byte
-    left (2026-09-25). It has to pass the audio on as it is generated."""
+class TestGeminiTTSProvider:
+    """Gemini says a line in one of its voices through the Interactions
+    API: the line is the transcript, the delivery its ``speech_metadata``
+    style, the voice in ``speech_config``; it answers with a WAV."""
 
-    async def test_chunks_are_passed_on_as_they_arrive(self) -> None:
-        from types import SimpleNamespace
+    async def test_a_line_comes_back_as_wav_in_the_voice_asked(self) -> None:
+        pytest.importorskip("google.genai")
+        import base64
+        import io
+        import wave
 
-        from app.services.ai.domains.voice.models import SpeechRequest
-        from app.services.ai.domains.voice.tts import OpenAITTSProvider
+        asked: dict[str, Any] = {}
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24_000)
+            w.writeframes(b"\x01\x00" * 2400)  # a tenth of a second
+        wav = out.getvalue()
 
-        arrived: list[bytes] = []
-        seen_before_end: list[list[bytes]] = []
+        async def create(**kwargs: Any) -> Any:
+            asked.update(kwargs)
+            return SimpleNamespace(
+                output_audio=SimpleNamespace(data=base64.b64encode(wav))
+            )
 
-        class _Response:
-            async def iter_bytes(self, chunk_size: int | None = None):  # noqa: ANN202
-                for chunk in (b"ID3", b"frame1", b"frame2"):
-                    arrived.append(chunk)
-                    yield chunk
-
-        class _Streaming:
-            def __init__(self) -> None:
-                self.kwargs: dict[str, object] = {}
-
-            def create(self, **kwargs: object) -> _Streaming:
-                self.kwargs = kwargs
-                return self
-
-            async def __aenter__(self) -> _Response:
-                return _Response()
-
-            async def __aexit__(self, *exc: object) -> None:
-                return None
-
-        streaming = _Streaming()
-        provider = OpenAITTSProvider(model="gpt-4o-mini-tts", api_key="k")
+        provider = get_tts_provider(TTSProvider.GEMINI, api_key="k", voice="Kore")
+        assert isinstance(provider, GeminiTTSProvider)
         provider._client = SimpleNamespace(
-            audio=SimpleNamespace(
-                speech=SimpleNamespace(with_streaming_response=streaming)
+            aio=SimpleNamespace(interactions=SimpleNamespace(create=create))
+        )
+
+        result = await provider.synthesize(
+            SpeechRequest(text="Hello there.", voice="Puck", instructions="Warmly")
+        )
+
+        assert result.format == AudioFormat.WAV and result.audio == wav
+        assert result.duration_seconds == 0.1
+        assert asked["model"] == "gemini-3.8-flash-tts"
+        assert asked["generation_config"] == {"speech_config": [{"voice": "Puck"}]}
+        [content] = asked["input"][0]["content"]
+        assert content["text"] == "Hello there."
+        assert content["annotations"] == [
+            {"type": "speech_metadata", "style": "Warmly"}
+        ]
+
+
+class _Realtime:
+    """OpenAI's Realtime API, faked at the connection: what was sent, and
+    the events it answers with."""
+
+    def __init__(self, events: list[Any]) -> None:
+        self.sent: dict[str, Any] = {}
+        self.connected: dict[str, Any] = {}
+        self.audio_sent = False
+        self._events = events
+        self.session = SimpleNamespace(update=self._keep("session"))
+        self.response = SimpleNamespace(create=self._keep("response"))
+        self.input_audio_buffer = SimpleNamespace(append=self._heard)
+
+    def _keep(self, name: str) -> Any:
+        async def keep(**kwargs: Any) -> None:
+            self.sent[name] = kwargs[name]
+
+        return keep
+
+    async def _heard(self, **kwargs: Any) -> None:
+        self.audio_sent = True
+
+    async def __aenter__(self) -> _Realtime:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def __aiter__(self) -> Any:
+        for event in self._events:
+            yield event
+
+    def client(self) -> Any:
+        def connect(**kwargs: Any) -> _Realtime:
+            self.connected = kwargs
+            return self
+
+        return SimpleNamespace(realtime=SimpleNamespace(connect=connect))
+
+
+def _done(status: str = "completed") -> Any:
+    usage = SimpleNamespace(
+        input_tokens=40,
+        output_tokens=120,
+        input_token_details=SimpleNamespace(
+            audio_tokens=0, cached_tokens=0, cached_tokens_details=None
+        ),
+        output_token_details=SimpleNamespace(audio_tokens=100, text_tokens=20),
+    )
+    return SimpleNamespace(
+        type="response.done",
+        response=SimpleNamespace(status=status, status_details=None, usage=usage),
+    )
+
+
+class TestOpenAIRealtimeSpeech:
+    """OpenAI's replacement for its retiring speech models,
+    gpt-realtime-2.1-mini, speaks only over the Realtime API. A line is
+    the response's only message, and the instructions say to read it, so
+    a line that reads as a command is read, not obeyed. It is one way:
+    nothing is ever heard, only said."""
+
+    async def test_a_line_is_read_word_for_word_as_wav(self) -> None:
+        import base64
+        import io
+        import wave
+
+        pcm = b"\x01\x00" * 2400  # a tenth of a second at 24kHz
+        realtime = _Realtime(
+            [
+                SimpleNamespace(
+                    type="response.output_audio.delta",
+                    delta=base64.b64encode(pcm[:2400]).decode(),
+                ),
+                SimpleNamespace(
+                    type="response.output_audio.delta",
+                    delta=base64.b64encode(pcm[2400:]).decode(),
+                ),
+                _done(),
+            ]
+        )
+        provider = get_tts_provider(
+            TTSProvider.OPENAI, api_key="k", model="gpt-realtime-2.1-mini"
+        )
+        provider._client = realtime.client()
+
+        result = await provider.synthesize(
+            SpeechRequest(
+                text="Hello there.", voice="marin", instructions="Warmly.", speed=1.2
             )
         )
 
-        got: list[bytes] = []
-        async for chunk in provider.synthesize_stream(
-            SpeechRequest(text="Hello there")
-        ):
-            got.append(chunk)
-            seen_before_end.append(list(arrived))
-
-        assert got == [b"ID3", b"frame1", b"frame2"]
-        # The first chunk reached us before the rest had been generated.
-        assert seen_before_end[0] == [b"ID3"]
-        assert streaming.kwargs["input"] == "Hello there"
-        assert streaming.kwargs["response_format"] == "mp3"
-
-
-class TestOpenAIRequestKnobs:
-    """``speed`` works on every OpenAI speech model (measured on
-    gpt-4o-mini-tts, 2026-09-25: 6.40s -> 4.95s at 1.5); ``instructions``
-    (tone, emotion, pacing) exists only on the gpt-4o models."""
-
-    def test_gpt_4o_gets_speed_and_instructions(self) -> None:
-        from app.services.ai.domains.voice.models import SpeechRequest
-        from app.services.ai.domains.voice.tts import OpenAITTSProvider
-
-        provider = OpenAITTSProvider(model="gpt-4o-mini-tts", api_key="k")
-        kwargs = provider._speech_kwargs(
-            SpeechRequest(text="Hi", speed=1.4, instructions="Warm.")
+        assert result.format == AudioFormat.WAV and result.duration_seconds == 0.1
+        with wave.open(io.BytesIO(result.audio)) as w:
+            assert w.getframerate() == 24_000 and w.readframes(w.getnframes()) == pcm
+        session = realtime.sent["session"]
+        assert session["output_modalities"] == ["audio"]
+        assert session["audio"]["input"]["turn_detection"] is None
+        assert session["audio"]["output"]["voice"] == "marin"
+        assert session["audio"]["output"]["speed"] == 1.2
+        response = realtime.sent["response"]
+        [message] = response["input"]
+        assert message["role"] == "user"
+        assert message["content"] == [{"type": "input_text", "text": "Hello there."}]
+        assert response["instructions"].startswith("Warmly.")
+        assert "Hello there." not in response["instructions"]  # data, not orders
+        assert realtime.audio_sent is False
+        assert result.tokens == SpeechTokens(
+            input_tokens=40, output_tokens=120, output_audio_tokens=100
         )
-        assert kwargs["speed"] == 1.4
-        assert kwargs["instructions"] == "Warm."
-        assert kwargs["response_format"] == "mp3"
 
-    def test_tts_1_gets_no_instructions(self) -> None:
-        from app.services.ai.domains.voice.models import SpeechRequest
-        from app.services.ai.domains.voice.tts import OpenAITTSProvider
+    async def test_speed_past_what_realtime_takes_is_held_at_its_most(
+        self,
+    ) -> None:
+        realtime = _Realtime([_done()])
+        provider = get_tts_provider(
+            TTSProvider.OPENAI, api_key="k", model="gpt-realtime-2.1-mini"
+        )
+        provider._client = realtime.client()
 
-        provider = OpenAITTSProvider(model="tts-1", api_key="k")
-        kwargs = provider._speech_kwargs(SpeechRequest(text="Hi", instructions="Warm."))
-        assert "instructions" not in kwargs
-        assert kwargs["speed"] == 1.0  # unset means the model's normal pace
+        await provider.synthesize(SpeechRequest(text="Hi.", speed=3.0))
+
+        assert realtime.sent["session"]["audio"]["output"]["speed"] == 1.5
+
+    async def test_a_line_is_back_without_waiting_on_the_session_to_close(
+        self,
+    ) -> None:
+        """The audio is whole at ``response.done``; OpenAI's side of the
+        close took two seconds more, measured, before a line was given back."""
+        realtime = _Realtime([_done()])
+        provider = get_tts_provider(
+            TTSProvider.OPENAI, api_key="k", model="gpt-realtime-2.1-mini"
+        )
+        provider._client = realtime.client()
+
+        await provider.synthesize(SpeechRequest(text="Hi."))
+
+        options = realtime.connected["websocket_connection_options"]
+        assert options["close_timeout"] < 0.5
+
+    async def test_an_error_or_unfinished_response_fails_the_line(self) -> None:
+        for events in (
+            [SimpleNamespace(type="error", error=SimpleNamespace(message="bad voice"))],
+            [_done("incomplete")],
+        ):
+            provider = get_tts_provider(
+                TTSProvider.OPENAI, api_key="k", model="gpt-realtime-2.1-mini"
+            )
+            provider._client = _Realtime(events).client()
+
+            with pytest.raises(RuntimeError, match="Speech synthesis failed"):
+                await provider.synthesize(SpeechRequest(text="Hi."))
+
+
+# An MPEG-2 Layer III frame as OpenAI sends them: 128kbps at 24kHz, 384
+# bytes, 576 samples (0.024s).
+MP3_FRAME = b"\xff\xf3\xc4\xc4" + b"\x00" * 380
+
+
+class TestOpenAISpeechLength:
+    """gpt-4o-mini-tts is billed by the second of speech: its MP3's length
+    is read from its frames, or the ledger prices it at nothing."""
+
+    async def test_a_line_says_how_long_it_is(self) -> None:
+        async def create(**kwargs: Any) -> Any:
+            return SimpleNamespace(
+                content=b"ID3\x04\x00\x00\x00\x00\x00\x00" + MP3_FRAME * 50
+            )
+
+        provider = get_tts_provider(
+            TTSProvider.OPENAI, api_key="k", model="gpt-4o-mini-tts"
+        )
+        provider._client = SimpleNamespace(
+            audio=SimpleNamespace(speech=SimpleNamespace(create=create))
+        )
+
+        result = await provider.synthesize(SpeechRequest(text="Hello there."))
+
+        assert result.format == AudioFormat.MP3
+        assert result.duration_seconds == pytest.approx(1.2)
+
+
+class TestGeminiThatDoesNotAnswer:
+    """A Gemini speech model out of its quota (the free tier's is ten a day
+    for each) answers 429 at once; the SDK used to retry it on the answer's
+    Retry-After, hours, and a preview spun on. A 429, or a try that does not
+    answer in time, is said on the lite model instead, and fails fast when
+    that cannot either."""
+
+    def _provider(self, monkeypatch: pytest.MonkeyPatch, answers: list[Any]) -> Any:
+        import asyncio
+        import base64
+
+        from app.services.ai.domains.voice.tts import providers
+
+        monkeypatch.setattr(providers, "GEMINI_TRY_SECONDS", 0.05)
+        tries: list[str] = []
+
+        async def create(**kwargs: Any) -> Any:
+            tries.append(kwargs["model"])
+            answer = answers[len(tries) - 1]
+            if answer == "quota":
+                raise AnsweredError(
+                    429, "Rate limit exceeded (limit: 10 requests per day)"
+                )
+            if not answer:
+                await asyncio.Event().wait()  # never answers
+            return SimpleNamespace(
+                output_audio=SimpleNamespace(data=base64.b64encode(b"RIFF"))
+            )
+
+        provider = get_tts_provider(TTSProvider.GEMINI, api_key="k")
+        provider._client = SimpleNamespace(
+            aio=SimpleNamespace(interactions=SimpleNamespace(create=create))
+        )
+        provider.tries = tries
+        return provider
+
+    async def test_one_that_hangs_is_said_on_lite(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The flagship is the one that hangs: the second try is the lite
+        model, which speaks the same voices."""
+        provider = self._provider(monkeypatch, [False, True])
+
+        result = await provider.synthesize(SpeechRequest(text="Hi.", voice="Kore"))
+
+        assert result.audio == b"RIFF"
+        assert provider.tries == ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
+
+    async def test_one_that_never_answers_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = self._provider(monkeypatch, [False, False])
+
+        with pytest.raises(RuntimeError, match="Speech synthesis failed"):
+            await provider.synthesize(SpeechRequest(text="Hi.", voice="Kore"))
+        assert len(provider.tries) == 2
+
+    async def test_one_out_of_quota_is_said_on_lite(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = self._provider(monkeypatch, ["quota", True])
+
+        result = await provider.synthesize(SpeechRequest(text="Hi.", voice="Kore"))
+
+        assert result.audio == b"RIFF"
+        assert provider.tries == ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
+
+    async def test_both_out_of_quota_fail_saying_so(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = self._provider(monkeypatch, ["quota", "quota"])
+
+        with pytest.raises(RuntimeError, match="10 requests per day"):
+            await provider.synthesize(SpeechRequest(text="Hi.", voice="Kore"))
+
+    def test_the_client_never_retries_a_quota_answer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("google.genai")
+        from google import genai
+
+        built: dict[str, Any] = {}
+        monkeypatch.setattr(genai, "Client", lambda **kwargs: built.update(kwargs))
+
+        get_tts_provider(TTSProvider.GEMINI, api_key="k")._get_client()
+
+        codes = built["http_options"].retry_options.http_status_codes
+        assert 429 not in codes and 503 in codes

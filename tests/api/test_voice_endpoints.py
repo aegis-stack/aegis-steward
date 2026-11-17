@@ -13,6 +13,7 @@ from app.services.ai.domains.voice import (
     STTProvider,
     TTSProvider,
 )
+from tests._voice_errors import AnsweredError
 
 
 @pytest.fixture
@@ -380,96 +381,11 @@ class TestVoiceSettings:
         assert data["stt_provider"]
         assert data["stt_model"]
 
-    def test_update_voice_settings_partial_tts(self, client: TestClient) -> None:
-        """Test updating only TTS settings."""
-        response = client.post(
-            "/api/v1/voice/settings",
-            json={
-                "tts_provider": TTSProvider.OPENAI.value,
-                "tts_model": "tts-1-hd",
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["tts_provider"] == TTSProvider.OPENAI.value
-        assert data["tts_model"] == "tts-1-hd"
-        # Other settings should remain unchanged
-        assert "stt_provider" in data
-
-    def test_update_voice_settings_partial_stt(self, client: TestClient) -> None:
-        """Test updating only STT settings."""
-        response = client.post(
-            "/api/v1/voice/settings",
-            json={
-                "stt_provider": STTProvider.GROQ_WHISPER.value,
-                "stt_model": "whisper-large-v3-turbo",
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["stt_provider"] == STTProvider.GROQ_WHISPER.value
-        assert data["stt_model"] == "whisper-large-v3-turbo"
-        # TTS settings should remain unchanged
-        assert "tts_provider" in data
-
-    def test_update_voice_settings_tts_speed(self, client: TestClient) -> None:
-        """Test updating TTS speed."""
-        response = client.post(
-            "/api/v1/voice/settings",
-            json={"tts_speed": 0.8},
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["tts_speed"] == 0.8
-
-    def test_update_voice_settings_stt_language(self, client: TestClient) -> None:
-        """Test updating STT language."""
-        response = client.post(
-            "/api/v1/voice/settings",
-            json={"stt_language": "es"},
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["stt_language"] == "es"
-
-    def test_update_voice_settings_multiple_fields(self, client: TestClient) -> None:
-        """Test updating multiple settings at once."""
-        response = client.post(
-            "/api/v1/voice/settings",
-            json={
-                "tts_voice": OpenAIVoice.ECHO.value,
-                "tts_speed": 1.2,
-                "stt_language": "fr",
-            },
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["tts_voice"] == OpenAIVoice.ECHO.value
-        assert data["tts_speed"] == 1.2
-        assert data["stt_language"] == "fr"
-
-    def test_update_voice_settings_empty_request(self, client: TestClient) -> None:
-        """Test update with empty request body."""
-        response = client.post(
-            "/api/v1/voice/settings",
-            json={},
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        # Should return current settings unchanged
-        assert "tts_provider" in data
-
 
 class TestVoicePreview:
     """Tests for voice preview endpoints."""
 
-    @patch("app.components.backend.api.voice.router.AIService")
+    @patch("app.components.backend.api.voice.router.TTSService")
     def test_get_voice_preview_success(
         self, mock_ai_service_class: MagicMock, client: TestClient
     ) -> None:
@@ -486,7 +402,7 @@ class TestVoicePreview:
             )
         )
         mock_service.tts = mock_tts
-        mock_ai_service_class.return_value = mock_service
+        mock_ai_service_class.return_value = mock_tts
 
         response = client.get(
             f"/api/v1/voice/preview/{OpenAIVoice.ALLOY.value}",
@@ -495,7 +411,7 @@ class TestVoicePreview:
         assert response.status_code == 200
         assert response.headers["content-type"] == "audio/mpeg"
 
-    @patch("app.components.backend.api.voice.router.AIService")
+    @patch("app.components.backend.api.voice.router.TTSService")
     def test_get_voice_preview_with_custom_text(
         self, mock_ai_service_class: MagicMock, client: TestClient
     ) -> None:
@@ -512,7 +428,7 @@ class TestVoicePreview:
             )
         )
         mock_service.tts = mock_tts
-        mock_ai_service_class.return_value = mock_service
+        mock_ai_service_class.return_value = mock_tts
 
         response = client.get(
             f"/api/v1/voice/preview/{OpenAIVoice.ALLOY.value}",
@@ -522,6 +438,56 @@ class TestVoicePreview:
         assert response.status_code == 200
         assert response.headers["content-type"] == "audio/mpeg"
 
+    @patch("app.components.backend.api.voice.router.TTSService")
+    def test_a_voice_plays_on_a_model_that_speaks_it(
+        self, tts_class: MagicMock, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whatever model is in use: tts-1 knows nine of OpenAI's voices,
+        and none of Gemini's. The audio is served as what it is."""
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "TTS_MODEL", "tts-1")
+        tts = MagicMock()
+        tts.synthesize = AsyncMock(
+            return_value=SpeechResult(
+                audio=b"RIFF", format=AudioFormat.WAV, provider=TTSProvider.GEMINI
+            )
+        )
+        tts_class.return_value = tts
+
+        for voice, model in (
+            ("marin", "gpt-realtime-2.1-mini"),
+            ("alloy", "tts-1"),
+            ("Kore", "gemini-3.8-flash-tts"),
+        ):
+            response = client.get(f"/api/v1/voice/preview/{voice}")
+            used = tts_class.call_args.args[0]
+            assert (used.TTS_VOICE, used.TTS_MODEL) == (voice, model)
+
+        assert response.headers["content-type"] == "audio/wav"
+
+    @patch("app.components.backend.api.voice.router.TTSService")
+    def test_the_voice_may_be_a_field_beside_the_line(
+        self, tts_class: MagicMock, client: TestClient
+    ) -> None:
+        """A form that picks the voice sends it as a field, as it sends the
+        line (the Overseer's say-a-line bar)."""
+        tts = MagicMock()
+        tts.synthesize = AsyncMock(
+            return_value=SpeechResult(
+                audio=b"mp3", format=AudioFormat.MP3, provider=TTSProvider.OPENAI
+            )
+        )
+        tts_class.return_value = tts
+
+        response = client.get(
+            "/api/v1/voice/preview", params={"voice_id": "alloy", "text": "Hi"}
+        )
+
+        assert response.status_code == 200, response.text
+        assert tts_class.call_args.args[0].TTS_VOICE == "alloy"
+        assert tts.synthesize.call_args.args[0].text == "Hi"
+
     def test_get_voice_preview_invalid_voice(self, client: TestClient) -> None:
         """Test preview with invalid voice ID."""
         response = client.get("/api/v1/voice/preview/invalid_voice_id")
@@ -529,7 +495,7 @@ class TestVoicePreview:
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
 
-    @patch("app.components.backend.api.voice.router.AIService")
+    @patch("app.components.backend.api.voice.router.TTSService")
     def test_post_voice_preview_success(
         self, mock_ai_service_class: MagicMock, client: TestClient
     ) -> None:
@@ -546,7 +512,7 @@ class TestVoicePreview:
             )
         )
         mock_service.tts = mock_tts
-        mock_ai_service_class.return_value = mock_service
+        mock_ai_service_class.return_value = mock_tts
 
         response = client.post(
             "/api/v1/voice/preview",
@@ -556,7 +522,7 @@ class TestVoicePreview:
         assert response.status_code == 200
         assert response.headers["content-type"] == "audio/mpeg"
 
-    @patch("app.components.backend.api.voice.router.AIService")
+    @patch("app.components.backend.api.voice.router.TTSService")
     def test_post_voice_preview_with_text(
         self, mock_ai_service_class: MagicMock, client: TestClient
     ) -> None:
@@ -573,7 +539,7 @@ class TestVoicePreview:
             )
         )
         mock_service.tts = mock_tts
-        mock_ai_service_class.return_value = mock_service
+        mock_ai_service_class.return_value = mock_tts
 
         response = client.post(
             "/api/v1/voice/preview",
@@ -668,57 +634,56 @@ class TestCatalogSummary:
             assert field in config
 
 
+SECRET = "secret internal detail"
+
+
+class _Exploding:
+    """Every attribute, and every call, raises with ``SECRET``."""
+
+    def __getattr__(self, name: str) -> _Exploding:
+        return self
+
+    def __call__(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError(SECRET)
+
+
 class TestFailuresKeepTheirTextInTheLog:
-    """A failed speech call says what failed; the exception text stays in
-    the server log (CodeQL py/stack-trace-exposure)."""
+    """A failing provider's text can carry keys, paths or SQL: it goes to
+    the log, never to the client. ``/ai/synthesize`` takes form fields."""
 
-    SECRET = "secret internal detail"
+    @pytest.mark.parametrize(
+        ("method", "path", "kwargs"),
+        [
+            ("post", "/api/v1/ai/transcribe", {"files": {"audio": ("a.wav", b"x")}}),
+            ("post", "/api/v1/ai/voice-chat", {"files": {"audio": ("a.wav", b"x")}}),
+            ("post", "/api/v1/ai/synthesize", {"data": {"text": "hi"}}),
+            ("post", "/api/v1/ai/synthesize/stream", {"data": {"text": "hi"}}),
+            ("get", "/api/v1/ai/stt/status", {}),
+            ("get", "/api/v1/ai/tts/status", {}),
+        ],
+    )
+    def test_speech_routes(
+        self, client: TestClient, method: str, path: str, kwargs: dict[str, object]
+    ) -> None:
+        with patch("app.components.backend.api.ai.speech.ai_service", _Exploding()):
+            response = getattr(client, method)(path, **kwargs)
+        assert SECRET not in response.text
 
-    def _broken(self) -> MagicMock:
-        broken = MagicMock()
-        boom = RuntimeError(self.SECRET)
-        broken.stt.get_status.side_effect = boom
-        broken.tts.get_status.side_effect = boom
-        broken.stt.transcribe = AsyncMock(side_effect=boom)
-        broken.tts.synthesize = AsyncMock(side_effect=boom)
-        broken.voice_chat = AsyncMock(side_effect=boom)
-        return broken
+    def test_voice_preview_says_why_it_could_not(self, client: TestClient) -> None:
+        """What the provider's answer means reaches the page; its text does not."""
 
-    @pytest.mark.parametrize("path", ["/api/v1/ai/stt/status", "/api/v1/ai/tts/status"])
-    def test_status(self, client: TestClient, path: str) -> None:
-        with patch("app.components.backend.api.ai.speech.ai_service", self._broken()):
-            body = client.get(path).json()
-        assert body["status"] == "error"
-        assert self.SECRET not in str(body)
+        class _Speaker:
+            async def synthesize(self, request: object) -> None:
+                raise RuntimeError(SECRET) from AnsweredError(503, SECRET)
 
-    def test_transcribe(self, client: TestClient) -> None:
-        with patch("app.components.backend.api.ai.speech.ai_service", self._broken()):
-            response = client.post(
-                "/api/v1/ai/transcribe", files={"audio": ("a.wav", b"x", "audio/wav")}
-            )
+        with patch(
+            "app.components.backend.api.voice.router.TTSService",
+            return_value=_Speaker(),
+        ):
+            response = client.get(f"/api/v1/voice/preview/{OpenAIVoice.ALLOY.value}")
         assert response.status_code == 503
-        assert self.SECRET not in response.text
-
-    def test_synthesize(self, client: TestClient) -> None:
-        with patch("app.components.backend.api.ai.speech.ai_service", self._broken()):
-            response = client.post("/api/v1/ai/synthesize", data={"text": "hi"})
-        assert response.status_code == 503
-        assert self.SECRET not in response.text
-
-    def test_voice_chat(self, client: TestClient) -> None:
-        with patch("app.components.backend.api.ai.speech.ai_service", self._broken()):
-            response = client.post(
-                "/api/v1/ai/voice-chat", files={"audio": ("a.wav", b"x", "audio/wav")}
-            )
-        assert response.status_code == 500
-        assert self.SECRET not in response.text
-
-    @patch("app.components.backend.api.voice.router.AIService")
-    def test_voice_preview(self, service_class: MagicMock, client: TestClient) -> None:
-        service_class.return_value = self._broken()
-        response = client.get("/api/v1/voice/preview/alloy")
-        assert response.status_code == 503
-        assert self.SECRET not in response.text
+        assert "busy" in response.json()["detail"]
+        assert SECRET not in response.text
 
 
 class TestVoiceChatCarriesTheTurn:
@@ -726,6 +691,8 @@ class TestVoiceChatCarriesTheTurn:
     stack - decides which agent answers."""
 
     def test_agent_surface_user_conversation_and_hint(self, client: TestClient) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
         from app.services.ai.domains.voice.models import (
             STTProvider,
             TranscriptionResult,
@@ -749,8 +716,8 @@ class TestVoiceChatCarriesTheTurn:
                 params={
                     "conversation_id": "c-1",
                     "user_id": "0",
-                    "agent_slug": "finance-assistant",
-                    "surface": "finance",
+                    "agent_slug": "helper",
+                    "surface": "support",
                     "transcription_hint": "Illiana",
                 },
                 files={"audio": ("a.webm", b"x", "audio/webm")},
@@ -760,6 +727,129 @@ class TestVoiceChatCarriesTheTurn:
         kwargs = service.voice_chat.call_args.kwargs
         assert kwargs["conversation_id"] == "c-1"
         assert kwargs["user_id"] == "0"
-        assert kwargs["agent_slug"] == "finance-assistant"
-        assert kwargs["surface"] == "finance"
+        assert kwargs["agent_slug"] == "helper"
+        assert kwargs["surface"] == "support"
         assert kwargs["transcription_hint"] == "Illiana"
+
+
+class TestOverview:
+    """What the stack's voice uses and every model and voice there is, as
+    both Overseers show it (``voice_overview``)."""
+
+    def test_every_voice_and_model_is_a_row(self, client: TestClient) -> None:
+        rows = client.get("/api/v1/voice/overview").json()["rows"]
+        by_kind = {
+            kind: {r["name"] for r in rows if r["kind"] == kind}
+            for kind in ("voice", "tts", "use")
+        }
+
+        assert {"Marin", "Kore"} <= by_kind["voice"]
+        assert "gemini-3.8-flash-tts" in by_kind["tts"]
+        kore = next(r for r in rows if r["name"] == "Kore")
+        assert kore["plays_on"] == "gemini-3.8-flash-tts"
+
+
+class TestDesign:
+    """The voice designer over the API, as the Flet Overseer reads it."""
+
+    def test_a_design_is_heard_unsaved(self, client: TestClient) -> None:
+        pytest.importorskip("app.services.ai.domains.voice.design")
+        heard: list[object] = []
+
+        class _TTS:
+            def __init__(self, voice_settings: object) -> None:
+                heard.append(voice_settings)
+
+            async def synthesize(self, request: object) -> SpeechResult:
+                return SpeechResult(
+                    audio=b"RIFF", format=AudioFormat.WAV, provider=TTSProvider.GEMINI
+                )
+
+        with patch("app.components.backend.api.voice.overview.TTSService", _TTS):
+            response = client.get(
+                "/api/v1/voice/design/preview",
+                params={"voice": "Kore", "style": "newsreader"},
+            )
+
+        assert (
+            response.status_code == 200
+            and response.headers["content-type"] == "audio/wav"
+        )
+        assert heard[0].TTS_VOICE == "Kore"
+        assert heard[0].TTS_INSTRUCTIONS.startswith("Voice Affect: Authoritative")
+
+    def test_a_design_that_is_not_one_is_refused(self, client: TestClient) -> None:
+        pytest.importorskip("app.services.ai.domains.voice.design")
+        response = client.get(
+            "/api/v1/voice/design/preview", params={"voice": "nobody"}
+        )
+
+        assert response.status_code == 422
+
+
+def test_every_profile_is_listed_at_a_glance(client: TestClient) -> None:
+    pytest.importorskip("app.services.ai.domains.voice.design")
+    response = client.get("/api/v1/voice/design/profiles")
+
+    assert response.status_code == 200
+    assert {"id", "name", "voice", "style", "speed", "active"} <= set(
+        response.json()[0]
+    )
+
+
+def test_a_saved_profile_is_heard_in_its_own_voice(client: TestClient) -> None:
+    """Both Overseers' profile lists play a profile over the API."""
+    pytest.importorskip("app.services.ai.domains.voice.design")
+    heard: list[object] = []
+
+    class _TTS:
+        def __init__(self, voice_settings: object) -> None:
+            heard.append(voice_settings)
+
+        async def synthesize(self, request: object) -> SpeechResult:
+            return SpeechResult(
+                audio=b"RIFF", format=AudioFormat.WAV, provider=TTSProvider.OPENAI
+            )
+
+    summary = client.get("/api/v1/voice/design/profiles").json()[0]
+    with patch("app.components.backend.api.voice.overview.TTSService", _TTS):
+        response = client.get(f"/api/v1/voice/design/profiles/{summary['id']}/preview")
+        missing = client.get("/api/v1/voice/design/profiles/999999/preview")
+
+    assert response.status_code == 200 and heard
+    assert missing.status_code == 404
+
+
+def test_the_models_table_leaves_out_the_library(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thousands of library voices would bury the table: they are reached
+    through the editor's accents instead."""
+    from app.services.ai.domains.voice import library
+    from app.services.ai.domains.voice.models import VoiceInfo
+
+    amelia = VoiceInfo(
+        id="voice_en_gb_amelia",
+        name="Amelia",
+        provider_id="gemini",
+        model_ids=["gemini-3.8-flash-tts"],
+        description="Bright",
+        gender="female",
+    )
+    monkeypatch.setattr(library, "KEPT", {amelia.id: amelia})
+    monkeypatch.setattr(library, "TRIED", {"gemini"})
+
+    rows = client.get("/api/v1/voice/overview").json()["rows"]
+
+    assert "Amelia" not in {r["name"] for r in rows}
+    assert "Kore" in {r["name"] for r in rows}
+
+
+class TestPronunciation:
+    """How every voice says terms, over the API: listed on every stack,
+    changed by an admin where the stack keeps a database."""
+
+    def test_the_list_is_read_on_every_stack(self, client: TestClient) -> None:
+        listed = client.get("/api/v1/voice/pronunciation").json()
+
+        assert {"term": "Traefik", "say": "traffic", "ipa": None} in listed

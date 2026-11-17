@@ -19,8 +19,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import before_and_after
 from app.core.schema import require_one_of
+from app.services.change_queue import ChangeDisplayRow
 from app.services.documents.models import DOCUMENT_KINDS, TAX_FORMS
-from app.services.finance.schemas import ChangeDisplayRow
 
 # The fields a reading may propose, and how the card labels them.
 FIELDS: tuple[tuple[str, str], ...] = (

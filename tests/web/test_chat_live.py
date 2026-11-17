@@ -1,794 +1,774 @@
-"""Talking to Illiana live (#252): GPT-Live is her ears and voice, her own
-agent does the thinking.
+"""A live call from the chat surface: one path for every engine.
 
-The browser's WebRTC offer goes through steward (the key never leaves the
-server) to open a gpt-live-1 session with CLIENT delegation. When GPT-Live
-needs real work it says so; the browser sends what was said to steward,
-which runs her actual agent turn - her prompt, tools and approval cards, in
-the conversation - and hands back what to say.
+The page opens the mount's WebSocket; the server opens the engine's
+realtime session and carries the audio both ways, telling the page what
+the call is doing. Tested on the Overseer's mount; every mount gets the
+same socket under its own path.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from importlib.util import find_spec
+import json
+import queue
+import threading
+from types import SimpleNamespace
 from typing import Any
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic_ai.messages import (
+    FunctionToolCallEvent,
+    PartEndEvent,
+    PartStartEvent,
+    RealtimeTurnCompleteEvent,
+    SpeechPart,
+    ToolCallPart,
+)
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
-from app.components.backend.api.ai.router import ai_service, sync_active_model
-from app.components.web_frontend.routes import chat_cards, chat_live, chat_live_relay
-from app.components.web_frontend.routes.chat_live import (
-    DELEGATIONS,
-    LIVE_SORRY,
-    LOOKS,
-    SESSIONS,
-)
-from app.services.ai.domains.voice.realtime_calls import END_CALL
-from app.services.ai.models import StreamingMessage
-from app.services.finance.domains.detection.analyst.live_engines import (
-    REALTIME_REPLY_CAP,
-)
-from app.services.finance.domains.detection.analyst.prompts import (
-    FINANCE_LIVE_INSTRUCTIONS,
-)
-from app.services.finance.domains.detection.analyst.shared import (
-    FINANCE_VOICE_AGENT_SLUG,
-    STANDALONE_USER_ID,
-)
-from tests._voice_catalog import TITLES
+from app.components.web_frontend import chat_surface, overseer_access
+from app.components.web_frontend.chat_surface import ChatSurface
+from app.components.web_frontend.overseer_ai_chat import OVERSEER
+from app.components.web_frontend.routes.partials import chat_live
+from app.core.tools import current_owner_user_id, current_subject
+from app.services.ai.domains.chat.page_actions import page_action
+from app.services.ai.domains.voice import realtime_calls
+from app.services.shared.deps import get_optional_owner_user_id
+from tests._pages import LANDING
+from tests._realtime import ENGINE, VOICE, FakeRealtime
 from tests.web.dom import one
+from tests.web.overseer import AI, sign_in, status_with
 
-pytestmark = pytest.mark.usefixtures("live_engine_rows")
-# An engine is named by its catalog model.
-
-SECRET = "secret internal detail"
+PAGE = "/overseer/services/ai/chat"
+SOCKET = f"{OVERSEER.path}/live/ws"
+STAGE = f"{OVERSEER.path}/stage"
+HX = {"HX-Request": "true"}
 # A screenshot as the page sends it: shrunk and base64'd by chat.js.
 SHOT = {"media_type": "image/png", "data_b64": "c2hvdA==", "name": "shot.png"}
-
-
-class _Live:
-    """Stands in for ``AsyncOpenAI().live``."""
-
-    def __init__(self, fail: Exception | None = None) -> None:
-        import uuid
-
-        self.calls: list[dict[str, Any]] = []
-        self.fail = fail
-        # Its own id per test: the ledger rows outlive a test (they go
-        # through the app's session), and a shared id found another
-        # test's row in CI's order.
-        self.session_id = f"live_{uuid.uuid4().hex[:12]}"
-
-    async def create(self, **kwargs: Any) -> Any:
-        from types import SimpleNamespace
-
-        self.calls.append(kwargs)
-        if self.fail:
-            raise self.fail
-        return SimpleNamespace(
-            session=SimpleNamespace(id=self.session_id),
-            transport=SimpleNamespace(type="webrtc", sdp="v=0 answer"),
-        )
+# What a look at a picture costs: a turn of the call's agent.
+LOOK_COST = 0.02
 
 
 @pytest.fixture
-def live(monkeypatch: pytest.MonkeyPatch) -> _Live:
-    fake = _Live()
-    monkeypatch.setattr(chat_live, "_live_api", lambda: fake)
+def client(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    sign_in(app, monkeypatch, status_with(services=[AI]))
+
+    async def signed_in() -> None:
+        return None
+
+    # The socket's own guard reads the session cookie; signed in here.
+    app.dependency_overrides[overseer_access.overseer_socket_gate] = signed_in
+    return TestClient(app)
+
+
+@pytest.fixture
+def gemini(monkeypatch: pytest.MonkeyPatch) -> FakeRealtime:
+    """A call on Gemini Live, its session played by a fake: you say hi, a
+    step runs, it answers, and it ends the call."""
+    fake = FakeRealtime(
+        [
+            PartStartEvent(index=0, part=SpeechPart(speaker="user", transcript="")),
+            PartEndEvent(index=0, part=SpeechPart(speaker="user", transcript="Hi")),
+            FunctionToolCallEvent(
+                part=ToolCallPart(
+                    tool_name="run_code",
+                    args={"code": "result = await report()"},
+                    tool_call_id="t1",
+                )
+            ),
+            PartEndEvent(
+                index=1, part=SpeechPart(speaker="assistant", transcript="Hello!")
+            ),
+            FunctionToolCallEvent(
+                part=ToolCallPart(
+                    tool_name=realtime_calls.END_CALL, args={}, tool_call_id="e1"
+                )
+            ),
+            RealtimeTurnCompleteEvent(),
+        ],
+        after_audio=True,
+    )
+
+    async def engine_now() -> tuple[Any, dict[str, Any]]:
+        return ENGINE, {"label": ENGINE.llm.title}
+
+    async def built(*args: Any, **kwargs: Any) -> Any:
+        fake.built = kwargs  # who she was built for
+        return fake, kwargs["agent_slug"] or "assistant"
+
+    monkeypatch.setattr(chat_live, "_engine_now", engine_now)
+    monkeypatch.setattr(realtime_calls, "realtime_for", built)
     return fake
 
 
 @pytest.fixture
-def synced(client: TestClient) -> Iterator[list[bool]]:
-    """One entry each time a live route adopts the active model."""
-    calls: list[bool] = []
+def ended(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Set once the server has finished the call, its last writes made.
 
-    async def _sync() -> None:
-        calls.append(True)
+    The test client cancels the app as it leaves the socket, so a call still
+    saving would be cut off mid-write and leak its database connection; a
+    later test's teardown then hangs collecting it. A test hangs up and
+    waits for this before it leaves."""
+    done = threading.Event()
+    drive = realtime_calls.drive
 
-    client.app.dependency_overrides[sync_active_model] = _sync  # type: ignore[attr-defined]
-    yield calls
-    client.app.dependency_overrides.pop(sync_active_model)  # type: ignore[attr-defined]
+    async def driven(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await drive(*args, **kwargs)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(realtime_calls, "drive", driven)
+    return done
 
 
-class TestOpeningASession:
-    def test_the_offer_is_answered_by_a_client_delegated_gpt_live(
-        self, client: TestClient, live: _Live
+@pytest.fixture
+def ends() -> tuple[queue.Queue[str], Callable[[ChatSurface, str], Awaitable[None]]]:
+    """How each call ended, as a mount's ``on_call_end`` heard it.
+
+    The hook runs after the call's last writes, so waiting on it is
+    waiting for the server to finish the call (``ended``)."""
+    heard: queue.Queue[str] = queue.Queue()
+
+    async def on_call_end(bound: ChatSurface, how: str) -> None:
+        heard.put(how)
+
+    return heard, on_call_end
+
+
+async def _let_in() -> None:
+    return None
+
+
+async def _no_engine() -> tuple[None, None]:
+    return None, None
+
+
+def _calls(mount: ChatSurface) -> TestClient:
+    """A mount's socket alone, its caller signed in as owner 7."""
+    calls = FastAPI()
+    calls.include_router(chat_live.live_router(mount, _let_in))
+
+    async def owner() -> int:
+        return 7
+
+    calls.dependency_overrides[get_optional_owner_user_id] = owner
+    return TestClient(calls)
+
+
+def _hear(ws: Any, until: str) -> tuple[list[bytes], list[dict[str, Any]]]:
+    """What the page heard and was told, up to the first event of a type."""
+    heard: list[bytes] = []
+    told: list[dict[str, Any]] = []
+    for _ in range(50):  # a bound, never a hang
+        message = ws.receive()
+        if message.get("bytes"):
+            heard.append(message["bytes"])
+        elif message.get("text"):
+            told.append(json.loads(message["text"]))
+            if told[-1]["type"] == until:
+                break
+    return heard, told
+
+
+def _looks(
+    monkeypatch: pytest.MonkeyPatch, answer: str, *, fail: bool = False
+) -> list[dict[str, Any]]:
+    """The call agent's typed turns on what it was shown, played by a fake."""
+    turns: list[dict[str, Any]] = []
+
+    async def chat(message: str, **kwargs: Any) -> Any:
+        turns.append({"message": message, **kwargs})
+        if fail:
+            raise RuntimeError("the model is down")
+        return SimpleNamespace(content=answer, metadata={"cost": LOOK_COST})
+
+    monkeypatch.setattr(chat_live.ai_service, "chat", chat)
+    return turns
+
+
+class TestTheControls:
+    @pytest.mark.parametrize("headers", [{}, HX], ids=["page", "hx"])
+    def test_the_call_bar_can_show_it_a_picture(
+        self, client: TestClient, headers: dict[str, str]
     ) -> None:
-        response = client.post(SESSIONS, json={"sdp": "v=0 offer"})
-
-        assert response.status_code == 200
-        assert response.json() == {
-            "sdp": "v=0 answer",
-            "session_id": live.session_id,
-            "transport": "gpt_live",
-            "engine": {
-                "label": TITLES["gpt-live-1"],
-                "per_second": pytest.approx(0.05 / 60),
-            },
-            # how she opens: a first call is greeted (#292)
-            "greeting": chat_live.LIVE_GREETING,
-        }
-        call = live.calls[0]
-        assert call["transport"] == {"type": "webrtc", "sdp": "v=0 offer"}
-        session = call["session"]
-        assert session["model"] == "gpt-live-1"
-        assert session["delegation"] == {"type": "client"}
-        assert session["instructions"] == FINANCE_LIVE_INSTRUCTIONS
-
-    def test_it_starts_with_the_conversation_so_far(
-        self, client: TestClient, live: _Live, stored: tuple[str, str]
-    ) -> None:
-        conversation_id, _ = stored
-        client.post(
-            SESSIONS, json={"sdp": "v=0 offer", "conversation_id": conversation_id}
-        )
-
-        history = live.calls[0]["session"]["input"]
-        assert [item["role"] for item in history] == ["user", "assistant"]
-        assert history[0]["content"] == [{"type": "input_text", "text": "What is due?"}]
-        said = history[1]["content"][0]
-        assert said["type"] == "output_text"
-        assert said["text"].startswith("Two bills this week")  # spoken form
-
-    def test_no_offer_is_a_422(self, client: TestClient, live: _Live) -> None:
-        assert client.post(SESSIONS, json={}).status_code == 422
-        assert live.calls == []
-
-    def test_a_refused_session_keeps_its_reason_in_the_log(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(chat_live, "_live_api", lambda: _Live(RuntimeError(SECRET)))
-        response = client.post(SESSIONS, json={"sdp": "v=0 offer"})
-        assert response.status_code == 502
-        assert SECRET not in response.text
-
-
-class TestDoingTheWork:
-    """A delegated turn is a typed turn: ``chat()`` runs the one stream
-    (#455), so what it keeps (tool trace, model, cost) is what the thread
-    draws its trail, cards and footer from."""
-
-    @staticmethod
-    def _answers(
-        monkeypatch: pytest.MonkeyPatch, content: str, fail: bool = False
-    ) -> list[dict[str, Any]]:
-        seen: list[dict[str, Any]] = []
-
-        async def _stream(**kwargs: Any) -> Any:
-            seen.append(kwargs)
-            if fail:
-                raise RuntimeError(SECRET)
-            yield StreamingMessage(content="working", is_delta=True)
-            yield StreamingMessage(
-                content=content,
-                is_final=True,
-                message_id="m-9",
-                conversation_id="c-9",
-                metadata={
-                    "conversation_id": "c-9",
-                    "tool_trace": [{"tool": "run_code"}],
-                    "cost": 0.0047,
-                },
-            )
-
-        monkeypatch.setattr(ai_service, "stream_chat", _stream)
-        return seen
-
-    def test_her_own_agent_answers_through_the_typed_turns_path(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        turns = self._answers(monkeypatch, "## Robin\n\n- **$60** left this week.")
-        response = client.post(
-            DELEGATIONS,
-            json={"text": "How much is left for Robin?", "conversation_id": "c-9"},
-        )
-
-        assert response.status_code == 200
-        assert turns[0]["message"] == "How much is left for Robin?"
-        assert turns[0]["agent_slug"] == FINANCE_VOICE_AGENT_SLUG
-        assert turns[0]["surface"] == "finance"
-        assert turns[0]["user_id"] == STANDALONE_USER_ID
-        assert turns[0]["conversation_id"] == "c-9"
-        # What GPT-Live is handed to say: plain speech, within its limit.
-        # ... and what the turn cost, for the call bar to add to the voice's
-        # minutes (#595): the bar otherwise shows the voice alone.
-        assert response.json() == {
-            "speak": "Robin. $60 left this week.",
-            "conversation_id": "c-9",
-            "cost": 0.0047,
-        }
-
-    def test_a_long_answer_is_cut_to_what_gpt_live_takes(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._answers(monkeypatch, "A sentence that goes on. " * 400)
-        spoken = client.post(DELEGATIONS, json={"text": "Tell me everything."}).json()
-        assert len(spoken["speak"]) <= chat_live.LIVE_ANSWER_CHARS
-
-    def test_nothing_said_is_a_422(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        turns = self._answers(monkeypatch, "unused")
-        assert client.post(DELEGATIONS, json={"text": "  "}).status_code == 422
-        assert turns == []
-
-    def test_a_failed_turn_gives_her_something_to_say(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._answers(monkeypatch, "unused", fail=True)
-        response = client.post(DELEGATIONS, json={"text": "How am I doing?"})
-        assert response.status_code == 200
-        assert response.json() == {
-            "speak": LIVE_SORRY,
-            "conversation_id": None,
-            "cost": None,
-        }
-        assert SECRET not in response.text
-
-
-class TestShowingHerAPicture:
-    """A picture pasted, dropped or picked while a call is up goes to her,
-    not to the hidden composer: her voice agent looks at it as a turn of
-    the conversation, and she says what she saw, without leaving the
-    call."""
-
-    def test_she_looks_at_it_as_a_turn_and_says_what_she_saw(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        turns = TestDoingTheWork._answers(monkeypatch, "A transfer of **$500**.")
-        response = client.post(LOOKS, json={"image": SHOT, "conversation_id": "c-9"})
-
-        assert response.status_code == 200
-        turn = turns[0]
-        assert turn["message"] == chat_live.LIVE_SHOWN
-        assert [(a.media_type, a.decoded()) for a in turn["attachments"]] == [
-            ("image/png", b"shot")
-        ]
-        assert turn["agent_slug"] == FINANCE_VOICE_AGENT_SLUG
-        assert turn["conversation_id"] == "c-9"
-        assert response.json() == {
-            "speak": chat_live.LIVE_SAW.format(seen="A transfer of $500."),
-            "conversation_id": "c-9",
-            "cost": 0.0047,
-        }
-
-    def test_only_a_picture_is_shown(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        turns = TestDoingTheWork._answers(monkeypatch, "unused")
-        pdf = {**SHOT, "media_type": "application/pdf"}
-        assert client.post(LOOKS, json={"image": pdf}).status_code == 422
-        assert turns == []
-
-    def test_a_failed_look_gives_her_something_to_say(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        TestDoingTheWork._answers(monkeypatch, "unused", fail=True)
-        response = client.post(LOOKS, json={"image": SHOT})
-        assert response.json() == {
-            "speak": LIVE_SORRY,
-            "conversation_id": None,
-            "cost": None,
-        }
-        assert SECRET not in response.text
-
-    @pytest.mark.parametrize("path_client", ["client", "hx"])
-    def test_the_call_bar_can_show_one(
-        self, request: pytest.FixtureRequest, path_client: str
-    ) -> None:
-        page = request.getfixturevalue(path_client).get("/chat").text
-        assert one(page, "#chat-composer button#chat-live").get("data-looks") == LOOKS
-        # The composer's own picker, reached from the call bar: one input,
-        # one set of checks (chat.js), whichever row is showing.
+        """The composer's own picker, reached from the call bar: one input,
+        one set of checks (chat.js), whichever row is showing."""
+        page = client.get(PAGE, headers=headers).text
+        one(page, "#chat-composer input#chat-attach")
         one(page, "#chat-call label[for=chat-attach]")
 
-
-class TestTheControl:
-    @pytest.mark.parametrize("path_client", ["client", "hx"])
-    def test_the_composer_has_a_live_button(
-        self, request: pytest.FixtureRequest, path_client: str
+    def test_the_phone_sits_beside_the_mic_and_knows_its_socket(
+        self, client: TestClient
     ) -> None:
-        page = request.getfixturevalue(path_client).get("/chat").text
-        button = one(page, "#chat-composer button#chat-live")
-        assert button.get("data-sessions") == SESSIONS
-        assert button.get("data-delegations") == DELEGATIONS
+        button = one(client.get(PAGE).text, "#chat-composer button#chat-live")
+        assert button.get("data-relay") == SOCKET
+        assert "mic-worklet" in (button.get("data-worklet") or "")
         assert button.get("data-state") == "idle"
 
-
-class TestWhileSheWorks:
-    """Her agent pulling data is its own state, not the connecting spinner:
-    it holds for the whole delegation, through GPT-Live's "let me check"."""
-
-    def test_the_live_button_draws_working(self, client: TestClient) -> None:
-        button = one(client.get("/chat").text, "button#chat-live")
+    def test_the_phone_draws_the_agent_at_work(self, client: TestClient) -> None:
+        """A step running is its own state, not the connecting spinner."""
+        button = one(client.get(PAGE).text, "button#chat-live")
         drawn = {
             e.get("data-mic-visual") for e in button.cssselect("[data-mic-visual]")
         }
         assert drawn == {"recording", "thinking", "speaking", "working"}
 
-    def test_the_status_line_says_so(self, client: TestClient) -> None:
-        one(client.get("/chat").text, "template#chat-mic-states [data-state=working]")
-
-
-class TestHerModel:
-    """A delegation runs on the stored active model, not the .env default:
-    a reload mid-call left the process on llama3.2:3b, which Ollama did not
-    have, and every answer failed (2026-09-25)."""
-
-    def test_every_live_route_adopts_the_active_model_first(
-        self,
-        client: TestClient,
-        live: _Live,
-        monkeypatch: pytest.MonkeyPatch,
-        synced: list[bool],
-    ) -> None:
-        TestDoingTheWork._answers(monkeypatch, "Fine.")
-        client.post(SESSIONS, json={"sdp": "v=0 offer"})
-        client.post(DELEGATIONS, json={"text": "How am I doing?"})
-        assert synced == [True, True]
-
-
-class TestHangingUp:
-    """Minutes cost money: the call ends on its own when the conversation
-    is over (her sign-off), or when it stays quiet after she checks in
-    (#458)."""
-
-    def test_her_instructions_end_on_the_sign_off_the_page_listens_for(
-        self, client: TestClient
-    ) -> None:
-        import json
-
-        assert chat_live.LIVE_SIGN_OFF in FINANCE_LIVE_INSTRUCTIONS
-        button = one(client.get("/chat").text, "button#chat-live")
-        assert button.get("data-sign-off") == chat_live.LIVE_SIGN_OFF
-        # a realtime call ends on her tool; the page knows its name
-        assert button.get("data-end-call") == END_CALL
-        # What she says when the page has no answer: the server's words.
-        assert button.get("data-sorry") == LIVE_SORRY
-        assert button.get("data-not-heard") == chat_live.LIVE_NOT_HEARD
-        # She opens the call: a cue, not a script, so the words vary.
-        assert button.get("data-greeting") == chat_live.LIVE_GREETING
-        # What she says into the quiet: the server's lines (#458).
-        assert json.loads(button.get("data-cues") or "{}") == chat_live.LIVE_CUES
-
-    def test_the_quiet_limit_rides_with_how_she_is_heard(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import json
-
-        from app.core.config import settings
-
-        monkeypatch.setattr(settings, "VOICE_LIVE_IDLE_SECONDS", 45)
-        mic = one(client.get("/chat").text, "button#chat-mic")
-        assert json.loads(mic.get("data-voice") or "{}")["idle"] == 45
-
-
-class TestTheMeter:
-    """Every live minute is in the ledger (#270): the call's row opens with
-    the call, and the page reports the billed seconds as OpenAI counts them."""
-
-    @staticmethod
-    async def _row(session_id: str) -> Any:
-        from sqlmodel import select
-
-        from app.core.db import get_async_session
-        from app.services.ai.models.llm import LLMUsage
-
-        async with get_async_session() as session:
-            return (
-                await session.exec(
-                    select(LLMUsage).where(LLMUsage.session_id == session_id)
-                )
-            ).first()
-
-    async def test_opening_a_call_opens_its_row(
-        self, client: TestClient, live: _Live, stored: tuple[str, str]
-    ) -> None:
-        conversation_id, _ = stored
-        client.post(
-            SESSIONS, json={"sdp": "v=0 offer", "conversation_id": conversation_id}
-        )
-        row = await self._row(live.session_id)
-        assert row is not None
-        assert (row.model_id, row.action, row.conversation_id) == (
-            "gpt-live-1",
-            "live",
-            conversation_id,
-        )
-
-    async def test_the_page_reports_the_seconds(
-        self, client: TestClient, live: _Live
-    ) -> None:
-        client.post(SESSIONS, json={"sdp": "v=0 offer"})
-        response = client.post(
-            chat_live.USAGE,
-            json={
-                "session_id": live.session_id,
-                "seconds": 90,
-                "reason": "close_requested",
-            },
-        )
-        assert response.status_code == 204
-        row = await self._row(live.session_id)
-        assert row.audio_seconds == 90
-        assert row.total_cost == pytest.approx(0.075)
-
-    def test_an_unknown_call_is_a_404(self, client: TestClient) -> None:
-        response = client.post(
-            chat_live.USAGE, json={"session_id": "nope", "seconds": 5}
-        )
-        assert response.status_code == 404
-
-    def test_the_live_button_knows_where_to_report(self, client: TestClient) -> None:
-        button = one(client.get("/chat").text, "button#chat-live")
-        assert button.get("data-usage") == chat_live.USAGE
-
-
-class TestTheEngine:
-    """The phone dials whichever engine her voice profile names (#273)."""
-
-    @pytest.fixture
-    def realtime(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-        from app.core.config import settings
-        from app.services.ai.domains.voice import realtime_calls
-
-        calls: list[dict[str, Any]] = []
-
-        async def _built(**kwargs: Any) -> dict[str, Any]:
-            return kwargs  # stands in for the realtime agent it describes
-
-        async def _open(sdp: str, **kwargs: Any) -> str:
-            calls.append({"sdp": sdp, **kwargs})
-            return "v=0 realtime answer"
-
-        monkeypatch.setattr(settings, "VOICE_LIVE_ENGINE", "gpt-realtime-2.1")
-        monkeypatch.setattr(realtime_calls, "realtime_for", _built)
-        monkeypatch.setattr(realtime_calls, "open_call", _open)
-        return calls
-
-    def test_a_realtime_engine_runs_her_own_agent(
-        self,
-        client: TestClient,
-        realtime: list[dict[str, Any]],
-        stored: tuple[str, str],
-    ) -> None:
-        conversation_id, _ = stored
-        response = client.post(
-            SESSIONS, json={"sdp": "v=0 offer", "conversation_id": conversation_id}
-        )
-
-        assert response.status_code == 200
-        assert response.json() == {
-            "sdp": "v=0 realtime answer",
-            "transport": "realtime",
-            "conversation_id": conversation_id,
-            "engine": {"label": TITLES["gpt-realtime-2.1"], "per_second": None},
-            # the page opens the call with this: a conversation under way is
-            # carried on, not met again (#292); a dropped one picks up
-            "greeting": chat_live.LIVE_CONTINUE,
-        }
-        (call,) = realtime
-        assert call["model"] == "openai:gpt-realtime-2.1"
-        assert call["agent_slug"] == FINANCE_VOICE_AGENT_SLUG
-        assert call["conversation_id"] == conversation_id
-        # Her engine's call manners lead her prompt; a reply is capped.
-        built = call["realtime"]
-        assert "LIVE" in built["instructions"]
-        # The names she will hear, spelled (#293): the transcript of a call
-        # takes no hint, so she is told them instead.
-        assert "Illiana" in built["instructions"].rsplit("\n\n", 1)[-1]
-        assert built["max_output_tokens"] == REALTIME_REPLY_CAP
-        assert built["conversation"].id == conversation_id
-
-    def test_without_a_conversation_it_starts_one(
-        self, client: TestClient, realtime: list[dict[str, Any]]
-    ) -> None:
-        body = client.post(SESSIONS, json={"sdp": "v=0 offer"}).json()
-        assert body["conversation_id"]
-        assert realtime[0]["conversation_id"] == body["conversation_id"]
-
-    def test_a_refused_realtime_call_is_a_502(
-        self,
-        client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
-        stored: tuple[str, str],
-    ) -> None:
-        from app.core.config import settings
-        from app.services.ai.domains.voice import realtime_calls
-
-        async def _refused(sdp: str, **kwargs: Any) -> str:
-            raise RuntimeError(SECRET)
-
-        monkeypatch.setattr(settings, "VOICE_LIVE_ENGINE", "gpt-realtime-2.1")
-        monkeypatch.setattr(realtime_calls, "open_call", _refused)
-        conversation_id, _ = stored
-        response = client.post(
-            SESSIONS, json={"sdp": "v=0 offer", "conversation_id": conversation_id}
-        )
-        assert response.status_code == 502
-        assert SECRET not in response.text
-
-
-class TestTheCallBar:
-    """In a call, the composer row becomes a call bar (#273): what she is
-    doing, the engine, a timer and the running cost, mute on the same mic,
-    and hang up."""
-
-    def test_the_bar_waits_hidden_in_the_page(self, client: TestClient) -> None:
-        page = client.get("/chat").text
-        bar = one(page, "#chat-call")
-        assert bar.get("hidden") is not None
-        mute = one(page, "#chat-call button#chat-mute")
-        assert mute.get("aria-pressed") == "false"
+    def test_the_call_bar_waits_hidden_in_the_page(self, client: TestClient) -> None:
+        page = client.get(PAGE).text
+        assert one(page, "#chat-call").get("hidden") is not None
+        assert one(page, "#chat-call button#chat-mute").get("aria-pressed") == "false"
         one(page, "#chat-call button#chat-hang-up")
-        one(page, "#chat-call [data-call-timer]")
-        one(page, "#chat-call [data-call-cost]")
-        one(page, "#chat-call [data-call-engine]")
-        one(page, "template#chat-mic-states [data-state=muted]")
-        # The quiet, counted down to the hang-up on the status line, which
-        # has the width the call bar has not in the drawer (#458).
+        for figure in ("timer", "cost", "engine"):
+            one(page, f"#chat-call [data-call-{figure}]")
+        # ``dropped``: the socket closed with no word from the server (the
+        # webserver process killed), said rather than hung up in silence.
+        for state in ("live", "working", "muted", "dropped"):
+            one(page, f"template#chat-mic-states [data-state={state}]")
+        # The quiet, counted down to the hang-up on the status line.
         one(page, "template#chat-mic-states [data-state=hanging-up] [data-countdown]")
 
-    def test_gpt_live_says_its_rate(self, client: TestClient, live: _Live) -> None:
-        body = client.post(SESSIONS, json={"sdp": "v=0 offer"}).json()
-        assert body["engine"] == {
-            "label": TITLES["gpt-live-1"],
-            "per_second": pytest.approx(0.05 / 60),
-        }
-
-    def test_a_realtime_engine_is_priced_after_the_call(
-        self,
-        client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
-        stored: tuple[str, str],
+    @pytest.mark.parametrize("headers", [{}, HX], ids=["page", "hx"])
+    def test_the_calls_cost_splits_on_hover(
+        self, client: TestClient, headers: dict[str, str]
     ) -> None:
-        from app.core.config import settings
-        from app.services.ai.domains.voice import realtime_calls
-
-        async def _open(sdp: str, **kwargs: Any) -> str:
-            return "v=0 realtime answer"
-
-        monkeypatch.setattr(settings, "VOICE_LIVE_ENGINE", "gpt-realtime-2.1")
-        monkeypatch.setattr(realtime_calls, "open_call", _open)
-        conversation_id, _ = stored
-        body = client.post(
-            SESSIONS, json={"sdp": "v=0 offer", "conversation_id": conversation_id}
-        ).json()
-        assert body["engine"] == {
-            "label": TITLES["gpt-realtime-2.1"],
-            "per_second": None,
-        }
-
-
-class TestTheRelay:
-    """Gemini Live has no WebRTC hand-off: the call's audio comes through
-    our server's WebSocket, both ways (#273)."""
-
-    @pytest.fixture
-    def gemini(self, monkeypatch: pytest.MonkeyPatch) -> Any:
-        from pydantic_ai.messages import (
-            FunctionToolCallEvent,
-            PartEndEvent,
-            PartStartEvent,
-            RealtimeTurnCompleteEvent,
-            SpeechPart,
-            ToolCallPart,
-        )
-
-        from app.core.config import settings
-        from app.services.ai.domains.voice import realtime_calls
-        from tests._realtime import FakeRealtime
-
-        fake = FakeRealtime(
-            [
-                PartStartEvent(index=0, part=SpeechPart(speaker="user", transcript="")),
-                PartEndEvent(
-                    index=0, part=SpeechPart(speaker="user", transcript="Hi there")
-                ),
-                FunctionToolCallEvent(
-                    part=ToolCallPart(
-                        tool_name="run_code",
-                        args={"code": "result = await budget()"},
-                        tool_call_id="t1",
-                    )
-                ),
-                PartEndEvent(
-                    index=1,
-                    part=SpeechPart(
-                        speaker="assistant", transcript="Hello! Talk soon."
-                    ),
-                ),
-                FunctionToolCallEvent(
-                    part=ToolCallPart(
-                        tool_name=realtime_calls.END_CALL, args={}, tool_call_id="e1"
-                    )
-                ),
-                RealtimeTurnCompleteEvent(),
-            ],
-            after_audio=True,
-        )
-
-        async def _built(**kwargs: Any) -> Any:
-            return fake
-
-        monkeypatch.setattr(settings, "VOICE_LIVE_ENGINE", "gemini-live")
-        monkeypatch.setattr(realtime_calls, "realtime_for", _built)
-        return fake
-
-    def test_the_phone_asks_how_to_dial(self, client: TestClient, gemini: Any) -> None:
-        body = client.get(chat_live.ENGINE).json()
-        assert body == {
-            "transport": "relay",
-            "engine": {"label": TITLES["gemini-3.8-live"], "per_second": None},
-        }
-
-    def test_a_webrtc_engine_dials_as_before(self, client: TestClient) -> None:
-        assert client.get(chat_live.ENGINE).json()["transport"] == "gpt_live"
-
-    def test_the_call_carries_audio_both_ways(
-        self, client: TestClient, gemini: Any
-    ) -> None:
-        import json
-
-        from tests._realtime import VOICE
-
-        heard: list[bytes] = []
-        told: list[dict[str, Any]] = []
-        with client.websocket_connect(chat_live.RELAY) as ws:
-            ready = ws.receive_json()
-            ws.send_bytes(b"\x10\x20")
-            for _ in range(20):  # a bound, never a hang
-                message = ws.receive()
-                if message.get("bytes"):
-                    heard.append(message["bytes"])
-                elif message.get("text"):
-                    told.append(json.loads(message["text"]))
-                if heard and any(t["type"] == "saved" for t in told):
-                    break
-
-        assert ready["type"] == "ready"
-        assert (ready["input_rate"], ready["output_rate"]) == (16_000, 24_000)
-        assert ready["conversation_id"]  # a call without one starts one
-        assert heard == [VOICE]  # her voice, as the model spoke it
-        assert gemini.live.audio == [b"\x10\x20"]  # yours, as the page sent it
-        assert gemini.live.sent == [chat_live.LIVE_GREETING]  # she speaks first
-        # you were heard from your first word to your last: no quiet
-        # counts in between (#458)
-        assert told[0] == {"type": "hearing"}
-        said = [t["text"] for t in told if t["type"] == "said"]
-        assert said == ["Hello! Talk soon."]
-        # each step as it runs, labelled as the thread's trail labels it
-        steps = [t.get("label") for t in told if t["type"] == "working"]
-        assert steps == ["run_code: result = await budget()"]
-        # she ended the call: the page hangs up once her audio has played
-        assert {"type": "hang_up"} in told
-        saved = told[-1]
-        assert saved["type"] == "saved"  # the thread reloads
-        assert saved["cost"] > 0  # and the call bar shows the running cost
-
-    def test_a_call_into_a_conversation_does_not_meet_them_again(
-        self, client: TestClient, live: _Live, stored: tuple[str, str]
-    ) -> None:
-        """#292: every call opened "Lovely to meet you" with hundreds of turns
-        behind it. A call into a conversation picks it up instead."""
-        conversation_id, _ = stored
-        response = client.post(
-            SESSIONS, json={"sdp": "v=0 offer", "conversation_id": conversation_id}
-        )
-
-        assert response.json()["greeting"] == chat_live.LIVE_CONTINUE
-
-    def test_the_page_cues_her_check_in_and_goodbye(
-        self, client: TestClient, gemini: Any
-    ) -> None:
-        """#458: the page counts the quiet; she says the server's lines."""
-        with client.websocket_connect(chat_live.RELAY) as ws:
-            ws.receive_json()
-            ws.send_json({"type": "cue", "line": "check_in"})
-            ws.send_json({"type": "cue", "line": "goodbye"})
-            ws.send_json({"type": "cue", "line": "anything else"})  # not hers
-        assert gemini.live.sent[1:] == [chat_live.LIVE_CHECK_IN, chat_live.LIVE_GOODBYE]
-
-    def test_on_the_relay_she_says_what_she_saw(
-        self, client: TestClient, gemini: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The relay takes only her lines from the page, so a picture goes
-        up the socket and the server speaks what she saw."""
-        import json
-
-        turns = TestDoingTheWork._answers(monkeypatch, "Your checking balance.")
-        told: list[dict[str, Any]] = []
-        with client.websocket_connect(chat_live.RELAY) as ws:
-            ready = ws.receive_json()
-            ws.send_json({"type": "shown", "image": SHOT})
-            for _ in range(20):  # a bound, never a hang
-                message = ws.receive()
-                if message.get("text"):
-                    told.append(json.loads(message["text"]))
-                if any(t["type"] == "looked" for t in told):
-                    break
-
-        assert turns[0]["conversation_id"] == ready["conversation_id"]
-        assert chat_live.LIVE_SAW.format(seen="Your checking balance.") in (
-            gemini.live.sent
-        )
-        assert {"type": "looked", "cost": 0.0047} in told
-
-    def test_on_the_relay_a_file_that_is_not_a_picture_still_lands(
-        self, client: TestClient, gemini: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The page shows her working once it sends; a refusal must still
-        tell it the look is over, or the call bar stays on "working"."""
-        import json
-
-        turns = TestDoingTheWork._answers(monkeypatch, "unused")
-        told: list[dict[str, Any]] = []
-        with client.websocket_connect(chat_live.RELAY) as ws:
-            ws.receive_json()
-            pdf = {**SHOT, "media_type": "application/pdf"}
-            ws.send_json({"type": "shown", "image": pdf})
-            for _ in range(20):  # a bound, never a hang
-                message = ws.receive()
-                if message.get("text"):
-                    told.append(json.loads(message["text"]))
-                if any(t["type"] == "looked" for t in told):
-                    break
-
-        assert {"type": "looked", "cost": None} in told
-        assert turns == []
-
-    def test_a_dropped_call_picks_up_where_it_stopped(
-        self, client: TestClient, gemini: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from app.services.ai.domains.voice import realtime_calls
-
-        monkeypatch.setattr(
-            realtime_calls, "resumed", lambda conversation: "How much is left?"
-        )
-        with client.websocket_connect(chat_live.RELAY) as ws:
-            ws.receive_json()
-            ws.send_bytes(b"\x10\x20")  # the fake plays once it hears you
-        (opening,) = gemini.live.sent
-        assert opening != chat_live.LIVE_GREETING
-        assert "How much is left?" in opening
-
-    def test_the_relay_adopts_the_active_model_first(
-        self, client: TestClient, gemini: Any, synced: list[bool]
-    ) -> None:
-        """Her prompt is built for the service's model: a call that skipped
-        adopting the active one built it for the container's default
-        (Ollama, in compact mode) instead."""
-        with client.websocket_connect(chat_live.RELAY) as ws:
-            ws.receive_json()
-            ws.send_bytes(b"\x10\x20")
-        assert synced == [True]
-
-    def test_a_webrtc_engine_is_refused_on_the_relay(self, client: TestClient) -> None:
-        from starlette.websockets import WebSocketDisconnect
-
-        with (
-            pytest.raises(WebSocketDisconnect) as refused,
-            client.websocket_connect(chat_live.RELAY) as ws,
-        ):
-            ws.receive_json()
-        assert refused.value.code == 1008
-
-    def test_the_phone_knows_the_relay(self, client: TestClient) -> None:
-        button = one(client.get("/chat").text, "button#chat-live")
-        assert button.get("data-engine") == chat_live.ENGINE
-        assert button.get("data-relay") == chat_live.RELAY
-        assert "mic-worklet" in (button.get("data-worklet") or "")
+        """What the call cost, as its voice and its thinking: the wording
+        is the page's, voice.js fills in the figures."""
+        page = client.get(PAGE, headers=headers).text
+        split = one(page, "#chat-call template#chat-call-split")
+        for figure in ("voice", "thinking"):
+            one(split, f"[data-call-{figure}]")
 
     def test_a_card_drawn_mid_call_has_a_place_in_the_thread(
         self, client: TestClient
     ) -> None:
-        """The relay tells the page each card as she draws it; the page
-        puts it at the foot of the thread until the saved turn replaces it."""
-        html = client.get("/chat").text
-        one(html, "template#chat-live-card")
-        assert chat_live_relay.drawn_card("c1") == {
-            "type": "card",
-            "url": f"{chat_cards.CARDS}/c1",
+        one(client.get(PAGE).text, "template#chat-live-card")
+
+    def test_her_steps_show_in_the_thread_as_she_takes_them(
+        self, client: TestClient
+    ) -> None:
+        """A call's turn shows each step as it runs, under her name, as a
+        typed turn's do (2026-10-24: they showed only in the status line)."""
+        turn = one(client.get(PAGE).text, "template#chat-live-turn")
+        assert turn.xpath(".//*[@data-trail]")
+
+
+class TestTheStage:
+    """A call, full screen: her figure in the middle is the phone, on the
+    chat's own socket; what she draws lands in front of it."""
+
+    def test_her_figure_is_the_phone_on_the_chats_socket(
+        self, client: TestClient
+    ) -> None:
+        figure = one(client.get(STAGE).text, "button#chat-live")
+        assert figure.get("data-relay") == SOCKET
+        assert "mic-worklet" in (figure.get("data-worklet") or "")
+        assert "idle" in (figure.get("data-voice") or "")  # the quiet she counts
+        assert figure.cssselect("img")
+        drawn = {
+            e.get("data-mic-visual") for e in figure.cssselect("[data-mic-visual]")
         }
+        assert drawn == {"recording", "thinking", "speaking", "working"}
+
+    def test_cards_land_on_the_stage_not_a_thread(self, client: TestClient) -> None:
+        page = client.get(STAGE).text
+        one(page, "#chat-stage #chat-stage-front")
+        one(page, "#chat-stage #chat-stage-strip")
+        one(page, "template#chat-live-card")
+        assert 'id="chat-thread"' not in page
+
+    def test_it_carries_on_the_conversation_the_chat_had_open(
+        self, client: TestClient
+    ) -> None:
+        page = client.get(STAGE, params={"conversation_id": "c1"}).text
+        assert one(page, "#chat-stage input#chat-conversation").get("value") == "c1"
+
+    def test_the_call_bar_and_its_status_line_come_along(
+        self, client: TestClient
+    ) -> None:
+        page = client.get(STAGE).text
+        one(page, "#chat-call button#chat-mute")
+        one(page, "#chat-call button#chat-hang-up")
+        one(page, "#chat-mic-status")
+        one(page, "template#chat-mic-states [data-state=live]")
+        # No composer on the stage, so no picture to pick from it.
+        assert not one(page, "#chat-call").cssselect("label[for=chat-attach]")
+
+    def test_the_chat_opens_the_stage(self, client: TestClient) -> None:
+        one(client.get(PAGE).text, f'#chat a[href="{STAGE}"]')
+
+    def test_a_mount_without_calls_has_no_stage(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(chat_surface, "HAS_VOICE", False)
+        assert client.get(STAGE).status_code == 404
+        assert f'href="{STAGE}"' not in client.get(PAGE).text
+
+
+class TestTheCall:
+    def test_it_carries_the_audio_both_ways(
+        self, client: TestClient, gemini: FakeRealtime, ended: threading.Event
+    ) -> None:
+        with client.websocket_connect(SOCKET) as ws:
+            ready = ws.receive_json()
+            ws.send_bytes(b"\x10\x20")
+            heard, told = _hear(ws, "saved")
+            ws.close()
+            assert ended.wait(5)
+
+        assert ready["type"] == "ready"
+        assert (ready["input_rate"], ready["output_rate"]) == (16_000, 24_000)
+        assert ready["conversation_id"]  # a call without one starts one
+        assert ready["engine"] == {"label": "Gemini 3.8 Live"}
+        assert heard == [VOICE]  # its voice, as the model spoke it
+        assert gemini.live.audio == [b"\x10\x20"]  # yours, as the page sent it
+        assert gemini.live.sent == [chat_live.GREETING]  # it speaks first
+        # You were heard from your first word to your last: Gemini reports
+        # no onset of speech, so no quiet is counted in between.
+        assert told[0] == {"type": "hearing"}
+        assert [t["text"] for t in told if t["type"] == "said"] == ["Hello!"]
+        # Each step as it runs, labelled as the thread's trail labels it.
+        steps = [t.get("label") for t in told if t["type"] == "working"]
+        assert steps == ["run_code: result = await report()"]
+        # It ended the call: the page hangs up once the goodbye has played.
+        assert {"type": "hang_up"} in told
+        assert told[-1]["type"] == "saved"  # the thread reloads
+
+    def test_the_page_cues_its_check_in_and_goodbye(
+        self, client: TestClient, gemini: FakeRealtime, ended: threading.Event
+    ) -> None:
+        """No provider ends a call on quiet: the page counts it
+        (call-state.js) and names a line; the assistant says the server's,
+        and nothing the page made up."""
+        with client.websocket_connect(SOCKET) as ws:
+            ws.receive_json()
+            ws.send_bytes(b"\x10\x20")  # the fake plays once it hears you
+            ws.send_json({"type": "cue", "line": "check_in"})
+            ws.send_json({"type": "cue", "line": "goodbye"})
+            ws.send_json({"type": "cue", "line": "anything else"})
+            ws.close()
+            assert ended.wait(5)
+        assert gemini.live.sent[1:] == [chat_live.CHECK_IN, chat_live.GOODBYE]
+
+    def test_a_picture_shown_on_the_call_is_looked_at_and_spoken_of(
+        self,
+        client: TestClient,
+        gemini: FakeRealtime,
+        ended: threading.Event,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A picture goes up the socket: the call's agent looks at it in a
+        turn of the conversation, and the assistant says what it saw
+        without leaving the call."""
+        turns = _looks(monkeypatch, "A **transfer** screen.")
+        with client.websocket_connect(SOCKET) as ws:
+            ready = ws.receive_json()
+            ws.send_json({"type": "shown", "image": SHOT})
+            _, told = _hear(ws, "looked")
+            ws.close()
+            assert ended.wait(5)
+
+        (turn,) = turns
+        assert turn["message"] == chat_live.SHOWN
+        assert turn["hand_over"] is False  # a look does not take the thread
+        assert turn["conversation_id"] == ready["conversation_id"]
+        assert [(a.media_type, a.decoded()) for a in turn["attachments"]] == [
+            ("image/png", b"shot")
+        ]
+        assert chat_live.SAW.format(seen="A transfer screen.") in gemini.live.sent
+        assert told[-1] == {"type": "looked"}
+
+    def test_a_file_that_is_not_a_picture_still_ends_the_look(
+        self,
+        client: TestClient,
+        gemini: FakeRealtime,
+        ended: threading.Event,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The page shows it working once it sends; a refusal must still
+        tell it the look is over, or the call bar stays on working."""
+        turns = _looks(monkeypatch, "unused")
+        with client.websocket_connect(SOCKET) as ws:
+            ws.receive_json()
+            ws.send_json({"type": "shown", "image": {**SHOT, "media_type": "x/pdf"}})
+            _, told = _hear(ws, "looked")
+            ws.close()
+            assert ended.wait(5)
+        assert told[-1] == {"type": "looked"}
+        assert turns == []
+
+    def test_a_failed_look_is_said_and_the_call_goes_on(
+        self,
+        client: TestClient,
+        gemini: FakeRealtime,
+        ended: threading.Event,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _looks(monkeypatch, "unused", fail=True)
+        with client.websocket_connect(SOCKET) as ws:
+            ws.receive_json()
+            ws.send_json({"type": "shown", "image": SHOT})
+            _, told = _hear(ws, "looked")
+            ws.close()
+            assert ended.wait(5)
+        assert told[-1] == {"type": "looked"}
+        assert gemini.live.sent[-1] == chat_live.NOT_SEEN
+
+    def test_the_call_bar_has_the_calls_cost_and_its_thinking(
+        self,
+        client: TestClient,
+        gemini: FakeRealtime,
+        ended: threading.Event,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each saved turn tells an operator what the call has cost so far
+        - its voice and its thinking (the turns it handed off: a picture
+        looked at) - for the call bar and its split on hover."""
+        _looks(monkeypatch, "A chart.")
+        with client.websocket_connect(SOCKET) as ws:
+            ws.receive_json()
+            ws.send_json({"type": "shown", "image": SHOT})
+            _hear(ws, "looked")
+            ws.send_bytes(b"\x10\x20")  # the fake plays once it hears you
+            _, told = _hear(ws, "saved")
+            ws.close()
+            assert ended.wait(5)
+        saved = told[-1]
+        assert saved["thinking"] == pytest.approx(LOOK_COST)
+        assert saved["cost"] >= 0  # the call's own, priced as the turn was saved
+
+    def test_a_dropped_call_picks_up_where_it_stopped(
+        self,
+        client: TestClient,
+        gemini: FakeRealtime,
+        ended: threading.Event,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            realtime_calls, "resumed", lambda conversation: "How much is left?"
+        )
+        with client.websocket_connect(SOCKET) as ws:
+            ws.receive_json()
+            ws.send_bytes(b"\x10\x20")  # the fake plays once it hears you
+            ws.close()
+            assert ended.wait(5)
+        (opening,) = gemini.live.sent
+        assert "How much is left?" in opening
+
+    def test_no_engine_on_offer_is_refused(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(chat_live, "_engine_now", _no_engine)
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            client.websocket_connect(SOCKET) as ws,
+        ):
+            ws.receive_json()
+        assert refused.value.code == 1008
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key", "per_second"), [("gpt-live", 0.05 / 60), ("gemini-live", None)]
+)
+async def test_the_engine_comes_with_its_rate_where_it_bills_by_time(
+    async_db_session: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    per_second: float | None,
+) -> None:
+    """The call bar ticks a call priced by the minute at the server's
+    per-second rate; one priced by its tokens has none, and is priced as
+    each turn is saved."""
+    from app.core.config import settings
+    from app.services.ai.domains.voice import live_engines
+    from tests._session import opens
+    from tests._voice_catalog import seed_voice_catalog
+
+    monkeypatch.setattr(chat_live, "get_async_session", opens(async_db_session))
+    monkeypatch.setattr(settings, "VOICE_LIVE_ENGINE", key)
+    await seed_voice_catalog(async_db_session)
+    await live_engines.seed_missing(async_db_session)
+
+    engine, info = await chat_live._engine_now()
+
+    assert engine is not None and engine.key == key
+    assert info is not None and info["label"] == engine.llm.title
+    if per_second is None:
+        assert info["per_second"] is None
+    else:
+        assert info["per_second"] == pytest.approx(per_second)
+
+
+class TestABoundCall:
+    """A call is a turn: bound as the mount's pages are (``bind``), owned
+    by the signed-in user (``get_optional_owner_user_id``) and let through
+    by the mount's ``gate``."""
+
+    def test_it_calls_as_the_mount_binds_it(
+        self,
+        app: FastAPI,  # the database, set up
+        gemini: FakeRealtime,
+        ended: threading.Event,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The conversation it starts is the bound user's, about the bound
+        subject, answered by the bound mount's voice agent, and its tools
+        run as them: each event seen in their turn."""
+        during: list[tuple[str | None, int | None]] = []
+
+        async def tell(ws: Any, event: Any) -> None:
+            during.append((current_subject.get(), current_owner_user_id.get()))
+
+        async def bound() -> ChatSurface:
+            return replace(OVERSEER, user="7", subject="42", voice_agent_slug="voice")
+
+        monkeypatch.setattr(chat_live, "_tell", tell)
+        with _calls(replace(OVERSEER, bind=bound)).websocket_connect(SOCKET) as ws:
+            ws.receive_json()
+            ws.send_bytes(b"\x10\x20")  # the fake plays once it hears you
+            ws.close()
+            assert ended.wait(5)
+
+        built = gemini.built
+        meta = built["conversation"].metadata
+        assert (meta["user_id"], meta["subject"]) == ("7", "42")
+        assert (built["user_id"], built["owner_user_id"]) == ("7", 7)
+        assert (built["subject"], built["agent_slug"]) == ("42", "voice")
+        assert during and set(during) == {("42", 7)}
+
+    def test_a_call_the_gate_refuses_never_opens(
+        self, gemini: FakeRealtime, ends: tuple[queue.Queue[str], Any]
+    ) -> None:
+        """Over a plan's budget, a call is refused as a typed turn is, and
+        never began: no end for the mount's hook."""
+        heard, on_call_end = ends
+
+        async def spent() -> str:
+            return "Today's budget is spent."
+
+        mount = replace(OVERSEER, gate=spent, on_call_end=on_call_end)
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            _calls(mount).websocket_connect(SOCKET) as ws,
+        ):
+            ws.receive_json()
+        assert (refused.value.code, refused.value.reason) == (
+            1008,
+            "Today's budget is spent.",
+        )
+        assert not hasattr(gemini, "built")
+        assert heard.empty()
+
+    def test_a_caller_the_mount_gives_no_controls_never_opens(
+        self, gemini: FakeRealtime
+    ) -> None:
+        """No phone on their page is no call on the socket either: the
+        socket refuses whom ``bind`` gives no operator controls."""
+
+        async def customer() -> ChatSurface:
+            return replace(OVERSEER, operator_controls=False)
+
+        with (
+            pytest.raises(WebSocketDisconnect) as refused,
+            _calls(replace(OVERSEER, bind=customer)).websocket_connect(SOCKET) as ws,
+        ):
+            ws.receive_json()
+        assert refused.value.code == 1008
+        assert not hasattr(gemini, "built")
+
+    def test_a_caller_the_mount_lets_call_without_controls_is_put_through(
+        self,
+        app: FastAPI,  # the database, set up
+        gemini: FakeRealtime,
+        ended: threading.Event,
+    ) -> None:
+        """Calls are their own switch: a mount may let in a caller it gives
+        no controls (a signed-out visitor), on what the install calls with;
+        the engine and what the call cost stay the operator's to see."""
+
+        async def visitor() -> ChatSurface:
+            return replace(OVERSEER, user="v1", operator_controls=False, calls=True)
+
+        with _calls(replace(OVERSEER, bind=visitor)).websocket_connect(SOCKET) as ws:
+            ready = ws.receive_json()
+            ws.send_bytes(b"\x10\x20")  # the fake plays once it hears you
+            _, told = _hear(ws, "saved")
+            ws.close()
+            assert ended.wait(5)
+        assert gemini.built["user_id"] == "v1"
+        assert ready["engine"] is None
+        assert told[-1] == {"type": "saved"}
+
+
+def test_a_call_acts_on_the_page_it_is_on(
+    app: FastAPI,  # the database, set up
+    gemini: FakeRealtime,
+    ended: threading.Event,
+) -> None:
+    """A step she takes on the page reaches it at once, on a page the mount
+    declares (the socket says which, as the stream's body does)."""
+    gemini.live.events.insert(0, lambda: page_action("highlight", "docs"))
+    mount = replace(OVERSEER, pages={"/": LANDING})
+    with _calls(mount).websocket_connect(f"{SOCKET}?page=/") as ws:
+        ws.send_bytes(b"\x10\x20")  # the fake plays once it hears you
+        _, told = _hear(ws, "page")
+        ws.close()
+        assert ended.wait(5)
+    assert told[-1] == {"type": "page", "action": "highlight", "target": "docs"}
+
+
+class TestABoundedCall:
+    """A mount may bound its calls (someone other than the operator pays
+    for the minutes): a longest call, a check asked after each turn, and a
+    hook once each call the gate let through is over, however it ended."""
+
+    def test_it_wraps_up_then_ends_at_its_longest(
+        self,
+        app: FastAPI,  # the database, set up
+        gemini: FakeRealtime,
+        ends: tuple[queue.Queue[str], Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        heard, on_call_end = ends
+        monkeypatch.setattr(chat_live, "WRAP_UP_SECONDS", 0.1)
+        mount = replace(OVERSEER, longest_call=0.3, on_call_end=on_call_end)
+        with _calls(mount).websocket_connect(SOCKET) as ws:
+            _, told = _hear(ws, "ended")
+            assert heard.get(timeout=5) == "limit"
+        assert told[-1] == {"type": "ended", "reason": chat_live.TIME_UP}
+        assert gemini.live.sent[-1] == chat_live.WRAP_UP  # she says it first
+
+    def test_a_check_that_refuses_mid_call_ends_it_after_the_turn(
+        self,
+        app: FastAPI,  # the database, set up
+        gemini: FakeRealtime,
+        ends: tuple[queue.Queue[str], Any],
+    ) -> None:
+        heard, on_call_end = ends
+
+        async def spent(bound: ChatSurface) -> str | None:
+            return "Today's budget is spent."
+
+        mount = replace(OVERSEER, call_check=spent, on_call_end=on_call_end)
+        with _calls(mount).websocket_connect(SOCKET) as ws:
+            ws.send_bytes(b"\x10\x20")  # the fake plays once it hears you
+            _, told = _hear(ws, "ended")
+            assert heard.get(timeout=5) == "refused"
+        kinds = [t["type"] for t in told]
+        assert kinds.index("saved") < kinds.index("ended")  # the turn is kept
+        assert told[-1] == {"type": "ended", "reason": "Today's budget is spent."}
+
+    def test_the_end_hook_runs_once_for_each_call_the_gate_let_through(
+        self,
+        app: FastAPI,  # the database, set up
+        gemini: FakeRealtime,
+        ends: tuple[queue.Queue[str], Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Hung up, or failed as it opened: each is one end. A call the gate
+        refuses never began (``test_a_call_the_gate_refuses_never_opens``)."""
+        heard, on_call_end = ends
+        mount = replace(OVERSEER, on_call_end=on_call_end)
+        with _calls(mount).websocket_connect(SOCKET) as ws:
+            ws.receive()  # ready, or her voice
+            ws.close()
+            assert heard.get(timeout=5) == "page"
+
+        monkeypatch.setattr(chat_live, "_engine_now", _no_engine)
+        with (
+            pytest.raises(WebSocketDisconnect),
+            _calls(mount).websocket_connect(SOCKET) as ws,
+        ):
+            ws.receive_json()
+        assert heard.get(timeout=5) == "error"
+        assert heard.empty()
+
+
+def test_a_call_into_a_conversation_does_not_meet_them_again() -> None:
+    """A call into a conversation under way greets them as someone it
+    knows; a first call greets; nothing to pick up is not a resume."""
+    under_way = SimpleNamespace(messages=[SimpleNamespace(role="user", metadata={})])
+    assert chat_live.opening(under_way) == chat_live.CONTINUING
+    assert chat_live.opening(None) == chat_live.GREETING
+    assert chat_live.opening(SimpleNamespace(messages=[])) == chat_live.GREETING
+
+
+@pytest.mark.skipif(
+    find_spec("app.services.auth") is None,
+    reason="without auth a live call is open, as all of Overseer is",
+)
+def test_a_caller_who_is_not_signed_in_is_refused(app: FastAPI) -> None:
+    """The socket's guard reads the session cookie: none, no call."""
+    with (
+        pytest.raises(WebSocketDisconnect) as refused,
+        TestClient(app).websocket_connect(SOCKET) as ws,
+    ):
+        ws.receive_json()
+    assert refused.value.code == 1008
+
+
+def test_a_cue_that_is_not_one_says_nothing() -> None:
+    """Whatever the page sends that is not a cue by name is no line: a
+    malformed message does not end the call either."""
+    assert chat_live._cue(chat_live._said('{"line": "check_in"}')) == (
+        chat_live.CHECK_IN
+    )
+    assert chat_live._said("not json") == {}
+    assert chat_live._said('["check_in"]') == {}
+    assert chat_live._cue(chat_live._said('{"line": "say something rude"}')) is None
+
+
+async def test_your_speech_is_relayed_from_its_first_sound() -> None:
+    """OpenAI and xAI report speech onset before any transcript: a long
+    sentence is you talking, not quiet the page counts toward a check-in."""
+    from pydantic_ai.messages import (
+        RealtimeInputSpeechEndEvent,
+        RealtimeInputSpeechStartEvent,
+    )
+
+    from app.components.web_frontend.routes.partials import chat_live
+
+    told: list[dict[str, object]] = []
+
+    class Page:
+        async def send_json(self, message: dict[str, object]) -> None:
+            told.append(message)
+
+    await chat_live._tell(Page(), RealtimeInputSpeechStartEvent())  # type: ignore[arg-type]
+    await chat_live._tell(Page(), RealtimeInputSpeechEndEvent())  # type: ignore[arg-type]
+    assert told == [{"type": "onset"}, {"type": "turn_end"}]
+
+
+async def test_her_words_reach_the_page_as_she_says_them() -> None:
+    """Her transcript so far, each time it grows, so a card on screen can
+    follow what she names; your words are not hers to follow."""
+    from pydantic_ai.messages import PartDeltaEvent, SpeechPartDelta
+
+    from app.components.web_frontend.routes.partials import chat_live
+
+    told: list[dict[str, object]] = []
+
+    class Page:
+        async def send_json(self, message: dict[str, object]) -> None:
+            told.append(message)
+
+    def delta(speaker: str, transcript: str | None) -> PartDeltaEvent:
+        part = SpeechPartDelta(speaker=speaker, transcript=transcript)  # type: ignore[arg-type]
+        return PartDeltaEvent(index=0, delta=part)  # type: ignore[arg-type]
+
+    for event in (
+        delta("assistant", "First the"),
+        delta("assistant", "First the Server"),
+        delta("assistant", None),  # audio only
+        delta("user", "and you"),
+    ):
+        await chat_live._tell(Page(), event)  # type: ignore[arg-type]
+    assert told == [
+        {"type": "saying", "text": "First the"},
+        {"type": "saying", "text": "First the Server"},
+    ]

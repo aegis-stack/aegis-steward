@@ -1,28 +1,27 @@
 """What the Overseer AI page's section modules share: where the page lives,
-whether the AI service has a persistence backend and voice,
+whether the AI service has a persistence backend, the model in effect,
 and how a provider's name and a price read. ``overseer_ai`` (Overview,
 Usage, Sentiment, Providers), ``overseer_ai_catalog`` and
 ``overseer_ai_agents`` import it at the top.
 """
 
+from collections.abc import Mapping
 from importlib.util import find_spec
 from typing import Any
 from urllib.parse import quote
 
-from app.services.ai.models import AIProvider
-from app.services.ai.models.provider_names import provider_label
+from app.services.ai.service import AIProvider, provider_label
 
+# Voice and a database, as the chat surface reads them: one home.
+from .chat_surface import PERSISTED
 from .overseer_nav import page_url
 from .rendering import with_query
 
-# What this stack has, which decides the sections offered: a database for
-# the catalog, conversations and every row a section reads, and voice
-# (``ai[voice]``).
-PERSISTED = find_spec("app.services.ai.domains.chat.sentiment") is not None
-HAS_VOICE = find_spec("app.services.ai.domains.voice") is not None
 # RAG is file-based (Chroma), so it needs no database: offered wherever
 # ``ai[...,rag]`` installed it.
 HAS_RAG = find_spec("app.services.rag") is not None
+# Evals keep runs only with a database; the section ships with them.
+HAS_EVALS = find_spec("app.components.web_frontend.overseer_ai_evals") is not None
 
 PAGE = page_url("services", "ai")
 PARTIALS = "/partials/overseer/ai"
@@ -31,6 +30,28 @@ PARTIALS = "/partials/overseer/ai"
 def section_url(section: str, **query: str | list[str] | None) -> str:
     """One of the AI page's sections, its filters in the query string."""
     return with_query(f"{PAGE}/{section}", **query)
+
+
+def tab_links(
+    section: str, tabs: Mapping[str, str], current: str, default: str
+) -> list[dict[str, Any]]:
+    """A section's tab row (``section_tabs``): each tab's label, its address
+    (``?tab=``, none for ``default``) and whether it is the one shown."""
+    return [
+        {
+            "label": label,
+            "url": section_url(section, tab=None if key == default else key),
+            "active": key == current,
+        }
+        for key, label in tabs.items()
+    ]
+
+
+async def get_current_config() -> Any:
+    """The model in effect (``chat_models.current_config``)."""
+    from .chat_models import current_config
+
+    return await current_config()
 
 
 def label(provider: str) -> str:
@@ -65,7 +86,7 @@ async def mark_urls(db: Any, names: dict[str, tuple[str, ...]]) -> dict[str, str
     logos through this; only a persistence backend has the catalog."""
     if not PERSISTED or not names:
         return {}
-    from app.services.ai.domains.llm.queries import org_icons
+    from app.services.ai.service import org_icons
 
     stored = await org_icons(db, [n for pair in names.values() for n in pair])
     found = {

@@ -1,5 +1,7 @@
 """Speech either way: transcribe a file, speak a line."""
 
+from typing import Any
+
 import typer
 
 from app.cli import theme
@@ -13,6 +15,20 @@ from ...core.config import settings
 from ...core.log import suppress_logs
 
 
+async def speaking_settings() -> Any:
+    """The settings in the active voice profile, which the app speaks and
+    hears with; ``.env``'s where the stack keeps no profiles."""
+    import app.services.ai.service as ai
+
+    profiles = getattr(ai, "profiles", None)
+    if profiles is None:
+        return settings
+    from app.core.db import get_async_session
+
+    async with get_async_session() as session:
+        return await profiles.active_settings(session, settings)
+
+
 @app.command(help=lazy_t("ai.help_transcribe"))
 async def transcribe(
     audio_file: str = typer.Argument(..., help=lazy_t("ai.arg_audio_file")),
@@ -24,8 +40,7 @@ async def transcribe(
     import json
     from pathlib import Path
 
-    from app.services.ai.domains.voice import AudioFormat, AudioInput
-    from app.services.ai.service import AIService
+    from app.services.ai.service import AIService, AudioFormat, AudioInput
 
     async def run_transcribe() -> None:
         try:
@@ -62,7 +77,7 @@ async def transcribe(
             )
 
             with suppress_logs():
-                ai_service = AIService(settings)
+                ai_service = AIService(await speaking_settings())
 
             # Show transcription progress
             from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -130,13 +145,13 @@ async def transcribe(
 
 
 @app.command("stt-status", help=lazy_t("ai.help_stt_status"))
-def stt_status() -> None:
+async def stt_status() -> None:
     from app.services.ai.service import AIService
 
     with suppress_logs():
-        ai_service = AIService(settings)
+        ai_service = AIService(await speaking_settings())
 
-    status = ai_service.stt.get_status()
+    status = await ai_service.stt.get_status()
 
     theme.title(t("ai.stt_status_title"))
     theme.label("=" * 40)
@@ -163,8 +178,9 @@ def stt_status() -> None:
 @app.command(help=lazy_t("ai.help_speak"))
 async def speak(
     text: str = typer.Argument(..., help=lazy_t("ai.arg_text")),
-    output: str = typer.Option(
-        "speech.mp3", "--output", "-o", help=lazy_t("ai.opt_output_file")
+    # None: speech.<format>, named by what the model answers in.
+    output: str | None = typer.Option(
+        None, "--output", "-o", help=lazy_t("ai.opt_output_file")
     ),
     voice: str | None = typer.Option(
         None, "--voice", "-v", help=lazy_t("ai.opt_voice")
@@ -175,13 +191,12 @@ async def speak(
 ) -> None:
     from pathlib import Path
 
-    from app.services.ai.domains.voice import SpeechRequest
-    from app.services.ai.service import AIService
+    from app.services.ai.service import AIService, SpeechRequest
 
     async def run_speak() -> None:
         try:
             with suppress_logs():
-                ai_service = AIService(settings)
+                ai_service = AIService(await speaking_settings())
 
             # Show synthesis progress
             from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -198,7 +213,7 @@ async def speak(
                 result = await ai_service.tts.synthesize(request)
 
             # Save audio to file
-            output_path = Path(output)
+            output_path = Path(output or f"speech.{result.format.value}")
             with open(output_path, "wb") as f:
                 f.write(result.audio)
 
@@ -229,13 +244,13 @@ async def speak(
 
 
 @app.command("tts-status", help=lazy_t("ai.help_tts_status"))
-def tts_status() -> None:
-    from app.services.ai.service import AIService
+async def tts_status() -> None:
+    from app.services.ai.service import AIService, get_tts_voices
 
     with suppress_logs():
-        ai_service = AIService(settings)
+        ai_service = AIService(await speaking_settings())
 
-    status = ai_service.tts.get_status()
+    status = await ai_service.tts.get_status()
 
     theme.title(t("ai.tts_status_title"))
     theme.label("=" * 40)
@@ -264,10 +279,11 @@ def tts_status() -> None:
         theme.good_text(status_text) if initialized else theme.warn_text(status_text)
     )
     typer.echo(theme.label_text(t("ai.status_label") + " ") + status_value)
+    for error in status.get("errors") or []:
+        typer.echo(theme.bad_text(t("shared.error")) + " " + error)
 
-    # Show available voices
     typer.echo()
     typer.echo(
-        theme.label_text(t("ai.openai_voices") + " ")
-        + "alloy, echo, fable, onyx, nova, shimmer"
+        theme.label_text(t("ai.voices_label") + " ")
+        + ", ".join(v.name for v in get_tts_voices(status["provider"]))
     )

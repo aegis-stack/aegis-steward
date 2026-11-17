@@ -21,7 +21,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import before_and_after
 from app.core.schema import known
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.change_queue import ChangeDisplayRow
 from app.services.matters.models import PARTY_KINDS
 from app.services.matters.reach import (
     CONTACT_FIELDS,

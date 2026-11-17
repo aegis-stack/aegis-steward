@@ -209,13 +209,13 @@ class TestTheEobProposesTheClaim:
     async def test_the_card_shows_the_four_figures_and_the_eob_lands(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.services.ai.domains.chat.pastes import store_document
         from app.services.documents.service import DocumentService
         from app.services.insurance.changes import (
             ClaimRecordPayload,
             claim_record_describe,
             claim_record_execute,
         )
+        from tests._pastes import keep_document
 
         insurer, alex, _ = await _insured(async_db_session)
         service = InsuranceService(async_db_session)
@@ -228,8 +228,8 @@ class TestTheEobProposesTheClaim:
         document = await DocumentService(async_db_session).ingest(
             b"%PDF-1.4 eob", title="ClaimStatement.pdf"
         )
-        paste = await store_document(
-            "0", int(document.id), "ClaimStatement.pdf", 11_049, async_db_session
+        paste = await keep_document(
+            async_db_session, "0", int(document.id), "ClaimStatement.pdf", 11_049
         )
         payload = ClaimRecordPayload(
             policy_id=int(policy.id),
@@ -240,7 +240,7 @@ class TestTheEobProposesTheClaim:
             allowed_cents=35600,
             insurer_paid_cents=21000,
             patient_owes_cents=14600,
-            paste_id=str(paste["id"]),
+            paste_id=str(paste.id),
         )
         said = {
             r.label: r.value

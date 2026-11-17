@@ -6,21 +6,30 @@ Covers the two pieces with real logic: ``static()`` asset resolution
 """
 
 import json
+import os
 from pathlib import Path
 import re
 
 from fastapi.testclient import TestClient
 import pytest
 
+from app.components.backend.security import honeypot
 from app.components.web_frontend import assets as web_assets
 from app.core.client_session import REFRESH_COOKIE, SESSION_COOKIE
+from tests.web.dom import one
+
+# The trap as a page carries it: named once, and kept from the password
+# managers that would fill it for a real person.
+TRAP = f'input[name="{honeypot.FIELD}"][data-1p-ignore]'
 
 
 @pytest.fixture(autouse=True)
-def _reset_manifest_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each test starts with an empty, unprimed manifest cache."""
+def _reset_manifest_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Each test starts with an empty, unprimed manifest cache, and an
+    empty static tree (a file in it is versioned by its mtime)."""
     monkeypatch.setattr(web_assets, "_manifest", {})
     monkeypatch.setattr(web_assets, "_manifest_mtime", -1.0)
+    monkeypatch.setattr(web_assets, "STATIC_DIR", tmp_path / "static")
 
 
 def _write_manifest(
@@ -69,6 +78,24 @@ class TestStaticUrl:
         monkeypatch.setattr(web_assets, "MANIFEST_PATH", tmp_path / "absent.json")
         monkeypatch.setattr(web_assets, "STATIC_DIR", tmp_path)
         assert web_assets.static_url("nope.js") == "/static/nope.js"
+
+    def test_an_unhashed_file_is_versioned_by_when_it_changed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An image or clip the build does not hash keeps its name, so its
+        URL carries a version: a changed file is a new URL, never the old
+        bytes from a browser's cache (a <video>'s media cache outlives a
+        hard reload)."""
+        monkeypatch.setattr(web_assets, "MANIFEST_PATH", tmp_path / "absent.json")
+        clip = tmp_path / "static" / "img" / "clip.mp4"
+        clip.parent.mkdir(parents=True)
+        clip.write_bytes(b"old")
+        os.utime(clip, ns=(1_000_000_000, 1_000_000_000))
+        before = web_assets.static_url("img/clip.mp4")
+        assert before.startswith("/static/img/clip.mp4?v=")
+        clip.write_bytes(b"new")
+        os.utime(clip, ns=(2_000_000_000, 2_000_000_000))
+        assert web_assets.static_url("img/clip.mp4") != before
 
     def test_resolves_hashed_path_from_manifest(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -173,6 +200,16 @@ class TestAssetFingerprinting:
 
         assert re.fullmatch(
             r"dist/app-icon-[0-9a-f]{8}\.png", build_assets()["app-icon.png"]
+        )
+
+    def test_fingerprints_vendored_scripts_too(self, static_tree: Path) -> None:
+        """A pinned library (the Query editor's CodeMirror) caches for a year
+        under its hash, as the app's own scripts do."""
+        from app.components.web_frontend.build import build_assets
+
+        manifest = build_assets()
+        assert re.fullmatch(
+            r"dist/vendor/lib-[0-9a-f]{8}\.js", manifest["vendor/lib.js"]
         )
 
     def test_globs_nested_sources_without_a_list_to_maintain(
@@ -378,6 +415,30 @@ class TestAuthPages:
         assert SESSION_COOKIE in response.cookies
         assert REFRESH_COOKIE in response.cookies
 
+    def test_a_filled_trap_registers_nobody(
+        self, async_client_with_db: TestClient
+    ) -> None:
+        """A bot that fills the honeypot gets a real submit's redirect and
+        nothing else: no account, no session."""
+        signup = {"email": "bot@example.com", "password": "hunter2hunter2"}
+        one(async_client_with_db.get("/register").text, TRAP)
+
+        trapped = async_client_with_db.post(
+            "/register",
+            data={**signup, honeypot.FIELD: "https://spam.example"},
+            follow_redirects=False,
+        )
+
+        assert trapped.status_code == 303
+        assert trapped.headers["location"] == "/overseer"
+        assert SESSION_COOKIE not in trapped.cookies
+        # The address is still free: an empty trap registers it as before.
+        real = async_client_with_db.post(
+            "/register", data={**signup, honeypot.FIELD: ""}, follow_redirects=False
+        )
+        assert real.headers["location"] == "/overseer"
+        assert SESSION_COOKIE in real.cookies
+
     def test_login_returns_to_the_next_target(
         self, async_client_with_db: TestClient
     ) -> None:
@@ -546,6 +607,11 @@ class TestBaseLayout:
         from app.integrations.main import create_integrated_app
 
         monkeypatch.setattr(web_assets, "MANIFEST_PATH", tmp_path / "absent.json")
+        # The real sources: the stamp is their mtime, and the autouse
+        # fixture points STATIC_DIR at an empty tree.
+        monkeypatch.setattr(
+            web_assets, "STATIC_DIR", web_assets.COMPONENT_DIR / "static"
+        )
         with TestClient(create_integrated_app()) as client:
             page = client.get("/overview").text
         assert re.search(r'src="/static/js/app\.js\?v=\d+"', page)

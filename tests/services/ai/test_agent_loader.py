@@ -1,13 +1,11 @@
 """Tests for the agent config loader (DB source, fallback, cache)."""
 
 from collections.abc import Generator
-from dataclasses import replace
 from typing import Any
 
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.tools import Refused
 from app.services.ai.domains.chat.agent_loader import (
     DEFAULT_AGENT_SLUG,
     AgentConfig,
@@ -16,11 +14,6 @@ from app.services.ai.domains.chat.agent_loader import (
     invalidate_agent_cache,
     resolve_agent,
 )
-
-# Registers save_memory and its kin, the native writes these tests split
-# out of the sandbox: without it they pass in the full suite (another test
-# imported it) and fail alone.
-import app.services.ai.domains.chat.memory_tools  # noqa: F401
 from app.services.ai.models import Agent, AgentTool, Tool
 
 
@@ -38,20 +31,6 @@ def session(async_db_session: AsyncSession) -> AsyncSession:
     test). A bare local engine cannot create this project's schema-qualified
     tables (finance, scheduler, ...)."""
     return async_db_session
-
-
-def _code_mode(*tool_names: str) -> AgentConfig:
-    """A code-mode agent: the tests that use it vary only its tools."""
-    return AgentConfig(
-        slug="finance-assistant",
-        name="Finance Assistant",
-        system_prompt="...",
-        model_id=None,
-        temperature=0.4,
-        max_tokens=900,
-        tool_names=tool_names,
-        code_mode=True,
-    )
 
 
 async def _add_agent(session: AsyncSession, **overrides: object) -> Agent:
@@ -137,9 +116,18 @@ class TestCodeModeSplitsReadsFromWrites:
         return list(code_mode.tools)
 
     def test_write_tools_stay_native(self) -> None:
-        sandboxed = self._code_mode_tools(
-            _code_mode("ledger", "accounts", "save_memory")
+        config = AgentConfig(
+            slug="finance-assistant",
+            name="Finance Assistant",
+            system_prompt="...",
+            model_id=None,
+            temperature=0.4,
+            max_tokens=900,
+            tool_names=("ledger", "accounts", "save_memory"),
+            code_mode=True,
         )
+
+        sandboxed = self._code_mode_tools(config)
 
         assert "ledger" in sandboxed
         assert "accounts" in sandboxed
@@ -148,8 +136,8 @@ class TestCodeModeSplitsReadsFromWrites:
     def test_a_registry_declared_native_write_stays_out_of_the_sandbox(
         self,
     ) -> None:
-        """The tool declares its own nature at registration (an
-        ``effect`` other than read); the loader asks the registry instead of
+        """The tool declares its own nature at registration
+        (effect="proposes"); the loader asks the registry instead of
         keeping a hardcoded list. This is how ``propose`` - the queue's
         one write tool - stays a visible native call."""
         from app.core.tools import register_tool, unregister_tool
@@ -161,7 +149,17 @@ class TestCodeModeSplitsReadsFromWrites:
             replace=True,
         )
         try:
-            sandboxed = self._code_mode_tools(_code_mode("ledger", "propose_test_tool"))
+            config = AgentConfig(
+                slug="finance-assistant",
+                name="Finance Assistant",
+                system_prompt="...",
+                model_id=None,
+                temperature=0.4,
+                max_tokens=900,
+                tool_names=("ledger", "propose_test_tool"),
+                code_mode=True,
+            )
+            sandboxed = self._code_mode_tools(config)
         finally:
             unregister_tool("propose_test_tool")
 
@@ -169,10 +167,18 @@ class TestCodeModeSplitsReadsFromWrites:
         assert "propose_test_tool" not in sandboxed
 
     def test_read_only_agent_sandboxes_everything(self) -> None:
-        assert self._code_mode_tools(_code_mode("ledger", "accounts")) == [
-            "ledger",
-            "accounts",
-        ]
+        config = AgentConfig(
+            slug="reader",
+            name="Reader",
+            system_prompt="...",
+            model_id=None,
+            temperature=0.4,
+            max_tokens=900,
+            tool_names=("ledger", "accounts"),
+            code_mode=True,
+        )
+
+        assert self._code_mode_tools(config) == ["ledger", "accounts"]
 
 
 class TestFallback:
@@ -184,7 +190,7 @@ class TestFallback:
 
         assert config == default_agent_config()
 
-    @pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version (#355)
+    @pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version
     async def test_missing_row_is_not_cached(self, session: AsyncSession) -> None:
         """A row seeded after a fallback resolve must win the next resolve."""
         first = await resolve_agent("support", session=session)
@@ -203,7 +209,7 @@ class TestFallback:
         assert config == default_agent_config()
 
 
-@pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version (#355)
+@pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version
 class TestCache:
     async def test_config_is_cached_until_invalidated(
         self, session: AsyncSession
@@ -227,7 +233,7 @@ class TestCache:
     async def test_a_recorded_change_from_another_process_reaches_the_next_turn(
         self, session: AsyncSession
     ) -> None:
-        """#355: the CLI writes in its own process, where this cache never
+        """The CLI writes in its own process, where this cache never
         hears of it; the recorded change is what tells it."""
         from app.services.ai.models.agents import AgentPromptChange
 
@@ -259,37 +265,34 @@ class TestCache:
         assert fresh.name == "Renamed"
 
 
-async def _tool(session: AsyncSession, agent: Agent, name: str) -> None:
+async def _grant(session: AsyncSession, agent: Agent, name: str) -> None:
     tool = Tool(name=name)
     session.add(tool)
-    await session.commit()
-    await session.refresh(agent)
-    await session.refresh(tool)
+    # Flushed, not committed: the ids stay loaded, nothing to re-select.
+    await session.flush()
     session.add(AgentTool(agent_id=agent.id, tool_id=tool.id))
     await session.commit()
 
 
 class TestExtends:
-    """One level of inheritance (#260): a child agent is its parent with
-    its own section in front and its own model and sampling. Illiana's
-    voice agent extends her written one, so an edit to her prompt, tools
-    or memory reaches both."""
+    """One level of inheritance: a child agent is its parent with its own
+    section in front and its own model and sampling, so an edit to the
+    parent's prompt, tools or modules reaches both."""
 
     async def _family(self, session: AsyncSession, **child: object) -> Agent:
         parent = await _add_agent(
             session,
-            slug="illiana",
-            system_prompt="You are Illiana.",
-            memory_modules=["finance_snapshot"],
+            slug="writer",
+            system_prompt="You are the writer.",
+            context_modules=["notes"],
             code_mode=True,
-            model_id=None,
         )
-        await _tool(session, parent, "ledger")
+        await _grant(session, parent, "lookup")
         data: dict[str, object] = {
-            "slug": "illiana-voice",
+            "slug": "writer-voice",
             "system_prompt": "Answer aloud, briefly.",
-            "extends": "illiana",
-            "model_id": "gpt-4.1-mini",
+            "extends": "writer",
+            "model_id": "small-model",
             "temperature": 0.3,
             "max_tokens": 400,
         }
@@ -298,43 +301,41 @@ class TestExtends:
 
     async def test_the_childs_section_comes_first(self, session: AsyncSession) -> None:
         await self._family(session)
-        config = await resolve_agent("illiana-voice", session=session)
+        config = await resolve_agent("writer-voice", session=session)
         # First, because an instruction at the end of a long prompt is the
         # one that gets ignored.
-        assert config.system_prompt == "Answer aloud, briefly.\n\nYou are Illiana."
+        assert config.system_prompt == "Answer aloud, briefly.\n\nYou are the writer."
+        assert config.extends == "writer"
 
-    async def test_tools_and_memory_are_inherited(self, session: AsyncSession) -> None:
+    async def test_tools_and_modules_are_inherited(self, session: AsyncSession) -> None:
         await self._family(session)
-        config = await resolve_agent("illiana-voice", session=session)
-        assert config.tool_names == ("ledger",)
-        assert config.memory_modules == ("finance_snapshot",)
+        config = await resolve_agent("writer-voice", session=session)
+        assert config.tool_names == ("lookup",)
+        assert config.context_modules == ("notes",)
 
     async def test_model_and_sampling_are_the_childs_own(
         self, session: AsyncSession
     ) -> None:
         await self._family(session, code_mode=False)
-        config = await resolve_agent("illiana-voice", session=session)
-        assert config.model_id == "gpt-4.1-mini"
+        config = await resolve_agent("writer-voice", session=session)
+        assert config.model_id == "small-model"
         assert (config.temperature, config.max_tokens) == (0.3, 400)
         assert config.code_mode is False
-        assert config.slug == "illiana-voice"
+        assert config.slug == "writer-voice"
 
-    async def test_a_child_with_its_own_tools_keeps_them(
+    async def test_a_child_with_its_own_grants_keeps_them(
         self, session: AsyncSession
     ) -> None:
-        child = await self._family(session, memory_modules=["voice_notes"])
-        await _tool(session, child, "speak")
-        config = await resolve_agent("illiana-voice", session=session)
+        child = await self._family(session, context_modules=["voice_notes"])
+        await _grant(session, child, "speak")
+        config = await resolve_agent("writer-voice", session=session)
         assert config.tool_names == ("speak",)
-        assert config.memory_modules == ("voice_notes",)
+        assert config.context_modules == ("voice_notes",)
 
     async def test_only_one_level(self, session: AsyncSession) -> None:
         await self._family(session)
         await _add_agent(
-            session,
-            slug="grandchild",
-            system_prompt="Whisper.",
-            extends="illiana-voice",
+            session, slug="grandchild", system_prompt="Whisper.", extends="writer-voice"
         )
         config = await resolve_agent("grandchild", session=session)
         # The chain is not followed: its parent's own section, not its
@@ -351,82 +352,39 @@ class TestExtends:
         assert config.system_prompt == "Alone."
         assert config.tool_names == ()
 
-    @pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version (#355)
+    @pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version
     async def test_editing_the_parent_reaches_a_cached_child(
         self, session: AsyncSession
     ) -> None:
         await self._family(session)
-        await resolve_agent("illiana-voice", session=session)
-        parent = await resolve_agent("illiana", session=session)
-        assert parent.system_prompt == "You are Illiana."
+        await resolve_agent("writer-voice", session=session)
+        parent = await resolve_agent("writer", session=session)
+        assert parent.system_prompt == "You are the writer."
 
-        row = await session.get(Agent, (await _row_id(session, "illiana")))
-        assert row is not None
-        row.system_prompt = "You are Illiana, revised."
+        from sqlmodel import select
+
+        row = (await session.exec(select(Agent).where(Agent.slug == "writer"))).one()
+        row.system_prompt = "You are the writer, revised."
         session.add(row)
         await session.commit()
 
-        invalidate_agent_cache("illiana")
-        child = await resolve_agent("illiana-voice", session=session)
-        assert child.system_prompt.endswith("You are Illiana, revised.")
+        invalidate_agent_cache("writer")
+        child = await resolve_agent("writer-voice", session=session)
+        assert child.system_prompt.endswith("You are the writer, revised.")
 
 
-async def _row_id(session: AsyncSession, slug: str) -> int:
-    from sqlmodel import select
-
-    row = (await session.exec(select(Agent).where(Agent.slug == slug))).one()
-    assert row.id is not None
-    return row.id
-
-
-class TestAWriteCalledFromAScript:
-    """A write tool is not in the sandbox, so calling one from a script
-    fails "Unknown function". Gemini Live did exactly that with propose
-    on a call, retried the identical script and stalled (2026-10-01).
-    The failure now says how to recover."""
-
-    def test_the_hint_names_the_tool_to_call_directly(self) -> None:
-        from app.services.ai.domains.chat.agent_loader import native_write_hint
-
-        failed = "Runtime error:\nNameError: Unknown function: propose"
-        hint = native_write_hint(failed, frozenset({"propose", "pending"}))
-        assert hint is not None and "`propose`" in hint and "directly" in hint
-        # the sandbox's checker can refuse it before it runs, too
-        checked = "error[unresolved-reference]: Name `pending` used when not defined"
-        assert "`pending`" in (native_write_hint(checked, frozenset({"pending"})) or "")
-        assert (
-            native_write_hint(
-                "Runtime error:\nNameError: Unknown function: lookup_typo",
-                frozenset({"propose"}),
-            )
-            is None
-        )
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("tool_names", "hinted"),
-        [(("ledger", "save_memory"), True), (("ledger",), False)],
-        ids=["granted", "not-granted"],
+def _code_mode(*tool_names: str) -> AgentConfig:
+    """A code-mode agent: the tests that use it vary only its tools."""
+    return AgentConfig(
+        slug="coder",
+        name="Coder",
+        system_prompt="...",
+        model_id=None,
+        temperature=0.4,
+        max_tokens=900,
+        tool_names=tool_names,
+        code_mode=True,
     )
-    async def test_the_model_is_told_to_call_it_directly(
-        self, tool_names: tuple[str, ...], hinted: bool
-    ) -> None:
-        """Only at a write this agent holds: a read-only agent pointed at
-        save_memory would go after a tool it cannot call (PR #304 review)."""
-        from pydantic_ai import Agent
-
-        from app.services.ai.domains.chat.tools import resolve_tools
-
-        config = _code_mode(*tool_names)
-        agent = Agent(
-            _run_code_once('await save_memory(text="x")'),
-            tools=resolve_tools(config.tool_names),
-            capabilities=agent_capabilities(config),
-        )
-        told = (await agent.run("remember x")).output
-
-        assert "save_memory" in told  # the sandbox's own error
-        assert ("`save_memory` is its own tool" in told) is hinted
 
 
 def _run_code_once(code: str) -> Any:
@@ -456,10 +414,64 @@ def _run_code_once(code: str) -> Any:
     return FunctionModel(model)
 
 
+class TestAWriteCalledFromAScript:
+    """A write tool is not in the sandbox, so calling one from a script
+    fails "Unknown function". A model that only hears what went wrong
+    retries the identical script and stalls; the failure says how to
+    recover."""
+
+    def test_the_hint_names_the_tool_to_call_directly(self) -> None:
+        from app.services.ai.domains.chat.chat_kit.run_code_guard import (
+            native_write_hint,
+        )
+
+        failed = "Runtime error:\nNameError: Unknown function: propose"
+        hint = native_write_hint(failed, frozenset({"propose", "pending"}))
+        assert hint is not None and "`propose`" in hint and "directly" in hint
+        # The sandbox's checker can refuse it before it runs, too.
+        checked = "error[unresolved-reference]: Name `pending` used when not defined"
+        assert "`pending`" in (native_write_hint(checked, frozenset({"pending"})) or "")
+        assert (
+            native_write_hint(
+                "Runtime error:\nNameError: Unknown function: lookup_typo",
+                frozenset({"propose"}),
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        ("tool_names", "hinted"),
+        [(("lookup", "save_memory"), True), (("lookup",), False)],
+        ids=["granted", "not-granted"],
+    )
+    async def test_the_model_is_told_to_call_it_directly(
+        self, tool_names: tuple[str, ...], hinted: bool
+    ) -> None:
+        """Only at a write this agent holds: a read-only agent pointed at
+        save_memory would go after a tool it cannot call."""
+        from pydantic_ai import Agent as PydanticAgent
+
+        from app.services.ai.domains.chat.tools import resolve_tools
+
+        # Registers save_memory, the native write this test calls.
+        import app.services.ai.domains.chat.user_memory  # noqa: F401
+
+        config = _code_mode(*tool_names)
+        agent = PydanticAgent(
+            _run_code_once('await save_memory(new_fact="x")'),
+            tools=resolve_tools(config.tool_names),
+            capabilities=agent_capabilities(config),
+        )
+        told = (await agent.run("remember x")).output
+
+        assert "save_memory" in told  # the sandbox's own error
+        assert ("`save_memory` is its own tool" in told) is hinted
+
+
 class TestCodeModeLimits:
-    """Snippets run inside the webserver process, and any chat can start
-    one (#486): each is held to the configured time and memory, and a
-    user runs one at a time."""
+    """Scripts run inside the webserver process, and any chat can start
+    one: each is held to the configured time and memory, and a user runs
+    one at a time."""
 
     def test_the_configured_limits_are_the_sandboxes(
         self, monkeypatch: pytest.MonkeyPatch
@@ -470,7 +482,7 @@ class TestCodeModeLimits:
         monkeypatch.setattr(settings, "AI_CODE_MODE_MAX_MEMORY_BYTES", 12345678)
         code_mode = next(
             cap
-            for cap in agent_capabilities(_code_mode("ledger"))
+            for cap in agent_capabilities(_code_mode("lookup"))
             if type(cap).__name__ == "CodeMode"
         )
 
@@ -486,16 +498,16 @@ class TestCodeModeLimits:
         assert fields["AI_CODE_MODE_MAX_SECONDS"].default == 10.0
         assert fields["AI_CODE_MODE_MAX_MEMORY_BYTES"].default == 64 * 1024 * 1024
 
-    async def test_a_snippet_over_the_memory_limit_is_stopped(
+    async def test_a_script_over_the_memory_limit_is_stopped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The setting reaches Monty itself, not just the capability."""
-        from pydantic_ai import Agent
+        from pydantic_ai import Agent as PydanticAgent
 
         from app.core.config import settings
 
         monkeypatch.setattr(settings, "AI_CODE_MODE_MAX_MEMORY_BYTES", 1024 * 1024)
-        agent = Agent(
+        agent = PydanticAgent(
             _run_code_once("x = [0] * 5_000_000\nlen(x)"),
             capabilities=agent_capabilities(_code_mode()),
         )
@@ -509,23 +521,20 @@ class TestCodeModeLimits:
         [(("u1", "u1"), False), (("u1", "u2"), True)],
         ids=["same-user", "two-users"],
     )
-    async def test_one_user_runs_one_snippet_at_a_time(
+    async def test_one_user_runs_one_script_at_a_time(
         self, users: tuple[str, str], overlapped: bool
     ) -> None:
         import asyncio
-        from dataclasses import dataclass
 
-        from pydantic_ai import Agent
+        from pydantic_ai import Agent as PydanticAgent
 
-        @dataclass
-        class Deps:
-            user_id: str
+        from app.services.ai.domains.chat.user_memory import current_user_id
 
         running = 0
         most = 0
 
         async def probe() -> int:
-            """Counts how many snippets are inside it at once."""
+            """Counts how many scripts are inside it at once."""
             nonlocal running, most
             running += 1
             most = max(most, running)
@@ -533,63 +542,56 @@ class TestCodeModeLimits:
             running -= 1
             return most
 
-        agent = Agent(
+        agent = PydanticAgent(
             _run_code_once("await probe()"),
-            deps_type=Deps,
             tools=[probe],
             capabilities=agent_capabilities(_code_mode("probe")),
         )
 
-        await asyncio.gather(*(agent.run("go", deps=Deps(user)) for user in users))
+        async def turn(user: str) -> None:
+            # Each task has its own context: the user its turn binds.
+            current_user_id.set(user)
+            await agent.run("go")
+
+        await asyncio.gather(*(turn(user) for user in users))
 
         assert (most == 2) is overlapped
 
 
-def test_her_prompt_says_writes_are_their_own_tools() -> None:
-    """Gemini Live called propose from inside run_code (2026-10-01): the
-    prompt never said the writes are not in the sandbox."""
-    from app.services.finance.domains.detection.analyst.prompts import (
-        FINANCE_CHAT_SYSTEM_PROMPT,
+async def _returned(tool: str, result: Any, *, code_mode: bool = True) -> Any:
+    """``result`` as an agent's output hook hands it on from ``tool``."""
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import ToolDefinition
+
+    from app.services.ai.domains.chat.agent_loader import _tool_output_limits
+
+    return await _tool_output_limits(code_mode=code_mode).after_tool_execute(
+        None,
+        call=ToolCallPart(tool_name=tool, args={}, tool_call_id="c1"),
+        tool_def=ToolDefinition(name=tool),
+        args={},
+        result=result,
     )
 
-    assert "are NOT in the sandbox" in FINANCE_CHAT_SYSTEM_PROMPT
-    assert "`propose`" in FINANCE_CHAT_SYSTEM_PROMPT
 
+class TestRunCodeShowsDollars:
+    """A script's result is its own dict, past the tools' seam: its cents
+    get their dollars where it reaches the model."""
 
-class TestARefusedArgumentIsHersToCorrect:
-    """A tool's ValueError names what it knows: answered to the model, it
-    tries again; raised, Pydantic AI ends the turn ("No node 'service:ai'"
-    ended an Overseer turn on 2026-11-10)."""
+    async def test_a_run_code_result_carries_dollars(self) -> None:
+        from pydantic_ai.messages import ToolReturn
 
-    @staticmethod
-    def _capability() -> Any:
-        config = replace(default_agent_config(), code_mode=False)
-        (refusals,) = [
-            c for c in agent_capabilities(config) if type(c).__name__ == "_Refusals"
-        ]
-        return refusals
+        returned = ToolReturn(return_value={"limits": [{"spent_cents": 88_202}]})
 
-    async def test_the_refusal_is_answered(self) -> None:
-        async def refuses(_args: Any) -> Any:
-            raise ValueError("No node 'service:nope'")
+        out = await _returned("run_code", returned)
 
-        answer = await self._capability().wrap_tool_execute(
-            None, call=None, tool_def=None, args={}, handler=refuses
-        )
-        assert answer == Refused(error="ValueError: No node 'service:nope'")
+        value = out.return_value if isinstance(out, ToolReturn) else out
+        assert value["limits"][0]["spent_usd"] == "$882.02"
 
-    async def test_a_tools_own_validation_error_still_raises(self) -> None:
-        """A ValidationError is a ValueError too, but the tool's own bug:
-        answered, the model would take its argument for the fault."""
-        from pydantic import BaseModel, ValidationError
-
-        class Walk(BaseModel):
-            hops: int
-
-        async def broken(_args: Any) -> Any:
-            return Walk.model_validate({"hops": "many"})
-
-        with pytest.raises(ValidationError):
-            await self._capability().wrap_tool_execute(
-                None, call=None, tool_def=None, args={}, handler=broken
-            )
+    @pytest.mark.parametrize("code_mode", [True, False], ids=["code-mode", "native"])
+    async def test_a_tools_return_is_not_this_hooks(self, code_mode: bool) -> None:
+        """A tool's return carries its dollars from ``resolve_tools``
+        already; this hook dollars run_code's result alone."""
+        assert await _returned(
+            "lookup", {"spent_cents": 88_202}, code_mode=code_mode
+        ) == {"spent_cents": 88_202}

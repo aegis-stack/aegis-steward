@@ -145,7 +145,7 @@ class TestTheCardShowsWhatItCites:
         assert [(row.document_id, row.page) for row in cited] == [(document.id, 2)]
 
     def test_a_row_about_nothing_on_paper_cites_no_page(self) -> None:
-        from app.services.finance.schemas import ChangeDisplayRow
+        from app.services.change_queue import ChangeDisplayRow
 
         row = ChangeDisplayRow(label="Contact", value="Riverbend Credit Union")
         assert row.document_id is None and row.page is None

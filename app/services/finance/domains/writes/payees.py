@@ -13,10 +13,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.domains.ledger import merchants, queries
-from app.services.finance.domains.writes.registry import ChangeExecutor
+from app.services.finance.domains.writes.registry import finance_type
 from app.services.finance.models import FinanceMerchant
-from app.services.finance.schemas import ChangeDisplayRow
 from app.services.finance.utils import normalize_payee
 
 
@@ -107,14 +107,14 @@ async def payee_merge_describe(
 
 # Registered by ``executors``, which arms every change type.
 CHANGES = (
-    ChangeExecutor(
+    finance_type(
         change_type="payee.rename",
         title="Rename a payee",
         payload_model=PayeeRenamePayload,
         execute=payee_rename_execute,
         describe=payee_rename_describe,
     ),
-    ChangeExecutor(
+    finance_type(
         change_type="payee.merge",
         title="Merge payees into one",
         payload_model=PayeeMergePayload,

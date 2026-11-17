@@ -13,13 +13,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.log import logger
-from app.services.ai.domains.chat.user_memory import DEFAULT_MEMORY_USER_ID
+from app.services.ai.service import DEFAULT_MEMORY_USER_ID
 
 router = APIRouter()
 
 
-class MemoryModuleUpdateRequest(BaseModel):
-    """Partial update of a memory module's editable fields."""
+class ContextModuleUpdateRequest(BaseModel):
+    """Partial update of a context module's editable fields."""
 
     name: str | None = None
     description: str | None = None
@@ -32,57 +32,54 @@ class MemoryModuleUpdateRequest(BaseModel):
     is_active: bool | None = None
 
 
-@router.get("/memory-modules")
-async def list_registry_memory_modules() -> list[dict[str, Any]]:
-    """Every memory module, active or not, in render order."""
+@router.get("/context-modules")
+async def list_registry_context_modules() -> list[dict[str, Any]]:
+    """Every context module, active or not, in render order."""
     from app.core.db import get_async_session
-    from app.services.ai.domains.chat.memory_modules import (
-        list_memory_modules,
-        serialize_memory_module,
-    )
+    from app.services.ai.service import list_context_modules, serialize_context_module
 
     try:
         async with get_async_session() as session:
-            modules = await list_memory_modules(session, active_only=False)
-            return [serialize_memory_module(module) for module in modules]
+            modules = await list_context_modules(session, active_only=False)
+            return [serialize_context_module(module) for module in modules]
     except Exception as e:
-        logger.exception("Failed to list memory modules")
+        logger.exception("Failed to list context modules")
         raise HTTPException(
-            status_code=500, detail="Failed to list memory modules"
+            status_code=500, detail="Failed to list context modules"
         ) from e
 
 
-@router.patch("/memory-modules/{slug}")
-async def update_registry_memory_module(
-    slug: str, request: MemoryModuleUpdateRequest
+@router.patch("/context-modules/{slug}")
+async def update_registry_context_module(
+    slug: str, request: ContextModuleUpdateRequest
 ) -> dict[str, Any]:
-    """Apply a partial memory-module update."""
+    """Apply a partial context-module update."""
     from app.core.db import get_async_session
-    from app.services.ai.domains.chat.memory_modules import (
-        InvalidMemoryModuleError,
-        serialize_memory_module,
-        update_memory_module,
+    from app.services.ai.service import (
+        InvalidContextModuleError,
+        serialize_context_module,
+        update_context_module,
     )
 
     changes = request.model_dump(exclude_unset=True)
     try:
         async with get_async_session() as session:
-            module = await update_memory_module(slug, session=session, **changes)
-            return serialize_memory_module(module)
-    except InvalidMemoryModuleError as e:
+            module = await update_context_module(slug, session=session, **changes)
+            return serialize_context_module(module)
+    except InvalidContextModuleError as e:
         # The service raises one error type for "no such module" and for a
         # rejected change; a missing slug is the only 404-shaped one.
         status = 404 if "not found" in str(e) else 400
         raise HTTPException(status_code=status, detail=str(e)) from None
     except Exception as e:
-        logger.exception("Failed to update memory module")
+        logger.exception("Failed to update context module")
         raise HTTPException(
-            status_code=500, detail="Failed to update memory module"
+            status_code=500, detail="Failed to update context module"
         ) from e
 
 
-@router.get("/memory-modules/{slug}/preview")
-async def preview_registry_memory_module(
+@router.get("/context-modules/{slug}/preview")
+async def preview_registry_context_module(
     slug: str, user_id: str = DEFAULT_MEMORY_USER_ID
 ) -> dict[str, Any]:
     """Render a module exactly as an agent turn would see it.
@@ -92,14 +89,14 @@ async def preview_registry_memory_module(
     dashboard can display what the model would actually be handed, which is
     the only way to tell a working module from a silently empty one.
     """
-    from app.services.ai.domains.chat.module_context import render_memory_modules
+    from app.services.ai.service import render_context_modules
 
     try:
-        rendered = await render_memory_modules([slug], user_id=user_id)
+        rendered = await render_context_modules([slug], user_id=user_id)
     except Exception as e:
-        logger.exception("Failed to render memory module")
+        logger.exception("Failed to render context module")
         raise HTTPException(
-            status_code=500, detail="Failed to render memory module"
+            status_code=500, detail="Failed to render context module"
         ) from e
     return {"slug": slug, "user_id": user_id, "rendered": rendered}
 
@@ -117,19 +114,19 @@ async def list_saved_user_facts(
 ) -> dict[str, Any]:
     """Durable facts the assistant saved about this user.
 
-    The other half of what an agent is handed: memory modules are what the
+    The other half of what an agent is handed: context modules are what the
     system assembles, these are what the user told it.
     """
     from app.core.db import get_async_session
-    from app.services.ai.domains.chat import user_memory
+    from app.services.ai.service import list_user_facts
 
     try:
         async with get_async_session() as session:
-            facts = await user_memory.list_user_facts(user_id, session=session)
+            facts = await list_user_facts(user_id, session=session)
     except Exception as e:
         logger.exception("Failed to list saved facts")
         raise HTTPException(status_code=500, detail="Failed to list saved facts") from e
-    return {"user_id": user_id, "facts": facts}
+    return {"user_id": user_id, "facts": [f.model_dump(mode="json") for f in facts]}
 
 
 @router.patch("/user-memory/{index}")
@@ -140,17 +137,18 @@ async def update_saved_user_fact(
 ) -> dict[str, Any]:
     """Correct one saved fact in place."""
     from app.core.db import get_async_session
-    from app.services.ai.domains.chat import user_memory
+    from app.services.ai.service import update_user_fact
 
     try:
         async with get_async_session() as session:
-            return await user_memory.update_user_fact(
+            updated = await update_user_fact(
                 user_id,
                 index,
                 fact=request.fact,
                 category=request.category,
                 session=session,
             )
+        return updated.model_dump(mode="json")
     except IndexError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
     except Exception as e:
@@ -166,11 +164,11 @@ async def delete_saved_user_fact(
 ) -> dict[str, Any]:
     """Forget one saved fact."""
     from app.core.db import get_async_session
-    from app.services.ai.domains.chat import user_memory
+    from app.services.ai.service import delete_user_fact
 
     try:
         async with get_async_session() as session:
-            await user_memory.delete_user_fact(user_id, index, session=session)
+            await delete_user_fact(user_id, index, session=session)
     except IndexError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
     except Exception as e:

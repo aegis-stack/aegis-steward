@@ -11,7 +11,6 @@ from app.components.frontend.controls.dialog import DialogHandle, StyledAlertDia
 from app.components.frontend.controls.markdown import markdown_control
 from app.components.frontend.controls.text import LabelText, SecondaryText
 from app.components.frontend.theme import AegisTheme as Theme
-from app.services.ai.service import is_local_model
 
 from .stream import footer_line, trace_failed, trace_label, trace_output
 
@@ -208,7 +207,7 @@ class ChatMessageBubble(ft.Container):
         for nested in entry.get("nested") or []:
             sections.append(
                 SecondaryText(
-                    f"dispatched {nested.get('tool')}({nested.get('args', '')})",
+                    f"dispatched {nested.get('tool')}({str(nested.get('args', ''))[:120]})",
                     size=Theme.Typography.BODY_SMALL,
                 )
             )
@@ -273,7 +272,7 @@ class ChatMessageBubble(ft.Container):
         self._body.value = text
         if tool_trace:
             self.set_tool_trace(tool_trace)
-        line = footer_line(meta, local=is_local_model(meta))
+        line = footer_line(meta)
         if line:
             self._footer.value = line
             self._footer_row.visible = True
