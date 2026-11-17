@@ -24,7 +24,7 @@ from app.services.ai.domains.chat.self_context import (
 from app.services.ai.domains.llm import waiting
 from app.services.ai.service import StreamingMessage
 
-INFERENCE = present("app.components.inference.engine")
+INFERENCE = present("app.components.inference")
 
 
 def _turn(provider: str, model: str) -> None:

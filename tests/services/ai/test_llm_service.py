@@ -790,7 +790,6 @@ class TestSetActiveModel:
         assert "not found in catalog" in result.message
         assert "Use --force" in result.message
 
-    @pytest.mark.skip(reason="the inference engine interface arrives with #637")
     async def test_a_served_model_not_yet_catalogued_is_the_engines(
         self, mock_async_session, monkeypatch: pytest.MonkeyPatch
     ) -> None:

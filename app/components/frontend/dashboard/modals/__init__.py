@@ -16,8 +16,8 @@ from app.components.frontend.dashboard.modals.finance_modal import FinanceDetail
 from .backend_modal import BackendDetailDialog
 from .database_modal import DatabaseDetailDialog
 from .frontend_modal import FrontendDetailDialog
+from .inference_modal import InferenceDetailDialog
 from .ingress_modal import IngressDetailDialog
-from .ollama_modal import OllamaDetailDialog
 from .redis_modal import RedisDetailDialog
 from .scheduler_modal import SchedulerDetailDialog
 from .secrets_modal import SecretsDetailDialog
@@ -34,7 +34,7 @@ __all__ = [
     "FrontendDetailDialog",
     "IngressDetailDialog",
     "SecretsDetailDialog",
-    "OllamaDetailDialog",
+    "InferenceDetailDialog",
     "RedisDetailDialog",
     "SchedulerDetailDialog",
     "WorkerDetailDialog",

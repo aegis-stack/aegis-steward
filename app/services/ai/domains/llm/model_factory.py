@@ -199,16 +199,9 @@ def _local_model(config: AIServiceConfig, settings: Any) -> Any:
     ``AsyncOpenAI``, ``OpenAIChatModel`` and ``OpenAIProvider`` are read off
     this module (not imported locally) so tests can patch them here.
     """
-    # ponytail: trial switch of Ollama's chat to llama-server (#634); the
-    # template's engine interface replaces it (#637). isinstance, not
-    # truthiness: an unset attribute on a test's MagicMock settings is truthy.
-    llamacpp = getattr(settings, "LLAMACPP_BASE_URL", None)
-    trial = config.provider == AIProvider.OLLAMA and isinstance(llamacpp, str)
     openai_client = AsyncOpenAI(
         api_key="local",  # neither needs auth; the client demands something
-        base_url=f"{llamacpp}/v1"
-        if trial and llamacpp
-        else local_base_url(config.provider, settings),
+        base_url=local_base_url(config.provider, settings),
         # A retry would queue behind the abandoned request, still reading
         # the same prompt, and start reading it again after.
         max_retries=0,

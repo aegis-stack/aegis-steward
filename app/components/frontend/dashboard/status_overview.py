@@ -45,8 +45,9 @@ def get_component_display_info(
         return ("Cache", "Redis")
 
     elif component_name == ComponentName.OLLAMA:
-        version = metadata.get("version", "")
-        subtitle = f"Ollama v{version}" if version else "Ollama"
+        from app.components.inference import inference_engine_class
+
+        subtitle = inference_engine_class().titled(metadata.get("version"))
         return ("Inference", subtitle)
 
     elif component_name == ComponentName.SCHEDULER:

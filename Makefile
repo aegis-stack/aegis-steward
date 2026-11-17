@@ -124,6 +124,9 @@ redis-reset: ## Clear all Redis data
 # HEALTH AND TESTING
 #=============================================================================
 
+llama: ## Serve llama.cpp's models here (links Ollama's in first; Ctrl-C stops it)
+	@uv run aegis-steward inference llama
+
 health: ## Check system health status
 	@echo "Checking system health..."
 	@uv run aegis-steward health status
@@ -279,7 +282,7 @@ help: ## Show this help message
 	@echo
 	@echo "TIP: Use 'make refresh' when everything is broken!"
 
-.PHONY: app-icon build build-static lint-frontend format-frontend serve serve-bg serve-prod stop-prod stop clean rebuild refresh restart logs logs-web logs-worker logs-redis logs-scheduler shell shell-worker ps redis-cli redis-stats redis-keys redis-reset health health-detailed health-json health-probe test test-verbose lint fix format typecheck check install deps-update clean-cache docs-serve docs-build migrate migrate-check migrate-history migrate-reset worker-test status help
+.PHONY: app-icon build build-static lint-frontend format-frontend llama serve serve-bg serve-prod stop-prod stop clean rebuild refresh restart logs logs-web logs-worker logs-redis logs-scheduler shell shell-worker ps redis-cli redis-stats redis-keys redis-reset health health-detailed health-json health-probe test test-verbose lint fix format typecheck check install deps-update clean-cache docs-serve docs-build migrate migrate-check migrate-history migrate-reset worker-test status help
 
 # Default target - show help
 .DEFAULT_GOAL := help

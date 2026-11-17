@@ -106,7 +106,6 @@ async def test_every_model_and_voice_is_a_row_the_filters_narrow(
     _row(html, "stt", "whisper-1")
 
 
-@pytest.mark.skip(reason="the speech page comes with the inference engine, #637")
 async def test_the_speech_servers_rows_lead_to_its_own_page(
     client: TestClient, hers: VoiceProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -367,30 +367,6 @@ class TestOllamaBaseUrlConfiguration:
         call_kwargs = mock_openai_class.call_args[1]
         assert call_kwargs["base_url"] == "http://ollama-server:11434/v1"
 
-    @patch("app.services.ai.domains.llm.model_factory.AsyncOpenAI")
-    @patch("app.services.ai.domains.llm.model_factory.OpenAIProvider")
-    @patch("app.services.ai.domains.llm.model_factory.OpenAIChatModel")
-    def test_llamacpp_base_url_takes_the_chat_calls(
-        self,
-        mock_model_class: MagicMock,
-        mock_provider_class: MagicMock,
-        mock_openai_class: MagicMock,
-    ) -> None:
-        """A set LLAMACPP_BASE_URL sends Ollama's chat to llama-server (#634)."""
-        from app.services.ai.domains.llm.model_factory import _local_model
-        from app.services.ai.models import AIProvider
-
-        mock_settings = MagicMock()
-        mock_settings.ollama_base_url_effective = "http://ollama-server:11434"
-        mock_settings.LLAMACPP_BASE_URL = "http://host.docker.internal:8080"
-
-        _local_model(
-            MagicMock(model="qwen3.8:27b", provider=AIProvider.OLLAMA), mock_settings
-        )
-
-        call_kwargs = mock_openai_class.call_args[1]
-        assert call_kwargs["base_url"] == "http://host.docker.internal:8080/v1"
-
 
 @pytest.mark.parametrize("provider", sorted(LOCAL_PROVIDERS))
 class TestLocalModelPatience:

@@ -102,6 +102,8 @@ def get_component_title(component_name: str) -> str:
 
 def get_component_label(component_name: str) -> str:
     """Map component keys to user-facing labels (brand or friendly name)."""
+    from app.components.inference import inference_engine_class
+
     mapping = {
         ComponentName.BACKEND: "FastAPI + Flet",
         # Both frontends ship: Flet at /dashboard, htmx pages at /.
@@ -111,7 +113,7 @@ def get_component_label(component_name: str) -> str:
         ComponentName.CACHE: "Redis",
         ComponentName.WORKER: "arq",
         ComponentName.SCHEDULER: "APScheduler",
-        ComponentName.OLLAMA: "Ollama",
+        ComponentName.OLLAMA: inference_engine_class().LABEL,
         "service_ai": "LLM Provider",
         "service_auth": "JWT Auth",
         "service_comms": "Resend + Twilio",

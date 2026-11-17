@@ -1,3 +1,4 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
 project_name: aegis-steward
 project_description: A production-ready async Python application built with Aegis
   Stack
@@ -19,8 +20,9 @@ include_cache: false
 include_ingress: true
 include_observability: false
 include_inference: true
-inference_engine: ollama
+inference_engine: llamacpp
 inference_placement: host
+inference_speech: none
 include_secrets: true
 secrets_backend: database
 include_deploy: true
@@ -36,10 +38,11 @@ auth_level: basic
 include_oauth: false
 include_ai: true
 ai_framework: pydantic-ai
-ai_providers: ollama
+ai_providers: llamacpp
 ai_backend: sqlite
 ai_rag: false
 ai_voice: true
+ai_evals: false
 ollama_mode: host
 include_comms: true
 include_payment: false
@@ -66,4 +69,3 @@ include_auth_org: false
 include_auth_rbac: false
 project_slug: aegis-steward
 scheduler_with_persistence: true
-ai_evals: false

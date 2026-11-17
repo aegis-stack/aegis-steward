@@ -15,9 +15,7 @@ from app.core.discovery import present
 from app.services.ai.domains.chat.self_context import TurnContext, current_turn
 from app.services.ai.models.provider_names import LOCAL_PROVIDERS
 
-# ponytail: the engine interface, not just the component: Steward's
-# inference is its own Ollama code until the engine switch (#637).
-INFERENCE = present("app.components.inference.engine")
+INFERENCE = present("app.components.inference")
 THINKING = "thinking"
 # The turn whose model was found in memory: it stays so for the turn, so
 # its engine is not asked again (each quiet stretch asked it, through every

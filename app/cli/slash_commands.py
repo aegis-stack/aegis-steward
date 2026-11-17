@@ -152,13 +152,11 @@ class SlashCommandHandler:
 
         # Check for Ollama models (local, no API key needed)
         try:
-            from app.components.inference.ollama import OllamaClient
+            from app.components.inference import get_inference_engine
 
-            ollama_client = OllamaClient()
-            if await ollama_client.is_available():
-                ollama_models = await ollama_client.fetch_models()
-                all_model_ids.extend([m.model_id for m in ollama_models])
-                logger.debug(f"Loaded {len(ollama_models)} Ollama models")
+            ollama_models = await get_inference_engine().fetch_models()
+            all_model_ids.extend([m.model_id for m in ollama_models])
+            logger.debug(f"Loaded {len(ollama_models)} Ollama models")
         except Exception as e:
             logger.debug(f"Ollama not available: {e}")
 
