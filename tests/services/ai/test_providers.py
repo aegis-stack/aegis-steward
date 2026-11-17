@@ -2,16 +2,25 @@
 
 from unittest.mock import MagicMock, patch
 
+from pydantic_ai.models.test import TestModel
 import pytest
 
-from app.services.ai.domains.llm.model_factory import _get_model_class
+from app.services.ai.domains.llm.config import AIServiceConfig
+from app.services.ai.domains.llm.model_factory import (
+    LOCAL_TIMEOUT_SECONDS,
+    _get_model_class,
+    _local_model,
+    _model_settings,
+)
 from app.services.ai.domains.llm.providers import (
     ProviderError,
+    ProviderNotInstalledError,
     get_agent,
     get_supported_providers,
     validate_provider_support,
 )
 from app.services.ai.models import AIProvider
+from app.services.ai.models.provider_names import LOCAL_PROVIDERS
 
 # =============================================================================
 # TestGetModelClass
@@ -184,7 +193,11 @@ class TestGetAgentOllama:
 
     @patch("app.services.ai.domains.llm.model_factory.AsyncOpenAI")
     @patch("app.services.ai.domains.llm.model_factory.OpenAIProvider")
-    @patch("app.services.ai.domains.llm.model_factory.OpenAIChatModel")
+    # A real model: the wrapper every agent's model gets takes no mock.
+    @patch(
+        "app.services.ai.domains.llm.model_factory.OpenAIChatModel",
+        return_value=TestModel(),
+    )
     @patch("app.services.ai.domains.llm.agents.Agent")
     async def test_get_agent_ollama_creates_agent(
         self,
@@ -215,14 +228,18 @@ class TestGetAgentOllama:
         mock_openai_class.assert_called_once()
         call_kwargs = mock_openai_class.call_args[1]
         assert call_kwargs["base_url"] == "http://localhost:11434/v1"
-        assert call_kwargs["api_key"] == "ollama"
+        assert call_kwargs["api_key"] == "local"
 
         # Verify agent was created
         assert result == mock_agent_instance
 
     @patch("app.services.ai.domains.llm.model_factory.AsyncOpenAI")
     @patch("app.services.ai.domains.llm.model_factory.OpenAIProvider")
-    @patch("app.services.ai.domains.llm.model_factory.OpenAIChatModel")
+    # A real model: the wrapper every agent's model gets takes no mock.
+    @patch(
+        "app.services.ai.domains.llm.model_factory.OpenAIChatModel",
+        return_value=TestModel(),
+    )
     @patch("app.services.ai.domains.llm.agents.Agent")
     async def test_get_agent_ollama_uses_model_name(
         self,
@@ -254,7 +271,7 @@ class TestGetAgentOllama:
         self,
         mock_openai_class: MagicMock,
     ) -> None:
-        """Verify helpful error message when Ollama connection fails."""
+        """A failed connection names the engine and where it is set."""
         mock_openai_class.side_effect = Exception("Connection refused")
 
         mock_settings = MagicMock()
@@ -271,9 +288,9 @@ class TestGetAgentOllama:
             await get_agent(mock_config, mock_settings)
 
         error_msg = str(exc_info.value)
-        # Should include helpful instructions
-        assert "Ollama" in error_msg
-        assert "ollama serve" in error_msg or "running" in error_msg.lower()
+        assert "Ollama connection failed" in error_msg
+        assert "OLLAMA_BASE_URL" in error_msg
+        assert "--source=local" in error_msg
 
 
 # =============================================================================
@@ -287,9 +304,9 @@ class TestOllamaMaxTokensWireFormat:
     num_predict), so the model profile must route the cap to the legacy
     field - measured live: a cap of 50 generated 11,186 tokens."""
 
-    def test_ollama_model_routes_the_cap_to_the_legacy_field(self) -> None:
+    def test_local_model_routes_the_cap_to_the_legacy_field(self) -> None:
         pytest.importorskip("openai")
-        from app.services.ai.domains.llm.model_factory import _ollama_model
+        from app.services.ai.domains.llm.model_factory import _local_model
         import app.services.ai.domains.llm.providers as providers_module
 
         if providers_module.AsyncOpenAI is None:
@@ -300,7 +317,7 @@ class TestOllamaMaxTokensWireFormat:
         mock_config = MagicMock()
         mock_config.model = "llama3.2:latest"
 
-        model = _ollama_model(mock_config, mock_settings)
+        model = _local_model(mock_config, mock_settings)
 
         # The runtime reads the profile dict-style (models/openai.py), so
         # assert the same way; older versions expose an attribute.
@@ -318,7 +335,11 @@ class TestOllamaBaseUrlConfiguration:
 
     @patch("app.services.ai.domains.llm.model_factory.AsyncOpenAI")
     @patch("app.services.ai.domains.llm.model_factory.OpenAIProvider")
-    @patch("app.services.ai.domains.llm.model_factory.OpenAIChatModel")
+    # A real model: the wrapper every agent's model gets takes no mock.
+    @patch(
+        "app.services.ai.domains.llm.model_factory.OpenAIChatModel",
+        return_value=TestModel(),
+    )
     @patch("app.services.ai.domains.llm.agents.Agent")
     async def test_ollama_uses_effective_base_url(
         self,
@@ -355,14 +376,97 @@ class TestOllamaBaseUrlConfiguration:
         mock_provider_class: MagicMock,
         mock_openai_class: MagicMock,
     ) -> None:
-        """A set LLAMACPP_BASE_URL sends chat to llama-server; Ollama keeps the rest."""
-        from app.services.ai.domains.llm.model_factory import _ollama_model
+        """A set LLAMACPP_BASE_URL sends Ollama's chat to llama-server (#634)."""
+        from app.services.ai.domains.llm.model_factory import _local_model
+        from app.services.ai.models import AIProvider
 
         mock_settings = MagicMock()
         mock_settings.ollama_base_url_effective = "http://ollama-server:11434"
         mock_settings.LLAMACPP_BASE_URL = "http://host.docker.internal:8080"
 
-        _ollama_model(MagicMock(model="qwen3.8:27b"), mock_settings)
+        _local_model(
+            MagicMock(model="qwen3.8:27b", provider=AIProvider.OLLAMA), mock_settings
+        )
 
         call_kwargs = mock_openai_class.call_args[1]
         assert call_kwargs["base_url"] == "http://host.docker.internal:8080/v1"
+
+
+@pytest.mark.parametrize("provider", sorted(LOCAL_PROVIDERS))
+class TestLocalModelPatience:
+    """A local model reads the whole prompt before it answers a byte: a
+    27B model at ~200 tokens a second spends over two minutes on a full
+    32k context, so the hosted models' timeout cut a turn mid-read. A
+    retry then sent the same prompt to a server still reading the
+    abandoned one, to wait behind it."""
+
+    def test_it_waits_out_the_read(self, provider: AIProvider) -> None:
+        local = AIServiceConfig(provider=provider, model="qwen", timeout_seconds=120)
+        hosted = AIServiceConfig(
+            provider=AIProvider.OPENAI, model="gpt-4o", timeout_seconds=120
+        )
+
+        assert _model_settings(local)["timeout"] == LOCAL_TIMEOUT_SECONDS
+        assert _model_settings(hosted)["timeout"] == 120
+
+    def test_it_is_never_asked_twice(self, provider: AIProvider) -> None:
+        config = AIServiceConfig(provider=provider, model="qwen")
+
+        with (
+            patch("app.services.ai.domains.llm.model_factory.AsyncOpenAI") as client,
+            patch("app.services.ai.domains.llm.model_factory.OpenAIChatModel"),
+            patch("app.services.ai.domains.llm.model_factory.OpenAIProvider"),
+        ):
+            _local_model(config, MagicMock())
+
+        assert client.call_args.kwargs["max_retries"] == 0
+
+
+class TestCliHints:
+    """A hint names the command a person types: the project's own CLI."""
+
+    async def test_a_missing_provider_names_the_install_command(self) -> None:
+        from app.core.config import settings
+
+        config = AIServiceConfig(provider=AIProvider.OPENAI, model="gpt-4o")
+        missing = ImportError("Please install `openai` to use the OpenAI model")
+
+        with (
+            patch(
+                "app.services.ai.domains.llm.agents._provider_model",
+                side_effect=missing,
+            ),
+            pytest.raises(ProviderNotInstalledError) as excinfo,
+        ):
+            await get_agent(config, settings)
+
+        assert excinfo.value.cli_command == (
+            f"{settings.PROJECT_NAME} ai add-provider openai"
+        )
+
+    @pytest.mark.parametrize(
+        ("provider", "key"),
+        [
+            (AIProvider.PUBLIC, "public_provider.public_api_key"),
+            (AIProvider.POLLINATIONS, "pollinations_provider.pollinations_api_key"),
+        ],
+    )
+    async def test_a_failed_public_endpoint_names_the_switch(
+        self, provider: AIProvider, key: str
+    ) -> None:
+        from app.core.config import settings
+
+        config = AIServiceConfig(provider=provider, model="auto")
+
+        with (
+            patch(
+                f"app.services.ai.domains.llm.{key}",
+                side_effect=RuntimeError("down"),
+            ),
+            pytest.raises(ProviderError) as excinfo,
+        ):
+            await get_agent(config, settings)
+
+        message = str(excinfo.value)
+        assert f"{settings.PROJECT_NAME} ai config set-provider" in message
+        assert "{" not in message

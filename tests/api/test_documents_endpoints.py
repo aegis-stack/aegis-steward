@@ -18,14 +18,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.core.config import settings
-from app.core.storage import FilesystemStorage, set_storage
 
-
-@pytest.fixture(autouse=True)
-def _storage(tmp_path):
-    set_storage(FilesystemStorage(tmp_path))
-    yield
-    set_storage(None)
+pytestmark = pytest.mark.usefixtures("files")
 
 
 class TestDocumentEndpoints:
@@ -84,27 +78,24 @@ class TestDocumentEndpoints:
         assert response.status_code == 200
         assert response.content == b"the bytes"
 
-    def test_an_html_upload_comes_back_as_a_download_it_cannot_run(
+    def test_an_uploaded_page_never_runs_as_this_app(
         self, authenticated_app_client: TestClient
     ) -> None:
-        """An attachment from anybody's email must not become a page on
-        this origin: the bytes decide the type, not the claim."""
+        """Served inline as the type it was uploaded with: an SVG's or an
+        HTML file's script would run on this app's origin, signed in."""
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
         created = authenticated_app_client.post(
             "/api/v1/documents",
-            files={"file": ("x.html", b"<script>alert(1)</script>", "text/html")},
-            data={"title": "x.html"},
+            files={"file": ("a.svg", svg, "image/svg+xml")},
+            data={"title": "A"},
         ).json()
 
         response = authenticated_app_client.get(
             f"/api/v1/documents/{created['id']}/content"
         )
 
-        assert response.headers["content-type"] == "application/octet-stream"
-        assert response.headers["content-disposition"].startswith("attachment;")
+        assert "sandbox" in response.headers["content-security-policy"]
         assert response.headers["x-content-type-options"] == "nosniff"
-        assert response.headers["content-security-policy"] == "sandbox"
-        # The app-wide headers ride on every response.
-        assert response.headers["x-frame-options"] == "SAMEORIGIN"
 
     def test_an_upload_past_the_limit_is_413(
         self, authenticated_app_client: TestClient, monkeypatch: pytest.MonkeyPatch

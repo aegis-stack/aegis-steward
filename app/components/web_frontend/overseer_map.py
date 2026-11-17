@@ -76,10 +76,10 @@ def layout(
         ],
         "map_height": height,
         "map_width": WIDTH,
-        **_breadth(nodes),
         "map_compact": compact or across,
         "map_across": across,
         "map_target": target,
+        **_breadth(nodes),
     }
 
 
@@ -239,7 +239,6 @@ def lanes(
         ],
         "map_height": height,
         "map_width": WIDTH,
-        **_breadth(nodes),
         "map_compact": True,
         "map_across": False,
         "map_lanes": [
@@ -247,6 +246,7 @@ def lanes(
         ],
         "map_rail": [item for item in stack if item.get("place") == "rail"],
         "map_target": MAIN,
+        **_breadth(nodes),
     }
 
 
@@ -299,14 +299,6 @@ def _lane_line(
         f"C {b - step / 2:.0f} {run:.0f}, {b - step / 2:.0f} {y2:.0f}, {b:.0f} {y2:.0f}"
     )
     return line | {"d": d, "mid": _mid((a + b) / 2, run)}
-
-
-def _breadth(nodes: list[dict[str, Any]]) -> dict[str, Any]:
-    """The map's least width: enough that its slimmest node (its width a
-    percent of the map's) keeps ``MIN_NODE`` pixels; wide past ``MIN_WIDTH``."""
-    slimmest = min((node["width"] for node in nodes), default=100.0)
-    least = max(MIN_WIDTH, MIN_NODE * 100 / slimmest)
-    return {"map_min_width": least, "map_wide": least > MIN_WIDTH}
 
 
 def _mid(x: float, y: float) -> dict[str, float]:
@@ -401,3 +393,11 @@ def _line(
         "queued": topology.queued(source, target["key"]),
         "key": source == topology.KEYS,
     }
+
+
+def _breadth(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """The map's least width: enough that its slimmest node (its width a
+    percent of the map's) keeps ``MIN_NODE`` pixels; wide past ``MIN_WIDTH``."""
+    slimmest = min((node["width"] for node in nodes), default=100.0)
+    least = max(MIN_WIDTH, MIN_NODE * 100 / slimmest)
+    return {"map_min_width": least, "map_wide": least > MIN_WIDTH}

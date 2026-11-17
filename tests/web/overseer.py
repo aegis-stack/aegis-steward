@@ -4,6 +4,7 @@ holding exactly the components a test hands in."""
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
@@ -12,12 +13,12 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.components.backend.middleware import request_gate
-from app.components.web_frontend import overseer_nav
+from app.components.web_frontend import overseer_nav, overseer_sections
 from app.components.web_frontend.routes import overseer
 from app.core.config import settings
 from app.core.constants import ComponentName
 from app.models.user import User
-from app.services.auth.deps import get_optional_user
+from app.services.auth.deps import get_current_active_user, get_optional_user
 from app.services.system.models import ComponentStatus, SystemStatus
 
 PREFIXES = ("/overseer", "/partials/overseer")
@@ -25,6 +26,8 @@ PREFIXES = ("/overseer", "/partials/overseer")
 
 # The Cache, healthy: a page with containers behind it (Redis).
 CACHE = ComponentStatus(name=ComponentName.CACHE, message="Connected", metadata={})
+# The AI service, up, for a page that offers its sections.
+AI = ComponentStatus(name="ai", message="AI", metadata={"engine": "pydantic-ai"})
 
 
 async def sent_events(stream: AsyncIterator[str]) -> list[str]:
@@ -38,6 +41,17 @@ def frame_html(frame: str) -> str:
     return "\n".join(
         line.removeprefix("data: ") for line in lines if line.startswith("data: ")
     )
+
+
+def on_session(app: FastAPI, session: Any) -> None:
+    """Every route on ``session``, the test's own: what a route writes is
+    what the test reads."""
+    from app.core.db import get_async_db
+
+    async def same_session() -> AsyncIterator[Any]:
+        yield session
+
+    app.dependency_overrides[get_async_db] = same_session
 
 
 def page_html(client: TestClient, path: str) -> str:
@@ -90,12 +104,14 @@ def status_with(
 
 def reported_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """The sidebar as the snapshot has it: no entry for a health check
-    another test registered (a Scheduler, a Worker) that this one leaves out."""
+    another test registered (a Scheduler, a Worker) that this one leaves out,
+    or for a page the app's own service declares (``SERVICE_PAGES``)."""
     monkeypatch.setattr(
         overseer_nav,
         "registered_health_names",
         lambda: {"components": (), "services": ()},
     )
+    monkeypatch.setattr(overseer_sections, "SERVICE_PAGES", frozenset())
 
 
 def sign_in(
@@ -122,6 +138,7 @@ def sign_in(
     # Signed in as a session cookie signs in: on every route, the strict
     # dependency (an owner's own rows) as much as the optional one.
     app.dependency_overrides[get_optional_user] = lambda: user
+    app.dependency_overrides[get_current_active_user] = lambda: user
     # The app's gate reads the session itself, ahead of any route.
     monkeypatch.setattr(request_gate, "signed_in", AsyncMock(return_value=user))
     return user

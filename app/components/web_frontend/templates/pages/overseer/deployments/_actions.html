@@ -5,8 +5,8 @@
    server, what can be asked of ``aegis deploy-agent`` for it (deploys
    in one menu; rehearsing, rolling back and destroying folded into More), and, while one runs, its newest
    job (whole under Jobs). #}
-{% from "components/macros/layout.html" import card, dropdown, facts %}
-{% from "pages/overseer/deployments/_macros.html" import agent_note, ask, ask_item, deployed_card, destroy_form, goto, job_panel, note, place %}
+{% from "components/macros/layout.html" import card, dropdown, facts, goto %}
+{% from "pages/overseer/deployments/_macros.html" import agent_note, ask, ask_item, deployed_card, destroy_form, job_panel, note, place %}
 {% if actions.view == "deployed" %}
 {{ deployed_card(actions) }}
 {% elif actions.view == "no-server" %}
@@ -28,7 +28,7 @@
 {% with storage = actions.storage %}{% include "pages/overseer/deployments/_storage.html" %}{% endwith %}
 <div data-idle class="flex flex-wrap items-center gap-2">
   {# Both deploys behind one menu, each saying what it costs. #}
-  {% call dropdown("Deploy", align="left", tone="primary") %}
+  {% call dropdown("Deploy", align="left") %}
   {{ ask_item("Deploy", actions.partials, "deploy", hint="Restarts everything; a moment offline") }}
   {# Additive migrations only. #}
   {{ ask_item("Deploy without downtime", actions.partials, "deploy-rolling", hint="Site stays up, nobody signed out") }}

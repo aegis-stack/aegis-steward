@@ -12,11 +12,11 @@ from typing import Any
 
 MODELS: dict[str, list[dict[str, Any]]] = {
     "openai": [
-        # Voice (#273): a call, transcription and speech, by mode.
+        # Voice: a call, transcription and speech, by mode.
         {
             "model_id": "gpt-live-1",
             "title": "GPT Live 1",
-            "description": "Full-duplex live voice; delegates the thinking",
+            "description": "Full-duplex live voice",
             "context_window": 32000,
             "streamable": True,
             "enabled": True,
@@ -197,7 +197,7 @@ MODELS: dict[str, list[dict[str, Any]]] = {
         },
     ],
     "google": [
-        # Voice (#273): Gemini Live, reached through our relay.
+        # Voice: Gemini Live, a realtime model.
         {
             "model_id": "gemini-3.8-live",
             "title": "Gemini 3.8 Live",

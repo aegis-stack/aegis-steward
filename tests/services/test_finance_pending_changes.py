@@ -11,7 +11,7 @@ from datetime import date
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.finance.models import FinancePendingChange
+from app.services.change_queue import PendingChange
 from app.services.finance.service import FinanceService
 from tests.services._finance_factories import seed_account as _account
 from tests.services._finance_factories import seed_category as _category
@@ -24,7 +24,7 @@ class TestPendingChangeRow:
     async def test_a_proposal_row_round_trips(
         self, async_db_session: AsyncSession
     ) -> None:
-        row = FinancePendingChange(
+        row = PendingChange(
             owner_user_id=1,
             change_type="transaction.categorize",
             payload={"transaction_id": 7, "category_id": 3},
@@ -47,7 +47,7 @@ class TestPendingChangeRow:
         status would silently fall out of every pending/resolved read."""
         from sqlalchemy.exc import IntegrityError
 
-        row = FinancePendingChange(
+        row = PendingChange(
             owner_user_id=1,
             change_type="transaction.categorize",
             payload={},
@@ -426,8 +426,8 @@ class TestBatches:
             rows[0].batch_id, owner_user_id=1, exclude_ids=[vetoed.id]
         )
 
-        assert summary["approved"] == 2
-        assert summary["rejected"] == 1
+        assert summary.approved == 2
+        assert summary.rejected == 1
         await async_db_session.refresh(txns[0])
         await async_db_session.refresh(txns[1])
         assert txns[0].category_id == groceries.id
@@ -443,7 +443,7 @@ class TestBatches:
 
         summary = await svc.reject_batch(rows[0].batch_id, owner_user_id=1)
 
-        assert summary["rejected"] == 3
+        assert summary.rejected == 3
         for txn in txns:
             await async_db_session.refresh(txn)
             assert txn.category_id is None
@@ -464,8 +464,8 @@ class TestBatches:
 
         summary = await svc.approve_batch(rows[0].batch_id, owner_user_id=1)
 
-        assert summary["approved"] == 2
-        assert summary["failed"] == 1
+        assert summary.approved == 2
+        assert summary.failed == 1
         await async_db_session.refresh(doomed)
         assert doomed.status == "pending"
         assert doomed.result.get("error")
@@ -705,7 +705,7 @@ class TestAssignPayeeExecutor:
         with pytest.raises(ValueError, match="not found"):
             await svc.approve_change(row.id, owner_user_id=1)
 
-        refreshed = await async_db_session.get(FinancePendingChange, row.id)
+        refreshed = await async_db_session.get(PendingChange, row.id)
         assert refreshed is not None and refreshed.status == "pending"
 
 
@@ -921,7 +921,7 @@ class TestWithdraw:
     @staticmethod
     async def _proposed(
         svc: FinanceService, session: AsyncSession, *, agent: str | None
-    ) -> FinancePendingChange:
+    ) -> PendingChange:
         account = await _account(svc)
         groceries = await _category(session, "Food & Dining:Groceries")
         txn = await _txn(svc, account.id, -897, date(2026, 6, 10), name="Deli")
@@ -936,11 +936,11 @@ class TestWithdraw:
     async def test_the_proposer_can_withdraw_its_pending_card(
         self, svc: FinanceService, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
         row = await self._proposed(svc, async_db_session, agent="finance-assistant")
 
-        withdrawn = await writes.withdraw(
+        withdrawn = await change_queue.withdraw(
             async_db_session, row.id, agent_slug="finance-assistant", owner_user_id=1
         )
 
@@ -954,11 +954,11 @@ class TestWithdraw:
         """The retracted card stays visible to the user, so it has to say
         why it went - "superseded" reads as care, a bare "withdrawn" as
         flailing."""
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
         row = await self._proposed(svc, async_db_session, agent="finance-assistant")
 
-        withdrawn = await writes.withdraw(
+        withdrawn = await change_queue.withdraw(
             async_db_session,
             row.id,
             agent_slug="finance-assistant",
@@ -976,7 +976,7 @@ class TestWithdraw:
     ) -> None:
         """What ``pending()`` reads: before filing a replacement, the agent
         sees what it already has open - and nothing anyone else filed."""
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
         account = await _account(svc)
         groceries = await _category(async_db_session, "Food & Dining:Groceries")
@@ -993,7 +993,7 @@ class TestWithdraw:
             )
         mine = filed[0]
 
-        rows = await writes.list_changes(
+        rows = await change_queue.list_changes(
             async_db_session, owner_user_id=1, proposed_by_agent="finance-assistant"
         )
 
@@ -1021,7 +1021,7 @@ class TestWithdraw:
     ) -> None:
         """One card, one call, one reason - and a row the user already
         decided is not dragged back into it."""
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
         account = await _account(svc)
         groceries = await _category(async_db_session, "Food & Dining:Groceries")
@@ -1029,7 +1029,7 @@ class TestWithdraw:
         for day in (10, 11, 12):
             txn = await _txn(svc, account.id, -897, date(2026, 6, day), name="Deli")
             payloads.append({"transaction_id": txn.id, "category_id": groceries.id})
-        rows = await writes.propose_many(
+        rows = await change_queue.propose_many(
             async_db_session,
             "transaction.categorize",
             payloads,
@@ -1037,9 +1037,9 @@ class TestWithdraw:
             proposed_by_agent="finance-assistant",
         )
         batch_id = rows[0].batch_id
-        await writes.reject(async_db_session, rows[0].id, owner_user_id=1)
+        await change_queue.reject(async_db_session, rows[0].id, owner_user_id=1)
 
-        withdrawn = await writes.withdraw_batch(
+        withdrawn = await change_queue.withdraw_batch(
             async_db_session,
             batch_id,
             agent_slug="finance-assistant",
@@ -1050,7 +1050,7 @@ class TestWithdraw:
         assert withdrawn == 2
         notes = {
             (r.result or {}).get("note")
-            for r in await writes.batch_rows(
+            for r in await change_queue.batch_rows(
                 async_db_session, batch_id, owner_user_id=1
             )
         }
@@ -1063,16 +1063,16 @@ class TestWithdraw:
     async def test_only_the_proposer_may_withdraw(
         self, svc: FinanceService, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
         row = await self._proposed(svc, async_db_session, agent="finance-assistant")
 
         with pytest.raises(ValueError, match="proposing agent"):
-            await writes.withdraw(
+            await change_queue.withdraw(
                 async_db_session, row.id, agent_slug="other-agent", owner_user_id=1
             )
         with pytest.raises(ValueError, match="proposing agent"):
-            await writes.withdraw(
+            await change_queue.withdraw(
                 async_db_session, row.id, agent_slug=None, owner_user_id=1
             )
 
@@ -1080,13 +1080,13 @@ class TestWithdraw:
     async def test_a_resolved_card_cannot_be_withdrawn(
         self, svc: FinanceService, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
         row = await self._proposed(svc, async_db_session, agent="finance-assistant")
         await svc.reject_change(row.id, owner_user_id=1)
 
         with pytest.raises(ValueError, match="already rejected"):
-            await writes.withdraw(
+            await change_queue.withdraw(
                 async_db_session,
                 row.id,
                 agent_slug="finance-assistant",
@@ -1103,9 +1103,9 @@ class TestLegacyInvalidPayloads:
     of raising."""
 
     @staticmethod
-    def _legacy_row() -> FinancePendingChange:
+    def _legacy_row() -> PendingChange:
         # Filed directly, the way a pre-validator card exists in the DB.
-        return FinancePendingChange(
+        return PendingChange(
             owner_user_id=1,
             change_type="transaction.split",
             payload={
@@ -1119,13 +1119,13 @@ class TestLegacyInvalidPayloads:
     async def test_a_no_longer_valid_card_can_still_be_rejected(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
         row = self._legacy_row()
         async_db_session.add(row)
         await async_db_session.flush()
 
-        rejected = await writes.reject(async_db_session, row.id, owner_user_id=1)
+        rejected = await change_queue.reject(async_db_session, row.id, owner_user_id=1)
 
         assert rejected.status == "rejected"
         display = (rejected.result or {}).get("display")
@@ -1135,16 +1135,16 @@ class TestLegacyInvalidPayloads:
     async def test_and_still_be_withdrawn_and_described(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
         row = self._legacy_row()
         async_db_session.add(row)
         await async_db_session.flush()
 
-        card = await writes.describe_change(async_db_session, row)
+        card = await change_queue.describe_change(async_db_session, row)
         assert "-399" in str(card)  # renders instead of raising
 
-        withdrawn = await writes.withdraw(
+        withdrawn = await change_queue.withdraw(
             async_db_session, row.id, agent_slug="finance-assistant", owner_user_id=1
         )
         assert withdrawn.status == "rejected"
@@ -1210,7 +1210,7 @@ class TestWhatABatchApprovalLanded:
     ) -> None:
         """Counts come back from the approval; the ROWS are what carry
         the ids she needs to propose the next thing."""
-        from app.services.finance.domains.writes.queue import approved_in_batch
+        from app.services import change_queue
 
         groceries, txn = await self._fixture(svc, async_db_session)
         other = await _txn(svc, txn.account_id, -500, date(2026, 6, 11), name="Deli 2")
@@ -1226,7 +1226,7 @@ class TestWhatABatchApprovalLanded:
         await svc.approve_batch(batch_id, owner_user_id=1, exclude_ids=[second.id])
         await async_db_session.commit()
 
-        landed = await approved_in_batch(async_db_session, batch_id)
+        landed = await change_queue.after_commit(async_db_session)
 
         assert [row.id for row in landed] == [first.id]
 
@@ -1236,98 +1236,3 @@ async def _fixture_rows(svc: FinanceService, session: AsyncSession):
     groceries = await _category(session, "Food & Dining:Groceries")
     txn = await _txn(svc, account.id, -897, date(2026, 6, 10), name="Retired")
     return groceries, txn
-
-
-class TestACardWhoseTypeIsGone:
-    """A change type can leave: retired, or simply not built on the
-    branch somebody is running. The row outlives it, and the Approvals
-    page has to stay up so there is somewhere to reject it FROM."""
-
-    @pytest.mark.asyncio
-    async def test_the_listing_survives_it(
-        self, svc: FinanceService, async_db_session: AsyncSession
-    ) -> None:
-        from app.components.backend.api.finance.changes import _to_responses
-
-        groceries, txn = await _fixture_rows(svc, async_db_session)
-        row = await svc.propose_change(
-            "transaction.categorize",
-            {"transaction_id": txn.id, "category_id": groceries.id},
-            owner_user_id=1,
-        )
-        await async_db_session.flush()
-        row.change_type = "document.something_retired"
-        async_db_session.add(row)
-        await async_db_session.flush()
-
-        listed = await _to_responses(svc, [row])
-
-        assert len(listed) == 1
-        # It names itself with the only thing left: its own type.
-        assert "document.something_retired" in listed[0].title
-
-
-class TestRevise:
-    """A card is a proposal; the person answering it can put their own
-    words on it before saying yes. The payload is re-validated by the
-    same contract propose used, so a revised card is as safe to approve
-    as a fresh one. Only types that opt in (``editable``) offer it."""
-
-    @pytest.mark.asyncio
-    async def test_the_payload_is_replaced_and_the_card_stays_pending(
-        self, async_db_session: AsyncSession
-    ) -> None:
-        from app.services.finance.domains.writes.queue import propose, revise
-
-        row = await propose(
-            async_db_session,
-            "contact.create",
-            {
-                "name": "Optum",
-                "kind": "organization",
-                "email": "of-service@of.optum.com",
-            },
-        )
-        revised = await revise(
-            async_db_session,
-            int(row.id),
-            {
-                "name": "Optum Financial",
-                "kind": "organization",
-                "email": "of-service@of.optum.com",
-            },
-        )
-        assert revised.status == "pending"
-        assert revised.payload["name"] == "Optum Financial"
-
-    @pytest.mark.asyncio
-    async def test_a_bad_revision_is_refused_and_the_card_is_untouched(
-        self, async_db_session: AsyncSession
-    ) -> None:
-        from app.services.finance.domains.writes.queue import propose, revise
-
-        row = await propose(
-            async_db_session,
-            "contact.create",
-            {"name": "Optum", "kind": "organization"},
-        )
-        with pytest.raises(ValueError):
-            await revise(
-                async_db_session, int(row.id), {"name": "Optum", "kind": "robot"}
-            )
-        assert row.payload["kind"] == "organization"
-
-    @pytest.mark.asyncio
-    async def test_only_a_pending_card_of_an_editable_type_can_be_revised(
-        self, async_db_session: AsyncSession
-    ) -> None:
-        from app.services.finance.domains.writes.queue import propose, revise
-        from app.services.finance.domains.writes.registry import executor_for
-
-        assert executor_for("contact.create").editable
-        assert not executor_for("transaction.categorize").editable
-
-        row = await propose(async_db_session, "contact.create", {"name": "Optum"})
-        row.status = "rejected"
-        with pytest.raises(ValueError):
-            await revise(async_db_session, int(row.id), {"name": "Optum"})

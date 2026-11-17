@@ -1,79 +1,11 @@
 {# Form macros. Native inputs with ``name`` attributes, so every form posts
    or re-queries through htmx without client-side state.
 
-       {% from "components/macros/form.html" import select, date_input, checkbox, search_input %}
+       {% from "components/macros/form.html" import field, text_input, select, date_input, primary_button %}
 #}
+
+
 {% from "components/macros/icons.html" import icon %}
-
-
-{# The section-wide filter: a time window and a set of accounts. Every
-   change re-requests the section with the form's fields as the query
-   string (``hx-get`` on the form itself), so the filter lives in the URL
-   and survives reload. No checked account means every account. #}
-{# The time-window chips: a row of exclusive pills that submits as one
-   radio field, so a click re-requests the enclosing form. The ``chip``
-   class (input.css) marks the checked one through its sibling radio. #}
-{# ``ranges`` are ``(value, label)``, or ``(value, label, icon)`` for a
-   chip that shows its icon (``icons.html``), its label on hover and to a
-   reader. #}
-{% macro range_chips(ranges, days, field="days", aria="Time window", attrs="") %}
-<fieldset class="flex flex-wrap items-center gap-1.5" aria-label="{{ aria }}" {{ attrs|safe }}>
-  {% for choice in ranges %}
-  {% set value, label = choice[0], choice[1] %}
-  {% set glyph = choice[2] if choice|length > 2 else none %}
-  <label class="cursor-pointer"{% if glyph %} title="{{ label }}"{% endif %}>
-    <input type="radio" name="{{ field }}" value="{{ value }}" class="sr-only peer" {% if value == days %}checked{% endif %}>
-    <span class="chip{% if glyph %} inline-flex px-1.5{% endif %}">
-      {%- if glyph %}{{ icon(glyph) }}<span class="sr-only">{{ label }}</span>{% else %}{{ label }}{% endif -%}
-    </span>
-  </label>
-  {% endfor %}
-</fieldset>
-{% endmacro %}
-
-{# The time-window row that re-requests ``url`` when a chip is picked and
-   swaps ``target`` (``hx_replace``), the choice kept in the address as
-   ``field``. #}
-{% macro range_form(ranges, current, url, target, field="days", aria="Time window", id=None, class="") %}
-<form {% if id %}id="{{ id }}" {% endif %}class="{{ class }}" {{ hx_replace(url, target) }} hx-trigger="change">
-  {{ range_chips(ranges, current, field=field, aria=aria) }}
-</form>
-{% endmacro %}
-
-{# ``dates`` is a picked ``(from, to)`` range for a page whose charts
-   take one: it beats the chips, so no chip is checked while it is set, and
-   picking a chip clears it. #}
-{% macro account_filter(action, accounts, selected_ids, days, ranges, dates=None) %}
-<form id="filter" method="get" action="{{ action }}"
-      hx-get="{{ action }}" hx-target="#app-content" hx-push-url="true" hx-trigger="change"
-      class="flex flex-wrap items-center gap-3" {% if dates %}x-data{% endif %}>
-  {% if ranges %}{{ range_chips(ranges, None if dates and dates[0] else days, attrs='@change="$root.querySelectorAll(\'input[type=date]\').forEach((i) => (i.value = \'\'))"' if dates else "") }}{% endif %}
-  {% if dates %}{{ date_input("from", dates[0], label="From") }}{{ date_input("to", dates[1], label="To") }}{% endif %}
-  {% if accounts %}
-  {#- Imported here: layout.html imports this file at its top. -#}
-  {% from "components/macros/layout.html" import dropdown %}
-  {% call dropdown("Accounts" ~ (" (%d)" % selected_ids|length if selected_ids else ""), panel="min-w-[16rem] max-h-[70vh] overflow-y-auto p-2") %}
-    {# Sectioned, in the same ledger order the Accounts page uses - a
-       flat list of fifteen made the reader scan for a name they already
-       knew the KIND of. ``account_sections`` is the one bucketing, so a
-       new account type appears in both places or neither. #}
-    {% for label, group in account_sections(accounts) %}
-    <p class="px-2 pt-2 pb-1 micro-label text-aegis-muted">{{ label }}</p>
-    <div class="space-y-1 pb-1">
-      {% for account in group %}
-      <label class="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-aegis-border/30 cursor-pointer">
-        <input type="checkbox" name="account_ids" value="{{ account.id }}"
-               class="accent-aegis-teal" {% if account.id in selected_ids %}checked{% endif %}>
-        <span class="text-aegis-text truncate">{{ account.name }}</span>
-      </label>
-      {% endfor %}
-    </div>
-    {% endfor %}
-  {% endcall %}
-  {% endif %}
-</form>
-{% endmacro %}
-
 
 {# Shared control styling: DaisyUI's control of ``kind`` (input, select,
    textarea, checkbox, radio) in its small form; the text controls sit
@@ -81,7 +13,7 @@
    owns focus, disabled and placeholder states; the theme owns radius and
    color. Templates never spell a DaisyUI control class themselves. #}
 {# DaisyUI draws its own 2px outline on focus; the teal border is the focus cue here, so the outline goes. #}
-{% set _surface = "bg-aegis-bg text-aegis-text focus:border-aegis-teal focus:outline-none focus-within:outline-none" %}
+{% set _surface = "bg-aegis-bg text-aegis-text focus:border-aegis-teal focus:outline-none focus-within:outline-none [&:user-invalid]:border-error" %}
 {# Class names are spelled in full: Tailwind emits only what it can read
    from the source, so a name built from parts would never compile. #}
 {% macro control(kind) -%}
@@ -104,30 +36,41 @@
 btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, tones["default"]) }}
 {%- endmacro %}
 
-{# A dialog that previews before it writes: Check re-renders it with what
-   would happen; the second button lands it, offered once checked
-   (reconcile, merge). The routes read ``preview``; its absence applies. #}
-{% macro check_apply(apply_label, ready) %}
-<div class="flex items-center gap-3">
-  <button type="submit" name="preview" value="1" class="{{ button_classes("default") }}">Check</button>
-  {% if ready %}<button type="submit" name="apply" value="1" class="{{ button_classes() }}">{{ apply_label }}</button>{% endif %}
-</div>
+
+{# Inline primary button (no loading spinner). Defaults to ``type="button"``
+   so it doesn't accidentally submit a form it's nested inside — pass
+   ``type="submit"`` explicitly when you want submit semantics. ``attrs``
+   lets the caller pass other attributes (Alpine ``@click``,
+   ``:disabled``, ``aria-*``), never a ``type=`` (refused). ``filled``
+   is the page's one action. #}
+{% macro primary_button(label, type="button", attrs="", filled=False) %}
+<button type="{{ type }}" {{ attrs|button_attrs|safe }}
+  class="{{ "btn btn-primary btn-xs" if filled else button_classes("primary", "xs") }}">{{ label }}</button>
 {% endmacro %}
 
-{# What a Check found: label / value rows, as a panel. ``attrs`` names
-   it for the page and its tests. #}
-{% macro summary_panel(attrs="") %}
-<dl {{ attrs|safe }} class="text-sm bg-aegis-bg border border-aegis-border rounded p-3 grid grid-cols-2 gap-y-1">{{ caller() }}</dl>
+
+{# Primary submit button with an inline loading spinner. Parent scope must
+   expose ``loading`` (bool) — typically flipped by ``@submit="loading = true"``
+   on the form. The button disables itself while loading so a double-click
+   can't double-submit. #}
+{% macro submit_button(idle_label, loading_label) %}
+<button type="submit" :disabled="loading"
+  class="{{ button_classes() }} w-full">
+  <span x-show="!loading">{{ idle_label }}</span>
+  <span x-show="loading" x-cloak class="inline-flex items-center gap-2">
+    {{ icon("spinner", "animate-spin w-4 h-4") }}
+    {{ loading_label }}
+  </span>
+</button>
 {% endmacro %}
 
 
 {# A native select. ``options`` are objects or dicts with ``id`` and
-   ``name``; ``blank`` is the "no filter" label (``None`` for no blank
-   choice); ``selected`` the current id. ``label`` wraps it inline for a
-   filter bar; ``block`` lays it out full-width inside a ``field()``;
-   ``attrs`` is markup on the ``<select>`` itself. #}
-{# ``grouped``: ``options`` are ``{label, options}`` groups, an optgroup
-   each. #}
+   ``name``, or, ``grouped``, ``{"label", "options"}`` groups of them (an
+   optgroup each); ``blank`` is the "no filter" label (``None`` for no
+   blank choice), chosen while nothing is; ``selected`` the current id.
+   ``label`` wraps it inline for a filter bar; ``block`` lays it out
+   full-width inside a ``field()``; ``attrs`` rides on the select. #}
 {% macro select(name, options, selected=None, blank="All", label=None, block=False, grouped=False, attrs="") %}
 {% if label %}<label class="inline-flex items-center gap-2 text-xs text-aegis-muted"><span>{{ label }}</span>{% endif %}
 <select name="{{ name }}" {{ attrs|safe }} class="{{ control("select") }}{% if block %} block w-full mt-1{% endif %}">
@@ -135,7 +78,9 @@ btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, 
   {% for group in (options if grouped else [{"label": none, "options": options}]) %}
   {% if group.label is not none %}<optgroup label="{{ group.label }}">{% endif %}
   {% for option in group.options %}
-  <option value="{{ option.id }}" {% if selected is not none and option.id == selected %}selected{% endif %}>{{ option.name }}</option>
+  {% set oid = option["id"] if option is mapping else option.id %}
+  {% set option_name = option["name"] if option is mapping else option.name %}
+  <option value="{{ oid }}" {% if selected is not none and oid == selected %}selected{% endif %}>{{ option_name }}</option>
   {% endfor %}
   {% if group.label is not none %}</optgroup>{% endif %}
   {% endfor %}
@@ -149,9 +94,33 @@ btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, 
 {% if label %}</label>{% endif %}
 {% endmacro %}
 
-{% macro checkbox(name, checked=False, label=None, value=None) %}
+{# Every file picker: the native input hidden behind a button-styled label,
+   so it looks like every other button. Picking submits its form (an
+   upload button); with ``submit=False`` it keeps what was picked (a second
+   pick adds to the first, where ``multiple``), says how many and how big,
+   and lists each, removable (the ``filePicker`` component in app.js), for a
+   form with its own submit. #}
+{% macro file_button(id, label, accept=None, name="file", submit=True, required=True, multiple=False) %}
+{%- set button = button_classes("primary", "xs") -%}
+{%- set input -%}<input id="{{ id }}" type="file" name="{{ name }}" {% if required %}required{% endif %} {% if multiple %}multiple{% endif %} {% if accept %}accept="{{ accept }}"{% endif %} class="sr-only" {% if submit %}@change="$el.form.requestSubmit()"{% else %}x-ref="input" @change="add()"{% endif %}>{%- endset -%}
+{%- set picker -%}{{ input }}<label for="{{ id }}" class="{{ button }}">{{ label }}</label>{%- endset -%}
+{% if submit %}
+<span class="inline-flex items-center gap-2 min-w-0">{{ picker }}</span>
+{% else %}
+<div data-file-picker x-data="filePicker({{ 'true' if multiple else 'false' }})" class="space-y-2 min-w-0">
+  <span class="inline-flex items-center gap-2">{{ picker }}<span data-chosen x-text="said" class="text-xs text-aegis-muted">Nothing chosen</span></span>
+  <ul x-show="files.length" x-cloak class="space-y-1">
+    <template x-for="(f, i) in files" :key="f.name + f.size">
+      <li class="flex items-center gap-2 text-xs"><span x-text="f.name" class="truncate text-aegis-text"></span><span x-text="$bytes(f.size)" class="shrink-0 text-aegis-muted"></span><button type="button" @click="remove(i)" :aria-label="'Remove ' + f.name" class="shrink-0 text-aegis-muted hover:text-error">{{ icon("x-mark", "w-3.5 h-3.5", 2) }}</button></li>
+    </template>
+  </ul>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro checkbox(name, checked=False, label=None, value=None, attrs="") %}
 <label class="inline-flex items-center gap-2 text-xs text-aegis-muted cursor-pointer">
-  <input type="checkbox" name="{{ name }}" {% if value is not none %}value="{{ value }}"{% endif %} {% if checked %}checked{% endif %} class="{{ control("checkbox") }}">
+  <input type="checkbox" name="{{ name }}" {% if value is not none %}value="{{ value }}"{% endif %} {% if checked %}checked{% endif %} {{ attrs|safe }} class="{{ control("checkbox") }}">
   {% if label %}<span>{{ label }}</span>{% endif %}
 </label>
 {% endmacro %}
@@ -163,11 +132,9 @@ btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, 
    (``hx-preserve``, which needs the ``id``), so the menu stays open while
    several are ticked; a click anywhere else closes it. The button at its
    top ticks every option, or clears them when all are ticked, and the form
-   refreshes as for any tick; its button counts the ticks as they change.
-   ``data-checklist`` is how a ``data-facets`` form's lists are read
-   (app.js), so a tick there narrows the rows on the page. ``exclude`` (not
-   None) adds an "All but these" switch posting ``exclude=<name>``, outside
-   what that button ticks. #}
+   refreshes as for any tick. ``exclude`` (not None) adds an "All but
+   these" switch posting ``exclude=<name>``, outside what that button
+   ticks. #}
 {% macro checklist(id, name, label, options, exclude=None) %}
 {% set ticked = options|selectattr("checked")|list|length %}
 <details id="{{ id }}" data-checklist hx-preserve class="relative" @click.outside="$el.removeAttribute('open')"
@@ -212,15 +179,352 @@ btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, 
        aria-label="{{ placeholder }}" autocomplete="off" class="{{ control("input") }} min-w-[12rem]">
 {% endmacro %}
 
-{# The id is not decoration: htmx restores focus after a swap by ID, and
-   a filter form that re-renders on every keystroke destroys and recreates
-   this box mid-word. Without it the caret goes and the next letter is
-   typed into nothing, which is most of what "the search feels slow" turns
-   out to mean. #}
+{# A stable id lets htmx restore focus when a search result replaces the form. #}
 {% macro search_input(name, value=None, placeholder="Search", autofocus=False, attrs="") %}
 <input type="search" id="search-{{ name }}" name="{{ name }}" value="{{ value or '' }}" placeholder="{{ placeholder }}"
        {% if autofocus %}autofocus{% endif %} {{ attrs|safe }}
        aria-label="{{ placeholder }}" class="{{ control("input") }} min-w-[12rem]">
+{% endmacro %}
+
+{# A labelled field. The control comes via {% call %}; ``error`` renders
+   under it (pattern 1's 422 re-render passes field errors here); ``hint``
+   says what the control takes (its ``pattern``, its ``required``), shown
+   only once what was typed does not fit, before anything is sent. #}
+{% macro field(label, error=None, hint=None) %}
+<div class="group/field space-y-1">
+  <label class="block text-aegis-muted micro-label">{{ label }}
+    {{ caller() }}
+  </label>
+  {% if error %}<p class="text-xs text-error">{{ error }}</p>{% endif %}
+  {% if hint %}<p data-invalid class="hidden text-xs text-error group-has-[:user-invalid]/field:block">{{ hint }}</p>{% endif %}
+</div>
+{% endmacro %}
+
+{# A dialog or drawer form is sections then a footer: each part of what is
+   being done its own section, divided from the one before (``title`` and
+   a ``hint`` such as "optional" over it, or neither for a plain run of
+   fields), and the footer at the bottom right. #}
+{% macro form_section(title=None, hint=None) %}
+<section class="space-y-3 border-t border-aegis-border pt-4 first:border-t-0 first:pt-0">
+  {% if title %}<div class="flex items-baseline justify-between gap-3"><h3 class="text-sm font-semibold text-aegis-text">{{ title }}</h3>{% if hint %}<span class="text-xs text-aegis-muted">{{ hint }}</span>{% endif %}</div>{% endif %}
+  {{ caller() }}
+</section>
+{% endmacro %}
+
+{# Closing the dialog it is in, unchanged: every dialog's Cancel. #}
+{% macro cancel_button() %}
+<button type="button" data-cancel data-dialog-close class="text-xs text-aegis-muted hover:text-aegis-text">Cancel</button>
+{%- endmacro %}
+
+{# A dialog or drawer form's last row, at the bottom right: Cancel (closing
+   the dialog it is in; ``cancel=False`` for a form inside a drawer's card,
+   which closing would not suit), then the submit. What its caller gives
+   (a Remove) sits at the left. In a ``wizard`` it walks the steps: Back,
+   Next, and the submit only on the last. #}
+{% macro form_footer(label, cancel=True, attrs="", wizard=False) %}
+<div class="flex items-center justify-end gap-3 border-t border-aegis-border pt-4">
+  {% if caller is defined %}<div class="mr-auto flex items-center gap-2">{{ caller() }}</div>{% endif %}
+  {% if cancel %}{{ cancel_button() }}{% endif %}
+  {% if wizard %}
+  <button type="button" data-wizard-back x-show="step > 0" x-cloak @click="back()" class="text-xs text-aegis-muted hover:text-aegis-text">Back</button>
+  <span data-wizard-next x-show="step < count - 1">{{ primary_button("Next", "button", '@click="next()"') }}</span>
+  <span data-wizard-submit x-show="step === count - 1" x-cloak>{{ primary_button(label, "submit", attrs) }}</span>
+  {% else %}
+  {{ primary_button(label, "submit", attrs) }}
+  {% endif %}
+</div>
+{% endmacro %}
+
+{# A form in steps (the ``wizard`` component in app.js), for one with much
+   to pick from: its steps down the left, numbered (a check once passed,
+   with its answer, ``summary``, an Alpine expression), each a click back
+   once reached; the step at hand on the right (each in ``wizard_step``),
+   and ``form_footer(..., wizard=True)`` walking them; Enter in a field
+   is Next until the last step. ``steps`` are
+   (title, summary or None) pairs. #}
+{% macro wizard(steps) %}
+<div data-wizard x-data="wizard({{ steps|length }})" @keydown.enter="enter($event)" class="grid gap-6 sm:grid-cols-[11rem_1fr]">
+  <ol data-wizard-steps class="space-y-4">
+    {% for title, summary in steps %}{% set i = loop.index0 %}
+    <li><button type="button" @click="go({{ i }})" :disabled="{{ i }} > reached" class="flex w-full items-start gap-3 text-left disabled:cursor-default">
+      <span class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs"
+            :class="step === {{ i }} ? 'border-aegis-teal text-aegis-text' : done({{ i }}) ? 'border-aegis-teal text-aegis-teal' : 'border-aegis-border text-aegis-muted'">
+        <span x-show="!done({{ i }})">{{ loop.index }}</span><span x-show="done({{ i }})" x-cloak>{{ icon("check", "h-3.5 w-3.5", 2.5) }}</span>
+      </span>
+      <span class="min-w-0 pt-0.5"><span data-step-title class="block text-sm" :class="step === {{ i }} ? 'font-semibold text-aegis-text' : 'text-aegis-muted'">{{ title }}</span>{% if summary %}<span x-show="done({{ i }})" x-cloak x-text="{{ summary }}" class="block truncate text-xs text-aegis-muted"></span>{% endif %}</span>
+    </button></li>
+    {% endfor %}
+  </ol>
+  <div class="min-w-0 space-y-4">{{ caller() }}</div>
+</div>
+{% endmacro %}
+
+{# One step of a ``wizard``, numbered from 0: shown while it is at hand. #}
+{% macro wizard_step(n) %}
+<div data-wizard-step="{{ n }}" x-show="step === {{ n }}" {% if n %}x-cloak{% endif %} class="space-y-4">{{ caller() }}</div>
+{% endmacro %}
+
+{# ``block`` (the default) fills a ``field()``; inline, it sits in a bar
+   beside its buttons, as ``select`` and ``date_input`` do. ``type`` for a
+   secret (``password``); ``remember=False`` keeps the browser's
+   suggestions off a one-time value. #}
+{% macro text_input(name, value=None, placeholder="", required=False, autofocus=False, pattern=None, attrs="", block=True, type="text", remember=True) %}
+<input type="{{ type }}" name="{{ name }}" value="{{ value or '' }}" placeholder="{{ placeholder }}"
+       {% if required %}required{% endif %} {% if autofocus %}autofocus{% endif %} {% if not remember %}autocomplete="off"{% endif %} {% if pattern %}pattern="{{ pattern }}"{% endif %} {{ attrs|safe }}
+       class="{{ control("input") }} {{ 'w-full mt-1' if block else 'min-w-[16rem]' }}">
+{% endmacro %}
+
+{% macro number_input(name, value=None, step=1, min=None, max=None, required=False) %}
+<input type="number" name="{{ name }}" value="{{ value if value is not none else '' }}" step="{{ step }}"
+       {% if min is not none %}min="{{ min }}"{% endif %} {% if max is not none %}max="{{ max }}"{% endif %} {% if required %}required{% endif %}
+       class="{{ control("input") }} w-full mt-1 tabular-nums">
+{% endmacro %}
+
+{# ``extra`` rides along for the one input a script drives (the split's
+   remainder line, made read-only by the page). #}
+{% macro money_input(name, value=None, placeholder="0.00", extra="") %}
+<div class="relative mt-1">
+  <span class="absolute inset-y-0 left-2.5 flex items-center text-sm text-aegis-muted" aria-hidden="true">$</span>
+  <input type="text" inputmode="decimal" name="{{ name }}" value="{{ value or '' }}" placeholder="{{ placeholder }}" {{ extra|safe }}
+         class="{{ control("input") }} w-full pl-6 tabular-nums read-only:text-aegis-muted">
+</div>
+{% endmacro %}
+
+{% macro textarea(name, value=None, rows=6, placeholder="", attrs="") %}
+<textarea name="{{ name }}" rows="{{ rows }}" placeholder="{{ placeholder }}" {{ attrs|safe }}
+          class="{{ control("textarea") }} w-full mt-1 font-mono text-xs">{{ value or "" }}</textarea>
+{% endmacro %}
+
+
+{# Themed combobox — replaces native <select> so the dropdown panel matches
+   the dark UI instead of falling back to the OS-themed picker. Alpine
+   handles open/close + click-outside + escape. Caller supplies:
+   - `model`:        Alpine path to bind to (e.g. `form.metric_key`)
+   - `options`:      Alpine expression returning an array of option objects
+   - `value_attr`:   key on each option holding the bound value
+   - `label_attr`:   key on each option holding the display label
+   - `on_change`:    optional Alpine expression to run after selection
+   - `placeholder`:  shown when no option matches the current model value
+   - `small`:        tighter padding for inline filter chips
+   - `name`:         posts the chosen value under this name, so the field
+                     works inside a plain `<form>` and not only one that
+                     submits by script
+
+   ``grouped=true`` renders category headers: ``options`` is then a list of
+   ``{label, items: [{value, label}]}`` groups (an empty group label means
+   no header, useful to pin an "All" entry at the top). ``panel_class``
+   widens the dropdown beyond the trigger (e.g. ``min-w-[13rem]``) so long
+   labels don't wrap. #}
+{% macro select_field(model, options, value_attr="value", label_attr="label", on_change="", placeholder="Select…", small=false, grouped=false, panel_class="", name=None) %}
+<div x-data="{ open: false }" class="relative"
+     @click.outside="open = false"
+     @keydown.escape.window="open = false">
+  {% if name %}<input type="hidden" name="{{ name }}" :value="{{ model }}">{% endif %}
+  <button type="button" @click="open = !open"
+    class="w-full bg-aegis-bg border rounded {{ 'px-2 py-1 text-xxs' if small else 'px-3 py-2 text-sm' }} text-aegis-text text-left flex items-center justify-between gap-2 hover:border-aegis-muted focus:outline-none transition-colors"
+    :class="open ? 'border-aegis-teal' : 'border-aegis-border'">
+    {% if grouped %}
+    <span class="truncate"
+          x-text="(({{ options }}).flatMap(_g => _g.items).find(_o => _o.{{ value_attr }} === {{ model }}) || {}).{{ label_attr }} || '{{ placeholder }}'"></span>
+    {% else %}
+    <span class="truncate"
+          x-text="(({{ options }}).find(_o => _o.{{ value_attr }} === {{ model }}) || {}).{{ label_attr }} || '{{ placeholder }}'"></span>
+    {% endif %}
+    {{ icon("chevron-narrow", "w-3 h-3 shrink-0 text-aegis-muted transition-transform", 2, attrs=":class=\"open ? 'rotate-180' : ''\"") }}
+  </button>
+  <div x-show="open" x-cloak x-transition.opacity
+       class="absolute left-0 top-full mt-1 z-30 floating py-1 max-h-80 overflow-y-auto {{ panel_class if panel_class else 'right-0' }}">
+    {% if grouped %}
+    <template x-for="_grp in {{ options }}" :key="_grp.label">
+      <div>
+        <div x-show="_grp.label"
+             class="px-2 pt-2 pb-0.5 text-xxs caps text-aegis-muted/60"
+             x-text="_grp.label"></div>
+        <template x-for="_opt in _grp.items" :key="_opt.{{ value_attr }}">
+          <button type="button"
+            class="w-full text-left whitespace-nowrap {{ 'px-2 py-1 text-xxs' if small else 'px-3 py-1.5 text-sm' }} hover:bg-aegis-border/30 transition-colors"
+            :class="{{ model }} === _opt.{{ value_attr }} ? 'text-aegis-teal' : 'text-aegis-text'"
+            @click="{{ model }} = _opt.{{ value_attr }}; open = false; {{ on_change }}"
+            x-text="_opt.{{ label_attr }}"></button>
+        </template>
+      </div>
+    </template>
+    {% else %}
+    <template x-for="_opt in {{ options }}" :key="_opt.{{ value_attr }}">
+      <button type="button"
+        class="w-full text-left {{ 'px-2 py-1 text-xxs' if small else 'px-3 py-1.5 text-sm' }} hover:bg-aegis-border/30 transition-colors"
+        :class="{{ model }} === _opt.{{ value_attr }} ? 'text-aegis-teal' : 'text-aegis-text'"
+        @click="{{ model }} = _opt.{{ value_attr }}; open = false; {{ on_change }}"
+        x-text="_opt.{{ label_attr }}"></button>
+    </template>
+    {% endif %}
+  </div>
+</div>
+{% endmacro %}
+
+
+{# Password input with a show/hide eye toggle. Standalone so callers can
+   wire it up with either ``name=`` (plain form post) or Alpine
+   ``x_model`` bindings.
+
+   The toggle swaps the rendered ``type`` via ``:type`` so browser password
+   managers still recognize the field as a password — Alpine's ``:type``
+   takes effect after the initial parse, so autofill works.
+
+   It sits on the page surface, as every control does. #}
+{% macro password_input(name=None, x_model=None, autocomplete=None, required=True, minlength=None, placeholder="") %}
+<div class="relative" x-data="{ shown: false }">
+  <input type="password" :type="shown ? 'text' : 'password'"
+    {% if name %}name="{{ name }}"{% endif %}
+    {% if x_model %}x-model="{{ x_model }}"{% endif %}
+    {% if required %}required{% endif %}
+    {% if autocomplete %}autocomplete="{{ autocomplete }}"{% endif %}
+    {% if minlength %}minlength="{{ minlength }}"{% endif %}
+    class="{{ control("input") }} w-full pr-10"
+    placeholder="{{ placeholder }}">
+  <button type="button" @click="shown = !shown"
+    :aria-label="shown ? 'Hide password' : 'Show password'"
+    class="absolute inset-y-0 right-0 px-3 flex items-center text-aegis-muted hover:text-aegis-text transition-colors">
+    {# Eye / eye-slash from heroicons. Both 24×24 outline. Alpine swaps
+       which is visible. #}
+    <svg x-show="!shown" xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"/>
+      <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+    </svg>
+    <svg x-show="shown" x-cloak xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.243 4.243L9.88 9.88"/>
+    </svg>
+  </button>
+</div>
+{% endmacro %}
+
+
+{# Attributes that keep a browser and the password managers from filling
+   an input: a pasted key, or a field no person should fill. #}
+{% macro no_autofill() %}autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"{% endmacro %}
+
+
+{# The trap every public form carries (``backend/security/honeypot.py``):
+   an input a person never sees or tabs to, and a form-filler bot fills.
+   Out of sight rather than ``display:none``, which bots skip, and closed
+   to the password managers that would fill it for a person. #}
+{% macro honeypot() %}
+<div class="sr-only" aria-hidden="true">
+  <label>Leave this empty <input type="text" name="{{ honeypot_field }}" tabindex="-1" {{ no_autofill() }}></label>
+</div>
+{% endmacro %}
+
+
+{# "OR" divider with hairlines — sits between a form and an alternate
+   action (e.g. email/password above, OAuth buttons below). #}
+{% macro or_divider() %}
+<div class="flex items-center gap-3 my-5">
+  <div class="flex-1 h-px bg-aegis-border/60"></div>
+  <span class="text-xxs text-aegis-muted/70 caps">or</span>
+  <div class="flex-1 h-px bg-aegis-border/60"></div>
+</div>
+{% endmacro %}
+
+
+{# The time-window chips: a row of exclusive pills that submits as one
+   radio field, so a click re-requests the enclosing form. The ``chip``
+   class (input.css) marks the checked one through its sibling radio. ``ranges`` are ``(value, label)``, or
+   ``(value, label, icon)`` for a chip that shows its icon (``icons.html``),
+   its label on hover and to a reader. ``multiple`` makes them ticks instead,
+   ``days`` the values ticked, the row a ``data-checklist``: over a list it
+   narrows the rows with no request (``data-facets`` in app.js). ``attrs``
+   rides on the fieldset. #}
+{% macro range_chips(ranges, days, field="days", aria="Time window", multiple=False, attrs="") %}
+<fieldset class="flex flex-wrap items-center gap-1.5" aria-label="{{ aria }}"{% if multiple %} data-checklist{% endif %} {{ attrs|safe }}>
+  {% for choice in ranges %}
+  {% set value, label = choice[0], choice[1] %}
+  {% set glyph = choice[2] if choice|length > 2 else none %}
+  <label class="cursor-pointer"{% if glyph %} title="{{ label }}"{% endif %}>
+    <input type="{{ 'checkbox' if multiple else 'radio' }}" name="{{ field }}" value="{{ value }}" class="sr-only peer" {% if (value in days if multiple else value == days) %}checked{% endif %}>
+    <span class="chip{% if glyph %} inline-flex px-1.5{% endif %}">
+      {%- if glyph %}{{ icon(glyph) }}<span class="sr-only">{{ label }}</span>{% else %}{{ label }}{% endif -%}
+    </span>
+  </label>
+  {% endfor %}
+</fieldset>
+{% endmacro %}
+
+
+{# The time-window row that re-requests ``url`` when a chip is picked and
+   swaps ``target`` (``hx_replace``), the choice kept in the address as
+   ``field``. #}
+{% macro range_form(ranges, current, url, target, field="days", aria="Time window", id=None, class="") %}
+<form {% if id %}id="{{ id }}" {% endif %}class="{{ class }}" {{ hx_replace(url, target) }} hx-trigger="change">
+  {{ range_chips(ranges, current, field=field, aria=aria) }}
+</form>
+{% endmacro %}
+
+
+{# A small action button (row verbs, card verbs, toolbar). ``attrs`` is
+   the htmx verb, never a ``type=`` (refused: pass ``type``); ``vals`` a
+   dict for ``hx-vals``; ``tone`` is default (quiet), primary (teal),
+   danger or warn; ``glyph`` draws an icon in
+   place of the label, which then names it for a reader and on hover (as
+   the chips do); ``type`` is ``submit`` for a form's own verb; ``href``
+   makes it a link (a download: ``attrs`` "download"), looking the same.
+   The one recipe every compact button uses. #}
+{% macro action(label, attrs, tone="default", vals=None, glyph=None, type="button", href=None) %}
+{% set classes = "action " ~ button_classes(tone, "xs") ~ " whitespace-nowrap" %}
+{% if href %}<a href="{{ href }}" {{ attrs|safe }} class="{{ classes }}">{{ label }}</a>{% else %}
+<button type="{{ type }}" {{ attrs|button_attrs|safe }} {% if vals is not none %}hx-vals='{{ vals|tojson }}'{% endif %} {% if glyph %}title="{{ label }}" {% endif %}class="{{ classes }}">{% if glyph %}{{ icon(glyph) }}<span class="sr-only">{{ label }}</span>{% else %}{{ label }}{% endif %}</button>
+{% endif %}
+{% endmacro %}
+
+{# Steward's own form parts: the finance pages' filters, pickers and
+   field sets. #}
+{# A dialog that previews before it writes: Check re-renders it with what
+   would happen; the second button lands it, offered once checked
+   (reconcile, merge). The routes read ``preview``; its absence applies. #}
+{% macro check_apply(apply_label, ready) %}
+<div class="flex items-center gap-3">
+  <button type="submit" name="preview" value="1" class="{{ button_classes("default") }}">Check</button>
+  {% if ready %}<button type="submit" name="apply" value="1" class="{{ button_classes() }}">{{ apply_label }}</button>{% endif %}
+</div>
+{% endmacro %}
+
+{# What a Check found: label / value rows, as a panel. ``attrs`` names
+   it for the page and its tests. #}
+{% macro summary_panel(attrs="") %}
+<dl {{ attrs|safe }} class="text-sm bg-aegis-bg border border-aegis-border rounded p-3 grid grid-cols-2 gap-y-1">{{ caller() }}</dl>
+{% endmacro %}
+
+{# ``dates`` is a picked ``(from, to)`` range for a page whose charts
+   take one: it beats the chips, so no chip is checked while it is set, and
+   picking a chip clears it. #}
+{% macro account_filter(action, accounts, selected_ids, days, ranges, dates=None) %}
+<form id="filter" method="get" action="{{ action }}"
+      hx-get="{{ action }}" hx-target="#app-content" hx-push-url="true" hx-trigger="change"
+      class="flex flex-wrap items-center gap-3" {% if dates %}x-data{% endif %}>
+  {% if ranges %}{{ range_chips(ranges, None if dates and dates[0] else days, attrs='@change="$root.querySelectorAll(\'input[type=date]\').forEach((i) => (i.value = \'\'))"' if dates else "") }}{% endif %}
+  {% if dates %}{{ date_input("from", dates[0], label="From") }}{{ date_input("to", dates[1], label="To") }}{% endif %}
+  {% if accounts %}
+  {#- Imported here: layout.html imports this file at its top. -#}
+  {% from "components/macros/layout.html" import dropdown %}
+  {% call dropdown("Accounts" ~ (" (%d)" % selected_ids|length if selected_ids else ""), panel="min-w-[16rem] max-h-[70vh] overflow-y-auto p-2") %}
+    {# Sectioned, in the same ledger order the Accounts page uses - a
+       flat list of fifteen made the reader scan for a name they already
+       knew the KIND of. ``account_sections`` is the one bucketing, so a
+       new account type appears in both places or neither. #}
+    {% for label, group in account_sections(accounts) %}
+    <p class="px-2 pt-2 pb-1 micro-label text-aegis-muted">{{ label }}</p>
+    <div class="space-y-1 pb-1">
+      {% for account in group %}
+      <label class="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-aegis-border/30 cursor-pointer">
+        <input type="checkbox" name="account_ids" value="{{ account.id }}"
+               class="accent-aegis-teal" {% if account.id in selected_ids %}checked{% endif %}>
+        <span class="text-aegis-text truncate">{{ account.name }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  {% endcall %}
+  {% endif %}
+</form>
 {% endmacro %}
 
 {# Pick one, or name one that is not there yet.
@@ -240,7 +544,6 @@ btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, 
        class="{{ control("input") }} w-full mt-1 text-xs">
 {% endif %}
 {% endmacro %}
-
 
 {# The one file control. Browsers will not be told what the button looks
    like, so the styling is all on ``file:`` - written once here rather
@@ -379,119 +682,12 @@ btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, 
 </div>
 {% endmacro %}
 
-
-{# A labelled field. The control comes via {% call %}; ``error`` renders
-   under it (pattern 1's 422 re-render passes field errors here). #}
-{% macro field(label, error=None) %}
-<div class="space-y-1">
-  <label class="block text-aegis-muted micro-label">{{ label }}
-    {{ caller() }}
-  </label>
-  {% if error %}<p class="text-xs text-error">{{ error }}</p>{% endif %}
-</div>
-{% endmacro %}
-
-{% macro text_input(name, value=None, placeholder="", required=False, autofocus=False, type="text", remember=True, pattern=None, attrs="") %}
-<input type="{{ type }}" name="{{ name }}" value="{{ value or '' }}" placeholder="{{ placeholder }}"
-       {% if required %}required{% endif %} {% if autofocus %}autofocus{% endif %} {% if not remember %}autocomplete="off"{% endif %} {% if pattern %}pattern="{{ pattern }}"{% endif %} {{ attrs|safe }}
-       class="{{ control("input") }} w-full mt-1">
-{% endmacro %}
-
-{% macro number_input(name, value=None, step=1, min=None, max=None, required=False) %}
-<input type="number" name="{{ name }}" value="{{ value if value is not none else '' }}" step="{{ step }}"
-       {% if min is not none %}min="{{ min }}"{% endif %} {% if max is not none %}max="{{ max }}"{% endif %} {% if required %}required{% endif %}
-       class="{{ control("input") }} w-full mt-1 tabular-nums">
-{% endmacro %}
-
-{# Password input with a show/hide eye toggle: the ``:type`` swap keeps
-   browser password managers recognizing the field. Posts as ``name`` or
-   binds with ``x_model``. #}
-{% macro password_input(name=None, x_model=None, autocomplete=None, required=True, minlength=None, placeholder="") %}
-<div class="relative" x-data="{ shown: false }">
-  <input type="password" :type="shown ? 'text' : 'password'"
-    {% if name %}name="{{ name }}"{% endif %}
-    {% if x_model %}x-model="{{ x_model }}"{% endif %}
-    {% if required %}required{% endif %}
-    {% if autocomplete %}autocomplete="{{ autocomplete }}"{% endif %}
-    {% if minlength %}minlength="{{ minlength }}"{% endif %}
-    class="{{ control("input") }} w-full pr-10"
-    placeholder="{{ placeholder }}">
-  <button type="button" @click="shown = !shown"
-    :aria-label="shown ? 'Hide password' : 'Show password'"
-    class="absolute inset-y-0 right-0 px-3 flex items-center text-aegis-muted hover:text-aegis-text transition-colors">
-    {# Eye / eye-slash from heroicons. Both 24×24 outline. Alpine swaps
-       which is visible. #}
-    <svg x-show="!shown" xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75">
-      <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"/>
-      <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-    </svg>
-    <svg x-show="shown" x-cloak xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.75">
-      <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.243 4.243L9.88 9.88"/>
-    </svg>
-  </button>
-</div>
-{% endmacro %}
-
-{# Inline primary button (no loading spinner). Defaults to ``type="button"``
-   so it doesn't accidentally submit a form it's nested inside — pass
-   ``type="submit"`` explicitly when you want submit semantics. ``attrs``
-   lets the caller pass arbitrary attributes (Alpine ``@click``,
-   ``:disabled``, ``aria-*``) without bloating the macro signature. One
-   button height: it stands as tall as the actions beside it (Add account
-   beside Import); only a form's full-width submit is larger. #}
-{% macro primary_button(label, type="button", attrs="") %}
-<button type="{{ type }}" {{ attrs|safe }}
-  class="{{ button_classes("primary", "xs") }}">{{ label }}</button>
-{% endmacro %}
-
-{# A file input behind a button-styled label: picking a file submits its
-   form (``name="file"``). #}
-{% macro file_button(id, label, accept=None) %}
-<input id="{{ id }}" type="file" name="file" required {% if accept %}accept="{{ accept }}"{% endif %} class="sr-only" @change="$el.form.requestSubmit()">
-<label for="{{ id }}" class="{{ button_classes("primary", "xs") }}">{{ label }}</label>
-{% endmacro %}
-
-{# Primary submit button with an inline loading spinner. Parent scope must
-   expose ``loading`` (bool) — typically flipped by ``@submit="loading = true"``
-   on the form. The button disables itself while loading so a double-click
-   can't double-submit. #}
-{% macro submit_button(idle_label, loading_label) %}
-<button type="submit" :disabled="loading"
-  class="{{ button_classes() }} w-full">
-  <span x-show="!loading">{{ idle_label }}</span>
-  <span x-show="loading" x-cloak class="inline-flex items-center gap-2">
-    {# Tailwind's `animate-spin` + a minimal ring-quarter SVG. No deps. #}
-    {{ icon("spinner", "animate-spin w-4 h-4") }}
-    {{ loading_label }}
-  </span>
-</button>
-{% endmacro %}
-
-{# A small action button (row verbs, card verbs, toolbar). ``attrs`` is
-   the htmx verb; ``vals`` a dict for ``hx-vals``; ``tone`` as in
-   ``button_classes``; ``glyph`` draws an icon in place of the label,
-   which then names it for a reader and on hover. The one recipe every
-   compact button uses. #}
-{% macro action(label, attrs, tone="default", vals=None, glyph=None, type="button") %}
-<button type="{{ type }}" {{ attrs|safe }} {% if vals is not none %}hx-vals='{{ vals|tojson }}'{% endif %} {% if glyph %}title="{{ label }}" {% endif %}class="action {{ button_classes(tone, "xs") }} whitespace-nowrap">{% if glyph %}{{ icon(glyph) }}<span class="sr-only">{{ label }}</span>{% else %}{{ label }}{% endif %}</button>
-{% endmacro %}
-
 {# Which limit a form sets: a category, a payee key, or neither (the
    overall limit). The row's own form and the goal parser's Confirm. #}
 {% macro target_inputs(category_id, payee_key, payee_label) %}
 <input type="hidden" name="category_id" value="{{ category_id or '' }}">
 <input type="hidden" name="payee_key" value="{{ payee_key or '' }}">
 <input type="hidden" name="payee_label" value="{{ payee_label or '' }}">
-{% endmacro %}
-
-{# ``extra`` rides along for the one input a script drives (the split's
-   remainder line, made read-only by the page). #}
-{% macro money_input(name, value=None, placeholder="0.00", extra="") %}
-<div class="relative mt-1">
-  <span class="absolute inset-y-0 left-2.5 flex items-center text-sm text-aegis-muted" aria-hidden="true">$</span>
-  <input type="text" inputmode="decimal" name="{{ name }}" value="{{ value or '' }}" placeholder="{{ placeholder }}" {{ extra|safe }}
-         class="{{ control("input") }} w-full pl-6 tabular-nums read-only:text-aegis-muted">
-</div>
 {% endmacro %}
 
 {# A money figure that opens for editing on a click (the budget row's
@@ -510,12 +706,6 @@ btn btn-outline {{ {"sm": "btn-sm", "xs": "btn-xs"}[size] }} {{ tones.get(tone, 
         @focusout="editing = false">{{ money_input(name, value, extra='x-ref="amount"') }}</span>
 </span>
 {% endmacro %}
-
-{% macro textarea(name, value=None, rows=6, placeholder="", attrs="") %}
-<textarea name="{{ name }}" rows="{{ rows }}" placeholder="{{ placeholder }}" {{ attrs|safe }}
-          class="{{ control("textarea") }} w-full mt-1 font-mono text-xs">{{ value or "" }}</textarea>
-{% endmacro %}
-
 
 {# A declared field set, rendered. ``terms`` are ``Term`` rows (name,
    label, kind, choices) and the KIND picks the control - which is the

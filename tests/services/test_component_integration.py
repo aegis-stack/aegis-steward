@@ -150,7 +150,7 @@ class TestComponentIntegration:
 
         with patch("redis.asyncio.from_url") as mock_from_url:
             mock_redis = AsyncMock()
-            mock_redis.zcard.side_effect = Exception("Redis connection failed")
+            mock_redis.zrange.side_effect = Exception("Redis connection failed")
             mock_redis.get.side_effect = Exception("Redis connection failed")
             mock_from_url.return_value = mock_redis
 
@@ -176,11 +176,11 @@ class TestComponentIntegration:
         with patch("redis.asyncio.from_url") as mock_from_url:
             mock_redis = AsyncMock()
 
-            # Mock queue lengths
-            def mock_zcard(queue_name: str) -> int:
+            # Mock queue contents, none of it running
+            def mock_zrange(queue_name: str, start: int, end: int) -> list[bytes]:
                 if "load_test" in queue_name:
-                    return 5  # Some queued jobs
-                return 0  # Empty queues for media/system
+                    return [b"j1", b"j2", b"j3", b"j4", b"j5"]  # Some queued jobs
+                return []  # Empty queues for media/system
 
             # Mock health check data
             def mock_get(key: str) -> bytes | None:
@@ -191,7 +191,8 @@ class TestComponentIntegration:
                     )
                 return None  # No health check data for media/system
 
-            mock_redis.zcard.side_effect = mock_zcard
+            mock_redis.zrange.side_effect = mock_zrange
+            mock_redis.exists.return_value = 0
             mock_redis.get.side_effect = mock_get
             mock_from_url.return_value = mock_redis
 
@@ -220,6 +221,32 @@ class TestComponentIntegration:
             assert (
                 queue_sub_components["load_test"].status == ComponentStatusType.HEALTHY
             )
+
+    @pytest.mark.asyncio
+    async def test_running_jobs_are_not_counted_as_waiting(self) -> None:
+        """arq keeps a job in its queue's sorted set until it finishes, and
+        marks the running ones with an in-progress key."""
+        from arq.constants import in_progress_key_prefix
+
+        queued = [b"j1", b"j2", b"j3", b"j4", b"j5"]
+        running = {f"{in_progress_key_prefix}j{n}" for n in (1, 2, 3)}
+
+        with patch("redis.asyncio.from_url") as mock_from_url:
+            mock_redis = AsyncMock()
+            mock_redis.zrange.side_effect = lambda name, start, end: (
+                queued if "load_test" in name else []
+            )
+            mock_redis.exists.side_effect = lambda *keys: len(running & set(keys))
+            # One process's count, up to a refresh old: not what is running.
+            mock_redis.get.return_value = b"Mar-01 17:41:22 j_complete=0 j_ongoing=1"
+            mock_from_url.return_value = mock_redis
+
+            worker_status = await check_worker_health()
+
+        load_test = worker_status.sub_components["queues"].sub_components["load_test"]
+        assert load_test.metadata["queued_jobs"] == 2
+        assert load_test.metadata["jobs_ongoing"] == 3
+        assert "3 processing" in load_test.message
 
     @pytest.mark.asyncio
     async def test_system_metrics_high_thresholds(self) -> None:
@@ -270,6 +297,43 @@ class TestComponentIntegration:
             cpu_status = await _check_cpu_usage()
             assert cpu_status.healthy is False
             assert "CPU usage: 96.0%" in cpu_status.message
+
+    @pytest.mark.asyncio
+    async def test_the_hosts_figures_never_raise_the_server(self) -> None:
+        """The host's CPU, memory and disk are the machine's, not the app's:
+        they ride under the backend as their own checks, and the Server
+        stays as its own check says (a dot with no fault of its own read as
+        the app's)."""
+        from app.services.system.health import _health_checks
+        from app.services.system.health_probes import _system_metrics_cache
+
+        async def serving() -> ComponentStatus:
+            return ComponentStatus(name="backend", message="Serving")
+
+        full = type(
+            "MockMemory",
+            (),
+            {"percent": 95.0, "total": 8 * 1024**3, "available": 0.4 * 1024**3},
+        )()
+        before = _health_checks.get("backend")
+        register_health_check("backend", serving)
+        try:
+            # Read now, not from a figure an earlier test left cached.
+            with (
+                patch.dict(_system_metrics_cache, clear=True),
+                patch("psutil.virtual_memory", return_value=full),
+            ):
+                status = await get_system_status()
+        finally:
+            if before is None:
+                del _health_checks["backend"]
+            else:
+                _health_checks["backend"] = before
+        components = status.components["aegis"].sub_components["components"]
+        backend = components.sub_components["backend"]
+        assert backend.status == ComponentStatusType.HEALTHY
+        assert backend.message == "Serving"
+        assert backend.sub_components["memory"].healthy is False
 
     @pytest.mark.asyncio
     async def test_system_metrics_normal_thresholds(self) -> None:

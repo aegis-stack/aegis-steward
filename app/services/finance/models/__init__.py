@@ -36,9 +36,6 @@ from app.services.finance.models.categorization import (
     FinanceTag,
     FinanceTransactionTag,
 )
-from app.services.finance.models.changes import (
-    FinancePendingChange,
-)
 from app.services.finance.models.connections import (
     FinanceConnection,
     FinanceInstitution,
@@ -105,7 +102,6 @@ __all__ = [
     "FinanceMerchant",
     "FinanceMerchantAlias",
     "FinanceNetWorthSnapshot",
-    "FinancePendingChange",
     "FinancePlan",
     "FinanceRecurringStream",
     "FinanceRule",

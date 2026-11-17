@@ -8,15 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import dotenv_values
-import yaml
 
 from app.core.config import Settings
+from tests._compose import load_compose
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _compose(name: str) -> dict[str, Any]:
-    return yaml.safe_load((ROOT / name).read_text())
 
 
 def _labels(service: dict[str, Any]) -> dict[str, str]:
@@ -24,7 +20,7 @@ def _labels(service: dict[str, Any]) -> dict[str, str]:
 
 
 def test_the_load_test_worker_stays_off_the_server() -> None:
-    profiles = _compose("docker-compose.yml")["services"]["worker-load-test"][
+    profiles = load_compose("docker-compose.yml")["services"]["worker-load-test"][
         "profiles"
     ]
     assert "prod" not in profiles
@@ -34,7 +30,7 @@ def test_traefik_stays_off_the_laptop() -> None:
     """Dev reaches the webserver on its own port. Another stack's Traefik
     already holds 80 and 8080 on the laptop, so a dev Traefik would fail
     ``make serve``."""
-    services = _compose("docker-compose.yml")["services"]
+    services = load_compose("docker-compose.yml")["services"]
     assert services["traefik"]["profiles"] == ["prod"]
 
 
@@ -42,7 +38,7 @@ def test_the_socket_proxy_runs_wherever_the_webserver_does() -> None:
     """The deploy component is installed in dev too, so Overseer's
     container reads go through the proxy's socket there as well; without
     it every sample fails."""
-    services = _compose("docker-compose.yml")["services"]
+    services = load_compose("docker-compose.yml")["services"]
     assert services["socket-proxy"]["profiles"] == services["webserver"]["profiles"]
 
 
@@ -51,7 +47,7 @@ def test_traefik_refuses_an_upload_over_the_apps_largest_cap() -> None:
     so an allowed upload's multipart framing still fits. Only uploads go
     through it: the buffering middleware holds the whole response as well,
     which would stall every streamed one (chat, the live pages)."""
-    labels = _labels(_compose("docker-compose.prod.yml")["services"]["webserver"])
+    labels = _labels(load_compose("docker-compose.prod.yml")["services"]["webserver"])
     router = "traefik.http.routers.webserver-upload"
     assert "multipart/" in labels[f"{router}.rule"]
     middleware = labels[f"{router}.middlewares"]
@@ -69,7 +65,7 @@ def test_traefik_refuses_an_upload_over_the_apps_largest_cap() -> None:
 
 
 def test_every_router_answers_only_the_domain_over_tls() -> None:
-    labels = _labels(_compose("docker-compose.prod.yml")["services"]["webserver"])
+    labels = _labels(load_compose("docker-compose.prod.yml")["services"]["webserver"])
     routers = {key.split(".")[3] for key in labels if ".routers." in key}
     assert routers == {"webserver", "webserver-upload", "webserver-admin"}
     for router in routers:
@@ -81,21 +77,22 @@ def test_every_router_answers_only_the_domain_over_tls() -> None:
 
 def test_the_lets_encrypt_address_comes_from_the_env_not_the_repo() -> None:
     """The repo is public: Traefik's static file cannot read the environment,
-    so the address is written into it when the container starts."""
+    so the address is written into it when the container starts, and Traefik
+    refuses to start without one (not every compose command)."""
     assert "email: __ACME_EMAIL__" in (ROOT / "traefik/traefik.yml").read_text()
-    traefik = _compose("docker-compose.prod.yml")["services"]["traefik"]
-    assert any(
-        e.startswith("ACME_EMAIL=${ACME_EMAIL:?") for e in traefik["environment"]
-    )
-    assert "__ACME_EMAIL__" in " ".join(traefik["entrypoint"])
+    traefik = load_compose("docker-compose.prod.yml")["services"]["traefik"]
+    assert "ACME_EMAIL=${ACME_EMAIL:-}" in traefik["environment"]
+    entrypoint = " ".join(traefik["entrypoint"])
+    assert '[ -n "$$ACME_EMAIL" ] ||' in entrypoint
+    assert "__ACME_EMAIL__" in entrypoint
 
 
 def test_redis_needs_its_password_on_the_server() -> None:
     """Dev Redis stays open on loopback; the server's refuses to start
     without ``REDIS_PASSWORD``, and its health check signs in with it."""
-    redis = _compose("docker-compose.yml")["services"]["redis"]
+    redis = load_compose("docker-compose.yml")["services"]["redis"]
     assert "--requirepass" in redis["command"]
-    prod = _compose("docker-compose.prod.yml")["services"]["redis"]
+    prod = load_compose("docker-compose.prod.yml")["services"]["redis"]
     assert "REDISCLI_AUTH=${REDIS_PASSWORD:?" in " ".join(prod["environment"])
 
 
@@ -110,7 +107,7 @@ def test_the_deploy_env_template_is_a_server_behind_traefik() -> None:
     # Both follow DOMAIN in the app (``Settings._answer_on_the_domain``).
     assert "PUBLIC_BASE_URL" not in env and "ALLOWED_HOSTS" not in env
     assert env["REDIS_URL"] == f"redis://:{env['REDIS_PASSWORD']}@redis:6379"
-    (network,) = _compose("docker-compose.prod.yml")["networks"]["default"]["ipam"][
+    (network,) = load_compose("docker-compose.prod.yml")["networks"]["default"]["ipam"][
         "config"
     ]
     assert json.loads(env["TRUSTED_PROXIES"]) == [network["subnet"]]

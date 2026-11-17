@@ -1,0 +1,130 @@
+"""Building the agent for a turn (``_build_turn``): every context block a
+turn reads, gathered as the caller sees them, and the runnable made from
+them. A typed turn (``chat``, ``stream_chat``) and a live call
+(``realtime_calls``) both build her here, so each can do what the other
+can.
+"""
+
+import asyncio
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
+from typing import Any
+
+from app.services.ai.domains.chat.agent_loader import CODE_MODE_OVERRIDE, AgentConfig
+from app.services.ai.domains.chat.module_context import render_context_modules
+from app.services.ai.domains.chat.page_actions import on_page
+from app.services.ai.domains.chat.user_memory import (
+    build_user_memory_context,
+    memory_user,
+)
+from app.services.ai.models import Conversation
+from app.services.ai.service.prompt import PromptMixin, history_char_budget
+from app.services.system.node_now import right_now
+
+# Whether a turn in this context is told what is wrong right now. The eval
+# harness turns it off: a case is scored on its message, whatever the app's
+# health (or no webserver to ask) while it runs.
+HEARS_NOW: ContextVar[bool] = ContextVar("hears_now", default=True)
+
+
+@dataclass
+class TurnSetup:
+    """What ``_build_turn`` hands back: the turn, ready to run."""
+
+    conversation: Conversation
+    agent_config: Any
+
+    agent: Any = None
+    conversation_context: str = ""
+
+
+class TurnMixin(PromptMixin):
+    """The agent for a turn, typed or spoken."""
+
+    async def _build_turn(
+        self,
+        conversation: Conversation,
+        agent_config: AgentConfig,
+        *,
+        user_id: str,
+        subject: str | None = None,
+        owner_user_id: int | None = None,
+        admin: bool | None = None,
+    ) -> TurnSetup:
+        """The agent for ``conversation``, built from every context block
+        a turn reads, as the caller (``owner_user_id``, ``admin``) sees
+        them. A typed turn and a live call (``realtime_calls``) both build
+        her here, so each can do what the other can."""
+        # On a page that declares its parts, she may point at them.
+        agent_config = on_page(agent_config)
+        # A played script's turn is built in the mode it was recorded in.
+        if (code_mode := CODE_MODE_OVERRIDE.get()) is not None:
+            agent_config = replace(agent_config, code_mode=code_mode)
+        # What is wrong right now rides the message (``_system_prompt_for``
+        # says why), where she may read the app's health: the health tool
+        # granted, and no caller known not to be an admin. Read alongside
+        # the rest of the turn's context.
+        reads_health = (
+            "health" in agent_config.tool_names
+            and admin is not False
+            and HEARS_NOW.get()
+        )
+        wrong = asyncio.create_task(right_now()) if reads_health else None
+
+        # Guarded per-user memory block (saved via the save_memory tool)
+        known = await build_user_memory_context(user_id)
+        memory_context = known.memory
+
+        # History budget scales with the EFFECTIVE model for this
+        # request (the agent's pin wins over the active default).
+        from app.services.ai.domains.llm.catalog import context_window_for
+
+        effective_model = (
+            agent_config.model_id
+            if agent_config is not None and agent_config.model_id
+            else self.config.model
+        )
+        context_window = await context_window_for(effective_model)
+        history_budget = history_char_budget(context_window)
+
+        # Recorded readings, read with the facts from the user's one row:
+        # an extraction belongs to the user, not to the thread it was
+        # read in, so a new conversation opens still holding it.
+        readings = known.readings
+
+        # The agent row's context modules (e.g. the finance snapshot).
+        # LangChain's runtime takes neither: its prompt is the persona,
+        # the contexts and the history, clipped by message count.
+        # Rendered as the caller: the app map gives an admin the parts.
+        with memory_user(
+            user_id,
+            owner_user_id=owner_user_id,
+            agent_slug=agent_config.slug,
+            conversation_id=conversation.id,
+            subject=subject,
+            admin=admin,
+        ):
+            agent_modules_context = await render_context_modules(
+                agent_config.context_modules, user_id=user_id, subject=subject
+            )
+
+        # What this turn alone brings, beside the question
+        # (``PromptMixin._system_prompt_for``).
+        now = (await wrong).line() if wrong else None
+
+        agent, conversation_context = await self._prepare_agent_and_context(
+            conversation,
+            agent_config=agent_config,
+            memory_context=memory_context,
+            agent_modules_context=agent_modules_context,
+            history_budget=history_budget,
+            context_window=context_window,
+            readings=readings,
+            right_now=now,
+        )
+        return TurnSetup(
+            conversation=conversation,
+            agent_config=agent_config,
+            agent=agent,
+            conversation_context=conversation_context,
+        )

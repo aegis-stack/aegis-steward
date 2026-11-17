@@ -10,8 +10,8 @@ if TYPE_CHECKING:
     from .llm_org import LLMOrg
 
 
-# The voice rates, by column name: the sync copies these from the source
-# and a voice cost reads them, so both walk this one list.
+# The voice rates, by column name: the sync and the offline seed copy
+# these from the source catalog.
 VOICE_PRICE_FIELDS = (
     "input_cost_per_audio_token",
     "output_cost_per_audio_token",

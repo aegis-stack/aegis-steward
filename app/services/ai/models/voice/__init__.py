@@ -1,8 +1,9 @@
-"""Voice tables (``ai[voice]``): the voice profiles, the live-call engines
-and the speech ledgers. A package of their own."""
+"""Voice tables (``ai[voice]``): the voice profiles, the live-call
+engines and how terms are said. A package of their own, so ``ai_voice``
+owns their migration."""
 
 from .live_engine import LiveEngine
 from .profile import VoiceProfile
-from .usage import STTUsage, TTSUsage
+from .pronunciation import VoicePronunciation
 
-__all__ = ["LiveEngine", "STTUsage", "TTSUsage", "VoiceProfile"]
+__all__ = ["LiveEngine", "VoiceProfile", "VoicePronunciation"]

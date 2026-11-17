@@ -1,10 +1,5 @@
-/* Tailwind source entry.
- *
- * Compiled into static/dist/app.css by the Tailwind CLI (`make
- * build-static`, the dev watcher service, or the Docker css-build stage).
- * base.html loads the compiled output, never this file.
- */
-
+/* Tailwind and DaisyUI share one source of themes: tailwind.config.js reads
+   the files under web_frontend/themes/. */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -14,6 +9,10 @@
      layer only wires the shape and voice tokens each theme sets. */
   html {
     font-size: var(--aegis-scale);
+  }
+  /* A theme's body face (themes/*.json); titles take ``font-display``. */
+  body {
+    font-family: var(--aegis-font-body);
   }
   /* No rubber-band bounce past a page's ends (macOS, iOS): an app's
      surfaces stay put; a scroll inside one (a thread) stops at its edge. */
@@ -102,6 +101,7 @@
   }
   .caps {
     text-transform: var(--aegis-label-case);
+    letter-spacing: var(--aegis-label-tracking);
   }
 
   /* A chip: one of a row of exclusive choices (a time window, a month, a
@@ -177,10 +177,8 @@
   form:has([pattern]:invalid) [type="submit"] {
     @apply opacity-50 cursor-not-allowed pointer-events-none;
   }
-
-  /* The tile behind a brand favicon is light in EVERY theme: favicons are
-     drawn for their owner's background and plenty are near-black on
-     transparency, invisible on a dark surface (see layout.avatar). */
+  /* A brand mark's tile (the avatar macro): light in every theme, since
+     plenty of logos are dark on transparency. */
   .brand-tile {
     background-color: rgb(255 255 255 / 0.95);
   }
@@ -189,6 +187,17 @@
      themes turn that into a circle, which reads as a radio. */
   .checkbox {
     border-radius: calc(var(--rounded-btn) / 2);
+  }
+
+  /* A meeting's transcript line asked what it is about (the meetings
+     page's ask_about): shown on the line's hover or focus; while Illiana
+     answers, the slot her answer opens in says so. */
+  .ask-about {
+    @apply shrink-0 self-start pt-0.5 text-xs text-aegis-muted opacity-0 transition-opacity hover:text-aegis-teal focus:opacity-100 group-hover/line:opacity-100;
+  }
+  .about-slot.htmx-request::before {
+    @apply ml-12 block animate-pulse py-1 text-xs text-aegis-muted;
+    content: "Asking Illiana...";
   }
 
   /* Overseer (pages/overseer/**). */
@@ -242,13 +251,22 @@
   }
 
   /* An Overseer workspace that fills the page below its header down to the
-     viewport's edge, so only its own panes scroll (Chat, Code). From md up
+     viewport's edge, so only its own panes scroll. From md up
      the heights subtract the shell's top padding (py-7, lg:py-10) and the
      page header (6rem with its padding and margin), and the negative margin
      gives back the shell's bottom padding. Below md the menus stack above
      the content, so it takes most of a screen and the page scrolls to it. */
   .overseer-fill {
     @apply h-[80dvh] md:h-[calc(100dvh-8.5rem)] lg:h-[calc(100dvh-9.25rem)] md:-mb-7 lg:-mb-10 min-h-[24rem];
+  }
+
+  /* The map, at least the rest of the window (``.overseer-fill``'s sums,
+     plus its breadcrumb and overlay rows, 2rem and 2.5rem, and the shell's
+     bottom padding it keeps); taller when its nodes need it, and below md
+     its own height. Its nodes sit by share of its height, so it stretches
+     as one. */
+  .map-fill {
+    @apply md:min-h-[calc(100dvh-14.75rem)] lg:min-h-[calc(100dvh-16.25rem)];
   }
 
   /* A sidebar link, in either sidebar. The current page is marked by
@@ -264,7 +282,7 @@
      landing page's. Positions are % of the dial, set inline by the server;
      colours are the theme's teal, so every theme and mode draws it. */
   .clock {
-    @apply relative aspect-square w-full max-w-[470px] shrink-0 cursor-grab select-none rounded-full border border-aegis-teal/20 text-aegis-teal outline-none lg:max-w-[560px];
+    @apply relative aspect-square w-full max-w-[470px] shrink-0 cursor-grab select-none rounded-full border border-aegis-teal/20 text-aegis-teal outline-none 2xl:max-w-[560px];
     touch-action: none; /* drags turn the hand instead of scrolling the page */
     box-shadow: inset 0 0 90px color-mix(in oklab, currentColor 7%, transparent);
   }
@@ -364,20 +382,17 @@
   .sql-editor .cm-editor .cm-tooltip { @apply floating text-xs font-mono text-aegis-text; }
   .sql-editor .cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected] { @apply bg-aegis-teal/20 text-aegis-text; }
   .sql-editor .cm-editor .cm-completionDetail { @apply text-aegis-muted; }
-  /* ... and its statements' tabs (sql.js draws them). */
+  /* ... and its statements' tabs (sql.js draws them, each a .tab). */
   .sql-tab { @apply flex items-center gap-1.5 px-3 pt-1 cursor-pointer select-none; }
   .sql-tab-close { @apply invisible text-aegis-muted hover:text-aegis-text; }
   .sql-tab:hover .sql-tab-close, .sql-tab[aria-selected="true"] .sql-tab-close { @apply visible; }
   .sql-tab-new { @apply px-2 pt-1 pb-2 text-sm text-aegis-muted hover:text-aegis-teal; }
+  .sql-tab-name { @apply w-32 bg-transparent border-b border-aegis-teal text-sm text-aegis-text outline-none; }
   /* A tab (tab_item, tabbed; Query's statements): underlined in teal when
      it is the one shown. The :not()s match DaisyUI's own selected tab, so
      its white underline does not win. */
   .tab { @apply text-sm pb-2 -mb-px border-b-2 border-transparent whitespace-nowrap transition-colors text-aegis-muted hover:text-aegis-text; }
   .tab:is([aria-current="page"], [aria-selected="true"]):not(.tab-disabled):not([disabled]) { @apply text-aegis-text border-aegis-teal; }
-  /* A fold's mark (``fold_mark``, in its summary): turned while it is open. */
-  .fold-mark { @apply text-aegis-muted transition-transform; }
-  details[open] > summary .fold-mark { @apply rotate-90; }
-  .sql-tab-name { @apply w-32 bg-transparent border-b border-aegis-teal text-sm text-aegis-text outline-none; }
   /* A table's rows' headers (rows_table): each sorts them, the one sorted
      marked by its arrow (rows.js; on Rows, the server's order). */
   .rows-sort { @apply inline-flex items-center gap-1 hover:text-aegis-text; }
@@ -450,16 +465,20 @@
   /* Worker queues (Overseer > Worker > Overview), read left to right:
      jobs waiting (a pile of blocks), running (a cell per job it can run at
      once, lit while busy), done; then the backlog's line over time. */
-  .worker-flow { @apply grid gap-4 lg:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-start; }
+  /* Stacked below lg: Waiting across the card, Running and Done side by
+     side under it. The cells keep a small size at any width, not the
+     card's width over their count. */
+  .worker-flow { @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-start; }
+  .worker-flow > [data-waiting] { @apply sm:col-span-2 lg:col-span-1; }
   .worker-flow__arrow { @apply hidden self-center text-aegis-muted lg:block; }
   .worker-stage { @apply flex min-w-0 flex-col gap-2; }
   .worker-stage__head { @apply flex items-baseline justify-between gap-3 text-xxs caps text-aegis-muted; }
   .worker-stage__head strong { @apply text-2xl font-semibold normal-case tracking-normal tabular-nums text-aegis-text; }
   .worker-stage__note { @apply text-xxs tabular-nums text-aegis-muted; }
-  .worker-pile { @apply grid grid-cols-[repeat(20,minmax(0,1fr))] gap-1; }
+  .worker-pile { @apply grid grid-cols-[repeat(20,minmax(0,1.25rem))] gap-1; }
   .worker-pile > span { @apply aspect-square rounded-sm border border-aegis-border/50 bg-aegis-border/10 transition-colors duration-500; }
   .worker-pile > span[data-lit] { @apply border-aegis-text/40 bg-aegis-text/25; }
-  .worker-slots { @apply grid grid-cols-10 gap-1; }
+  .worker-slots { @apply grid grid-cols-[repeat(10,minmax(0,1.5rem))] gap-1; }
   .worker-slot { @apply aspect-square rounded-sm border border-aegis-border/60 bg-aegis-border/15 transition-colors duration-500; }
   .worker-slot[data-busy="true"] { @apply border-aegis-teal bg-aegis-teal/70 text-aegis-teal; animation: keyspace-live 2.4s ease-in-out infinite; }
   .worker-outcome, .worker-share { @apply flex h-2 w-full overflow-hidden rounded-full bg-aegis-border/30; }
@@ -476,21 +495,29 @@
      threshold, its sparkline and a map connection only warn and error; a
      map node and a log row's first cell take it on their border. */
   .toned { @apply text-aegis-text; }
-  .toned[data-tone="ok"] { @apply text-aegis-teal; }
+  /* A dot (``dot()``) takes the same tones by ``data-dot`` (it sits inside
+     a badge, which carries ``data-tone``); a dot with none is muted. */
+  [data-dot] { @apply text-aegis-muted; }
+  :is(.toned[data-tone="ok"], [data-dot="ok"]) { @apply text-aegis-teal; }
   .toned[data-tone="muted"] { @apply text-aegis-muted; }
-  :is(.toned, .tone, .spark, .map-link)[data-tone="warn"] { @apply text-aegis-amber; }
-  :is(.toned, .tone, .spark, .map-link)[data-tone="error"] { @apply text-aegis-error; }
+  :is(.toned[data-tone="accent"], [data-dot="accent"]) { @apply text-aegis-accent; }
+  :is(:is(.toned, .tone, .spark, .map-link)[data-tone="warn"], [data-dot="warn"]) { @apply text-aegis-amber; }
+  :is(:is(.toned, .tone, .spark, .map-link)[data-tone="error"], [data-dot="error"]) { @apply text-aegis-error; }
   /* An entry outlined in its tone: a map node, a home page card, a request flow step. */
   .tone-border { @apply border-aegis-border stroke-aegis-border; }
   .tone-border[data-tone="warn"] { @apply border-aegis-amber/70 stroke-aegis-amber/70; }
   .tone-border[data-tone="error"] { @apply border-aegis-error/70 stroke-aegis-error/70; }
-  /* Overseer's home cards, client side so a live frame keeps the choice:
-     trouble first, or only trouble. */
-  [data-order="trouble"] [data-card][data-tone="error"] { order: -2; }
-  [data-order="trouble"] [data-card][data-tone="warn"] { order: -1; }
-  [data-only="true"] [data-card]:not([data-tone="warn"], [data-tone="error"]) { display: none; }
-  .log-row[data-tone="warn"] > td:first-child { @apply border-l-aegis-amber; }
-  .log-row[data-tone="error"] > td:first-child { @apply border-l-aegis-error; }
+  /* A card a click acts on (``hover-card``), hovered where the click
+     lands: its border goes teal, whatever its tone. A fold lights only
+     while the pointer is on the header that opens it; a card the pointer
+     merely passes over carries no hover-card and stays as it is. After the
+     tones, so it wins over them. */
+  .hover-card { @apply transition-colors; }
+  .hover-card:not(details):hover,
+  .hover-card:has(> summary:hover) { @apply border-aegis-teal; }
+  /* A fold's mark (``fold_mark``, in its summary): turned while it is open. */
+  .fold-mark { @apply text-aegis-muted transition-transform; }
+  details[open] > summary .fold-mark { @apply rotate-90; }
   /* A map node under a heat (overseer_heat): filled in its tone, so the
      hot ones read across the room, a data shape's outline filled too. */
   [data-heat][data-tone="ok"] { @apply bg-aegis-teal/10; }
@@ -499,16 +526,34 @@
   [data-heat][data-tone="ok"] .map-shape { @apply fill-aegis-teal/10; }
   [data-heat][data-tone="warn"] .map-shape { @apply fill-aegis-amber/20; }
   [data-heat][data-tone="error"] .map-shape { @apply fill-aegis-error/25; }
+  /* Overseer's home cards, client side so a live frame keeps the choice:
+     trouble first, or only trouble. */
+  [data-order="trouble"] [data-card][data-tone="error"] { order: -2; }
+  [data-order="trouble"] [data-card][data-tone="warn"] { order: -1; }
+  [data-only="true"] [data-card]:not([data-tone="warn"], [data-tone="error"]) { display: none; }
+  /* A row read like a log line (Logs, a table's rows): a click opens it. */
+  .log-row { @apply border-t border-aegis-border/40 hover:bg-aegis-card align-top cursor-pointer; }
+  .log-row[data-tone="warn"] > td:first-child { @apply border-l-aegis-amber; }
+  .log-row[data-tone="error"] > td:first-child { @apply border-l-aegis-error; }
+  /* A line drawn small or between nodes: one stroke, in its colour. */
+  :is(.spark polyline, .map-link) { fill: none; stroke: currentColor; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .map-link { @apply text-aegis-teal opacity-60; }
+  /* Every hover hint's panel (popover_panel, the map's hints). */
+  .tooltip-panel { @apply bg-aegis-card border border-aegis-border rounded-lg shadow-lg text-xxs normal-case tracking-normal text-aegis-muted text-left; }
+  .map-link:is([data-tone="warn"], [data-tone="error"]) { @apply opacity-100; }
   /* A flagged line's hover target (opening its why): wider than it, unseen. */
   .map-hit { fill: none; stroke: transparent; stroke-width: 12; vector-effect: non-scaling-stroke; pointer-events: stroke; }
-  /* The map, at least the rest of the window (``.overseer-fill``'s sums,
-     plus its breadcrumb and overlay rows, 2rem and 2.5rem, and the shell's
-     bottom padding it keeps); taller when its nodes need it, and below md
-     its own height. Its nodes sit by share of its height, so it stretches
-     as one. */
-  .map-fill {
-    @apply md:min-h-[calc(100dvh-14.75rem)] lg:min-h-[calc(100dvh-16.25rem)];
-  }
+  .map-link[data-queued] { stroke-dasharray: 8 5; }
+  .map-link[data-key] { stroke-dasharray: 1 4; stroke-linecap: round; }
+  /* A data node's outline: its tone's stroke (inherited from .tone-border),
+     filled like a card so the lines behind it stop at its edge. */
+  .map-shape { @apply fill-aegis-card; stroke-width: 1; }
+  /* A tall data node, opened up: narrower, so it reads as a cylinder (the
+     Flow's columns are narrow already). */
+  [data-map]:not([data-across]) [data-tall] { max-width: 9rem; }
+  /* A map node hovered: what it is not joined to dims (app.js mapFocus). */
+  [data-map] :is([data-node], .map-link) { transition: opacity 150ms; }
+  [data-map] [data-dim] { opacity: 0.35; }  /* context, not disabled */
   /* The player (timeline.js, macros/player.html): what a step lights. A
      part running now is ringed in teal, the slowest held in amber and
      breathing, a failure flashing red, what ran before ringed softly;
@@ -528,33 +573,21 @@
      lit (off the plan), told apart from a queue's dashes at a glance. */
   .map-link[data-observed] { stroke-dasharray: 0 5; stroke-linecap: round; stroke-width: 2; }
   .map-link[data-observed]:not([data-play-state]) { @apply text-aegis-muted; }
+  /* A part named in the answer (mentions.js): lit on its card, still,
+     the rest stepping back; the name itself marked as one to point at. */
+  [data-card] [data-node][data-lit] { @apply ring-4 ring-aegis-teal; }
+  /* A part of the page an agent points at (``page_action``, chat.js). */
+  [data-page-target][data-lit] { @apply ring-4 ring-aegis-teal rounded-lg; }
+  [data-card] .map-link[data-lit] { @apply opacity-100; stroke-width: 2.5; }
+  [data-card]:has([data-lit]) :is([data-node], .map-link):not([data-lit]) { opacity: 0.3; }
+  [data-mention] { @apply cursor-pointer underline decoration-dotted decoration-aegis-teal/70 underline-offset-4 hover:text-aegis-teal focus:outline-none focus-visible:text-aegis-teal; }
   [data-play-chapter][aria-current] { @apply bg-aegis-teal/15 text-aegis-text; }  /* the scene showing */
   [data-play-scene]:not([hidden]) { animation: play-scene 0.5s ease-out; }  /* a scene fades in */
   [data-player]:not([data-playing]) [data-when-playing],
   [data-player][data-playing] [data-when-paused] { display: none; }
-  /* A line drawn small or between nodes: one stroke, in its colour. */
-  :is(.spark polyline, .map-link) { fill: none; stroke: currentColor; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-  .map-link { @apply text-aegis-teal opacity-60; }
-  /* Every hover hint's panel (popover_panel, the map's hints). */
-  .tooltip-panel { @apply bg-aegis-card border border-aegis-border rounded-lg shadow-lg text-xxs normal-case tracking-normal text-aegis-muted text-left; }
-  .map-link:is([data-tone="warn"], [data-tone="error"]) { @apply opacity-100; }
-  .map-link[data-queued] { stroke-dasharray: 8 5; }
-  .map-link[data-key] { stroke-dasharray: 1 4; stroke-linecap: round; }
-  /* A data node's outline: its tone's stroke (inherited from .tone-border),
-     filled like a card so the lines behind it stop at its edge. */
-  .map-shape { @apply fill-aegis-card; stroke-width: 1; }
-  /* A tall data node, opened up: narrower, so it reads as a cylinder (the
-     Flow's columns are narrow already). */
-  [data-map]:not([data-across]) [data-tall] { max-width: 9rem; }
-  /* A map node hovered: what it is not joined to dims (app.js mapFocus). */
-  [data-map] :is([data-node], .map-link) { transition: opacity 150ms; }
-  [data-map] [data-dim] { opacity: 0.35; }  /* context, not disabled */
   /* A log line on one line, cut at the edge; opened (a click) or wrapped
      (Wrap), whole, with its traceback. A volume bar stacks its tones. */
   .log-line { @apply truncate; }
-  :is(.logs-wrap, .log-row[data-open]) .log-line { @apply whitespace-normal break-all; }
-  /* What a row holds beyond its line (a trace; a table row's keys, the row under it) shows while it is open. */
-  .log-row:not([data-open]) .log-trace, .log-row:not([data-open]) + tr[data-links], :is(.logs-wrap, .log-row[data-open]) .log-trace-hint { @apply hidden; }
   /* A log line in the development console's colors: its level in its
      tone (``.toned``; info green), a message structlog wrote bold (its
      logger after it), its logger blue, each field's key cyan and value
@@ -564,6 +597,9 @@
   .log-line [data-logger] { @apply text-secondary; }
   .log-line [data-field-key] { @apply text-info; }
   .log-line [data-field-value] { color: var(--aegis-chart-5); }
+  :is(.logs-wrap, .log-row[data-open]) .log-line { @apply whitespace-normal break-all; }
+  /* What a row holds beyond its line (a trace; a statement, in place of its cut line; a table row's keys, the row under it) shows while it is open. */
+  .log-row:not([data-open]) .log-trace, .log-row:not([data-open]) + tr[data-links], :is(.logs-wrap, .log-row[data-open]) .log-trace-hint { @apply hidden; }
   .logs-wrap .log-row .log-trace { @apply block; }
   .volume-bar span { @apply block w-full bg-current; }
   .volume-bar span[data-tone="muted"] { @apply opacity-40; }
@@ -761,16 +797,25 @@
   50% { box-shadow: 0 0 16px 2px currentColor; }
 }
 
+/* The player's motion (see [data-play-state]): a running line's dash
+   travels; the slowest part breathes (clock-next); a failure flashes. Reduced motion
+   keeps the states and drops the motion. */
+@keyframes play-flow { to { stroke-dashoffset: -12; } }
+@keyframes play-flash { 50% { opacity: 0.4; } }
+@keyframes play-scene { from { opacity: 0; transform: scale(0.98); } }
+@media (prefers-reduced-motion: reduce) {
+  :is([data-play-state], [data-play-scene]) { animation: none !important; }
+}
+
 /* A key family the app is writing right now. */
 @keyframes keyspace-live {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
   50% { box-shadow: 0 0 14px 1px currentColor; }
 }
 
-/* One conditional for "there is none of this yet". An element that must
-   exist for an out-of-band swap to land (the pending-changes banner, a
-   count chip) renders with ``hidden`` at zero, and a display utility on
-   the same element would otherwise beat the browser's own rule for it. */
+/* One conditional for "not now": an element the page toggles with
+   ``hidden`` (the chat's Stop button, its jump button) must stay hidden
+   even when a display utility on it says otherwise. */
 [hidden] {
   display: none !important;
 }
@@ -838,21 +883,8 @@ html:not([data-assistant="hide"])
   @apply outline-none border-aegis-teal;
 }
 
-/* The band across a progress bar with no value (progress:indeterminate). */
-@keyframes aegis-sweep {
-  from { background-position: 100% 0; }
-  to { background-position: 0 0; }
-}
+/* A progress bar with no value (progress:indeterminate) holds still where
+   motion is reduced; its band's keyframes (aegis-sweep) are app.css's. */
 @media (prefers-reduced-motion: reduce) {
   progress:indeterminate { animation: none; background-position: 50% 0; }
-}
-
-/* The player's motion (see [data-play-state]): a running line's dash
-   travels; the slowest part breathes (clock-next); a failure flashes. Reduced motion
-   keeps the states and drops the motion. */
-@keyframes play-flow { to { stroke-dashoffset: -12; } }
-@keyframes play-flash { 50% { opacity: 0.4; } }
-@keyframes play-scene { from { opacity: 0; transform: scale(0.98); } }
-@media (prefers-reduced-motion: reduce) {
-  :is([data-play-state], [data-play-scene]) { animation: none !important; }
 }

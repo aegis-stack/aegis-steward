@@ -97,10 +97,5 @@
     </div>
   </div>
 </div>
-{# Steward's Illiana drawer, on its ``shell`` state (app.js) as the app shell
-   mounts it. On the AI page's Chat section the page IS the surface, so the
-   drawer empties and steps aside, as it does on the Chat page. #}
-<div x-data="shell('{{ chat_path }}', false, '{{ chat_path }}/drawer?surface=overseer')" x-init="$nextTick(() => settled())" @htmx:after-settle.window="settled()">
-  {% include "components/illiana_drawer.html" %}
-</div>
+{% if chat_path is defined %}{% include "components/chat_drawer.html" %}{% endif %}
 {% endblock %}

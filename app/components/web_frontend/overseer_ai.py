@@ -9,26 +9,22 @@ gives them a home. Registered only in projects with the AI service (see
 ``overseer_sections``).
 """
 
-from datetime import UTC, datetime, time
 from typing import Any
 
-from app.core import series
+from app.components.backend.api.ai.service import ai_service
+from app.core import ranges, series
 from app.core.config import settings
 from app.core.formatting import format_relative_time
-from app.services.ai.deps import ai_service
-from app.services.ai.domains.llm.llm_service import get_current_config
-from app.services.ai.domains.llm.provider_management import (
-    ProviderReadiness,
-    provider_readiness,
-)
+from app.services.ai.schemas import RecentActivity, UsageStatsResponse
+from app.services.ai.service import ProviderReadiness, provider_readiness
 from app.services.system.models import ComponentStatus
 
-from . import ranges
+from .chat_surface import HAS_VOICE, PERSISTED
 from .overseer_ai_common import (
+    HAS_EVALS,
     HAS_RAG,
-    HAS_VOICE,
-    PERSISTED,
     dollars,
+    get_current_config,
     label,
     mark_urls,
     per_million,
@@ -56,6 +52,7 @@ SECTIONS = (
         else ()
     ),
     *((("Voice", {"voice": "Voice"}),) if HAS_VOICE else ()),
+    *((("Evals", {"evals": "Evals"}),) if HAS_EVALS else ()),
     (
         "Configuration",
         ({"catalog": "Catalog"} if PERSISTED else {}) | {"providers": "Providers"},
@@ -162,44 +159,40 @@ def _provider_row(row: ProviderReadiness, icon_url: str | None) -> dict[str, Any
     }
 
 
-async def usage_stats(**window: Any) -> dict[str, Any]:
+async def usage_stats(**window: Any) -> UsageStatsResponse:
     """The usage ledger's totals (a persistence backend's service method)."""
     return await ai_service.get_usage_stats(**window)
 
 
-def _call(r: dict[str, Any], icon_url: str | None) -> dict[str, Any]:
-    ms = r.get("duration_ms")
+def _call(r: RecentActivity, icon_url: str | None) -> dict[str, Any]:
+    ms = r.duration_ms
     return {
-        "when": format_relative_time(r.get("timestamp")),
-        "model": r.get("model"),
+        "when": format_relative_time(r.timestamp),
+        "model": r.model,
         "icon_url": icon_url,
-        "action": r.get("action"),
-        "tokens": f"{r.get('input_tokens', 0):,} / {r.get('output_tokens', 0):,}",
+        "action": r.action,
+        "tokens": f"{r.input_tokens:,} / {r.output_tokens:,}",
         "outcome": status_cell("Ok", "ok")
-        if r.get("success", True)
+        if r.success
         else status_cell("Failed", "error"),
         "detail": [
-            ("Error", r.get("error_message")),
+            ("Error", r.error_message),
             ("Duration", f"{ms / 1000:.1f}s" if ms is not None else None),
-            ("Tool calls", r.get("tool_calls")),
-            ("Cache read", r.get("cache_read_tokens")),
-            ("Cache write", r.get("cache_write_tokens")),
-            ("User", r.get("user_id")),
-            ("At", r.get("timestamp")),
+            ("Tool calls", r.tool_calls),
+            ("Cache read", r.cache_read_tokens),
+            ("Cache write", r.cache_write_tokens),
+            ("User", r.user_id),
+            ("At", r.timestamp),
         ],
     }
 
 
 async def _usage(db: Any, query: dict[str, str]) -> dict[str, Any]:
     days = series.window_of(query.get("days"), ranges.WINDOWS, DEFAULT_DAYS)
-    start = ranges.since(days)
-    stats = await usage_stats(
-        start_time=datetime.combine(start, time.min, tzinfo=UTC) if start else None,
-        recent_limit=RECENT_CALLS,
-    )
+    stats = await usage_stats(start_time=ranges.start(days), recent_limit=RECENT_CALLS)
     # Each model's vendor, from the breakdown; the recent calls fall in the
     # same window, so it places them too. One lookup for both tables.
-    vendor_of = {m["model_id"]: m.get("vendor") for m in stats.get("models", [])}
+    vendor_of = {m.model_id: m.vendor for m in stats.models}
     marks = await mark_urls(db, {v: (v,) for v in set(vendor_of.values()) if v})
     icon_of = {model: marks.get(vendor or "") for model, vendor in vendor_of.items()}
     return {
@@ -207,49 +200,46 @@ async def _usage(db: Any, query: dict[str, str]) -> dict[str, Any]:
         "days": days,
         "usage_url": section_url("usage"),
         "figures": [
-            {"label": "Requests", "value": f"{stats.get('total_requests', 0):,}"},
+            {"label": "Requests", "value": f"{stats.total_requests:,}"},
             {
                 "label": "Tokens",
-                "value": f"{stats.get('total_tokens', 0):,}",
-                "caption": f"{stats.get('input_tokens', 0):,} in, "
-                f"{stats.get('output_tokens', 0):,} out",
+                "value": f"{stats.total_tokens:,}",
+                "caption": f"{stats.input_tokens:,} in, {stats.output_tokens:,} out",
             },
-            {"label": "Success rate", "value": f"{stats.get('success_rate', 100.0)}%"},
+            {"label": "Success rate", "value": f"{stats.success_rate}%"},
         ],
         "models": [
             {
-                "model": m.get("model_title") or m.get("model_id"),
-                "icon_url": icon_of.get(m.get("model_id")),
-                "vendor": label(m.get("vendor") or ""),
-                "requests": m.get("requests", 0),
-                "tokens": m.get("tokens", 0),
-                "share": f"{m.get('percentage', 0)}%",
+                "model": m.model_title or m.model_id,
+                "icon_url": icon_of.get(m.model_id),
+                "vendor": label(m.vendor),
+                "requests": m.requests,
+                "tokens": m.tokens,
+                "share": f"{m.percentage}%",
             }
-            for m in stats.get("models", [])
+            for m in stats.models
         ],
-        "recent": [
-            _call(r, icon_of.get(r.get("model")))
-            for r in stats.get("recent_activity", [])
-        ],
+        "recent": [_call(r, icon_of.get(r.model)) for r in stats.recent_activity],
     }
 
 
-async def sentiment_stats() -> dict[str, Any]:
-    """The sentiment job's tallies (a persistence backend's module)."""
-    from app.services.ai.domains.chat.sentiment import sentiment_stats as stats
+async def sentiment_stats(db: Any) -> Any:
+    """The sentiment job's tallies, a ``SentimentStats`` (a persistence
+    backend's module)."""
+    from app.services.ai.service import sentiment_stats as stats
 
-    return await stats()
+    return await stats(session=db)
 
 
-async def _sentiment() -> dict[str, Any]:
-    stats = await sentiment_stats()
-    spread = stats.get("distribution") or {}
+async def _sentiment(db: Any) -> dict[str, Any]:
+    stats = await sentiment_stats(db)
+    spread = stats.distribution
     return {
-        "enabled": stats.get("enabled", False),
-        "total": stats.get("total", 0),
+        "enabled": stats.enabled,
+        "total": stats.total,
         "figures": [
-            {"label": "Scored", "value": f"{stats.get('total', 0):,}"},
-            {"label": "Average score", "value": stats.get("average_score", 0.0)},
+            {"label": "Scored", "value": f"{stats.total:,}"},
+            {"label": "Average score", "value": stats.average_score},
             {
                 "label": "Negative",
                 "value": spread.get("negative", 0),
@@ -262,11 +252,8 @@ async def _sentiment() -> dict[str, Any]:
             [spread.get(s, 0) for s in SENTIMENTS],
         ),
         "negatives": [
-            {
-                "summary": n.get("summary"),
-                "when": format_relative_time(n.get("created_at")),
-            }
-            for n in stats.get("recent_negatives", [])
+            {"summary": n.summary, "when": format_relative_time(n.created_at)}
+            for n in stats.recent_negatives
         ],
     }
 
@@ -279,7 +266,7 @@ async def section_context(
     if section == "usage":
         return await _usage(req.db, dict(req.query))
     if section == "sentiment":
-        return await _sentiment()
+        return await _sentiment(req.db)
     if section == "costs":
         from . import overseer_ai_costs
 
@@ -299,15 +286,18 @@ async def section_context(
             return await overseer_ai_rag.knowledge_context(req.query)
         return await overseer_ai_rag.search_context()
     if section == "chat":
-        # Steward's chat surface, as the Chat page and the drawer mount it.
-        from .routes.chat import surface_context
+        from .chat_surface import surface_context
+        from .overseer_ai_chat import OVERSEER
 
-        context = await surface_context("overseer")
-        return context | {"section_subtitle": f"Ask {context['assistant']} anything"}
+        return await surface_context(OVERSEER)
     if section == "voice":
         from . import overseer_ai_voice
 
-        return await overseer_ai_voice.voice_context()
+        return await overseer_ai_voice.voice_context(req.db, req.query)
+    if section == "evals":
+        from . import overseer_ai_evals
+
+        return await overseer_ai_evals.evals_context(req.db, req.query)
     if section == "catalog":
         from . import overseer_ai_catalog
 

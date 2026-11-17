@@ -1,0 +1,59 @@
+"""The propose/approve queue's table (the rules live in ``queue``).
+
+Every resolution keeps its row: the queue IS the audit trail.
+
+The table started life as ``finance.finance_pending_change``; the
+revision that creates this one copies those rows over, ids included, so
+cards in old chat transcripts still resolve.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import JSON, CheckConstraint, Column, Index
+from sqlmodel import Field, SQLModel
+
+from app.core.time import utcnow
+
+
+class PendingChange(SQLModel, table=True):
+    """One proposed mutation, from proposal through resolution.
+
+    ``payload`` is the exact mutation the executor will run on approval -
+    the confirmation card renders THIS row, so what the user sees is what
+    executes, by construction. ``result`` records the execution outcome
+    (or refusal reason) for the audit trail.
+    """
+
+    __tablename__ = "pending_change"
+    __table_args__ = (
+        Index("ix_pending_change_owner", "owner_user_id"),
+        Index("ix_pending_change_status", "status"),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'expired')",
+            name="ck_pending_change_status",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    owner_user_id: int | None = Field(foreign_key="user.id", default=None)
+    change_type: str = Field(max_length=64)
+    payload: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column("payload", JSON, nullable=False)
+    )
+    # Who asked: agent slug + the conversation the proposal was made in,
+    # so the card can live inline and the audit names its author.
+    proposed_by_agent: str | None = Field(default=None, max_length=64)
+    conversation_id: str | None = Field(default=None, max_length=64)
+    # Rows proposed together share a batch id ("approve them all" is
+    # one decision over many auditable rows); NULL = a lone proposal.
+    batch_id: str | None = Field(default=None, max_length=36, index=True)
+    status: str = Field(default="pending", max_length=16)
+    result: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column("result", JSON, nullable=False)
+    )
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    resolved_at: datetime | None = Field(default=None)

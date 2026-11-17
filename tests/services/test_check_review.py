@@ -12,12 +12,8 @@ from typing import Any
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import list_changes, propose, revise
 from app.services.documents.domains.reading import check_card, checks
-from app.services.finance.domains.writes.queue import (
-    list_changes,
-    propose,
-    revise_fields,
-)
 from tests._session import opens
 
 
@@ -56,7 +52,7 @@ class TestTheCard:
         )
         assert change.id is not None
 
-        revised = await revise_fields(
+        revised = await revise(
             async_db_session, change.id, {"payee": "Sweet Scoop"}, owner_user_id=None
         )
 
@@ -65,7 +61,7 @@ class TestTheCard:
         assert revised.payload["front_key"] == "scans/front-1"
         assert revised.payload["transaction_id"] == 1
         with pytest.raises(ValueError, match="payee"):
-            await revise_fields(
+            await revise(
                 async_db_session, change.id, {"number": "9999"}, owner_user_id=None
             )
 
@@ -103,7 +99,9 @@ class TestOneDownloadOneBatch:
 
         batches = {
             c.batch_id
-            for c in await list_changes(async_db_session, status="pending")
+            for c in await list_changes(
+                async_db_session, status="pending", owner_user_id=None
+            )
             if c.change_type == checks.CHECK
         }
         assert len(batches) == 1 and None not in batches
@@ -116,12 +114,11 @@ class TestIllianaFixesAPayee:
     ) -> None:
         """ "It's Sweet Scoop" fixes the reader's cards that said Sweat Scoop,
         and leaves the one that read Dr. Molar alone."""
+        from app.core.tools import result_data
         from app.services.ai.domains.chat.user_memory import memory_user
-        from app.services.finance import ai_write_tools
+        from tests._change_queue import queue_tools_on
 
-        monkeypatch.setattr(
-            ai_write_tools, "get_async_session", opens(async_db_session)
-        )
+        tools = queue_tools_on(async_db_session, monkeypatch)
         for n, payee in ((1, "Sweat Scoop"), (2, "Sweat Scoop"), (3, "Dr. Molar")):
             await propose(
                 async_db_session,
@@ -133,14 +130,16 @@ class TestIllianaFixesAPayee:
         await async_db_session.commit()
 
         with memory_user("1", agent_slug="finance-assistant", conversation_id="c-1"):
-            result = await ai_write_tools.revise(
-                {"payee": "Sweet Scoop"}, about="Sweat Scoop"
+            result = result_data(
+                await tools.revise({"payee": "Sweet Scoop"}, about="Sweat Scoop")
             )
 
         assert len(result["revised"]) == 2
         payees = sorted(
             c.payload["payee"]
-            for c in await list_changes(async_db_session, status="pending")
+            for c in await list_changes(
+                async_db_session, status="pending", owner_user_id=None
+            )
             if c.change_type == checks.CHECK
         )
         assert payees == ["Dr. Molar", "Sweet Scoop", "Sweet Scoop"]

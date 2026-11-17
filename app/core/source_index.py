@@ -33,9 +33,10 @@ DECLARED_IN: dict[str, type[StrEnum]] = {
     e.__name__: e for e in (ComponentName, ServiceName, Category)
 }
 # Folders never read, nor shown on Overseer > Code: generated, installed or
-# holding data (hidden ones, ``.venv`` among them, never either).
+# holding data, a deploy backup's copy of the app among it (hidden ones,
+# ``.venv`` among them, never either).
 SKIPPED = frozenset(
-    {"__pycache__", "node_modules", "site-packages", "dist", "build", "data", "site"}
+    "__pycache__ node_modules site-packages dist build data site backups".split()
 )
 
 # A name's identity: its module (dotted), and the member it names there;
@@ -353,17 +354,18 @@ def within(module: str, package: str) -> bool:
     return module == package or module.startswith(f"{package}.")
 
 
-def at(root: Path, folder: str = "") -> Index:
-    """The Python files under ``root``'s ``folder`` (all of ``root``, given
-    none), named from ``root``; hidden and ``SKIPPED`` folders left out."""
-    paths = []
+def walk(root: Path, folder: str = "") -> Iterator[str]:
+    """Every file under ``root``'s ``folder`` (all of ``root``, given none),
+    named from ``root``; hidden and ``SKIPPED`` folders left out."""
     for here, folders, names in os.walk(root / folder):
         folders[:] = [f for f in folders if not f.startswith(".") and f not in SKIPPED]
         base = Path(here).relative_to(root).as_posix()
-        paths += [
-            n if base == "." else f"{base}/{n}" for n in names if n.endswith(".py")
-        ]
-    return Index(root, paths)
+        yield from (n if base == "." else f"{base}/{n}" for n in names)
+
+
+def at(root: Path, folder: str = "") -> Index:
+    """The Python files ``walk`` finds."""
+    return Index(root, [p for p in walk(root, folder) if p.endswith(".py")])
 
 
 @cache

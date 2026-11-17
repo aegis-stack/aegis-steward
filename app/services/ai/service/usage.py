@@ -8,19 +8,32 @@ also stripped without a database.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Integer, func
-from sqlmodel import select
-
 from app.core.db import get_async_session
 from app.core.log import logger
+from app.services.ai.domains.llm import queries
 
-# Single source of truth for LLM usage extraction / pricing / ledger writes.
-# ``usage_recording`` is a module (not the service) so worker and one-shot
-# callers can record without constructing ``ConversationManager``; the chat
-# path delegates to it so pricing lives in exactly one place.
+# Single source of truth for pricing and ledger writes. ``usage_recording``
+# is a module (not the service) so worker and one-shot callers can record
+# without constructing ``ConversationManager``; the chat path delegates to
+# it so pricing lives in exactly one place.
 from app.services.ai.domains.spend import recording as usage_recording
-from app.services.ai.models.llm import LargeLanguageModel, LLMOrg, LLMUsage
+from app.services.ai.schemas import (
+    ModelUsageStats,
+    RecentActivity,
+    UsageStatsResponse,
+    UsageTotals,
+)
 from app.services.ai.service.base import AIServiceBase
+
+# What an unreadable ledger reports: nothing used, nothing failed.
+_NO_USAGE = UsageTotals(
+    total_tokens=0,
+    input_tokens=0,
+    output_tokens=0,
+    total_cost=0.0,
+    total_requests=0,
+    success_rate=100.0,
+)
 
 
 class UsageMixin(AIServiceBase):
@@ -53,18 +66,14 @@ class UsageMixin(AIServiceBase):
         conversation_id: str | None = None,
         model: str | None = None,
     ) -> float:
-        """
-        Record LLM usage with cost calculation; returns the cost, so a
-        caller showing it needs no second price lookup. Never raises.
+        """Write one ledger row for this request, priced at ``model`` (the
+        one that answered; the global when not given); never raises.
+        Returns the cost, so a caller showing it needs no second lookup.
 
-        Args:
-            action: The action type (e.g., "chat:<agent>")
-            usage: Token usage dict with input_tokens and output_tokens
-            user_id: User identifier
-            success: Whether the request succeeded
-            error_message: Error message if request failed
+        ``duration_ms`` stays optional and defaults to None: a caller
+        that does not time itself must be distinguishable from one that
+        answered instantly, or the column's averages are fiction.
         """
-
         return await usage_recording.record_usage(
             action,
             model or self.config.model,
@@ -82,7 +91,7 @@ class UsageMixin(AIServiceBase):
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         recent_limit: int = 10,
-    ) -> dict[str, Any]:
+    ) -> UsageStatsResponse:
         """
         Get aggregated LLM usage statistics.
 
@@ -95,7 +104,7 @@ class UsageMixin(AIServiceBase):
             recent_limit: Number of recent activities to return
 
         Returns:
-            dict containing totals, model breakdown, and recent activity
+            The totals, the breakdown by model and the recent activity
         """
         try:
             async with get_async_session() as session:
@@ -109,23 +118,24 @@ class UsageMixin(AIServiceBase):
                     session, user_id, start_time, end_time, recent_limit
                 )
 
-                return {
-                    **totals,
-                    "models": models,
-                    "recent_activity": recent,
-                }
+                return UsageStatsResponse(
+                    **totals.model_dump(), models=models, recent_activity=recent
+                )
         except Exception as e:
             logger.error("Failed to get usage stats", error=str(e))
-            return {
-                "total_tokens": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_cost": 0.0,
-                "total_requests": 0,
-                "success_rate": 100.0,
-                "models": [],
-                "recent_activity": [],
-            }
+            return UsageStatsResponse(
+                **_NO_USAGE.model_dump(), models=[], recent_activity=[]
+            )
+
+    async def usage_totals(self) -> UsageTotals:
+        """The ledger's all-time totals alone, in one query: what a health
+        check reads, without the breakdown and recent calls."""
+        try:
+            async with get_async_session() as session:
+                return await self._get_usage_totals(session, None, None, None)
+        except Exception as e:
+            logger.error("Failed to get usage totals", error=str(e))
+            return _NO_USAGE
 
     async def _get_usage_totals(
         self,
@@ -133,18 +143,11 @@ class UsageMixin(AIServiceBase):
         user_id: str | None,
         start_time: datetime | None,
         end_time: datetime | None,
-    ) -> dict[str, Any]:
+    ) -> UsageTotals:
         """Get aggregated usage totals using SQL-level aggregations."""
-        stmt = select(
-            func.coalesce(func.sum(LLMUsage.input_tokens), 0).label("input_tokens"),
-            func.coalesce(func.sum(LLMUsage.output_tokens), 0).label("output_tokens"),
-            func.coalesce(func.sum(LLMUsage.total_cost), 0.0).label("total_cost"),
-            func.count(LLMUsage.id).label("total_requests"),
-            func.sum(func.cast(LLMUsage.success, Integer)).label("success_count"),
+        result = await queries.usage_totals(
+            session, user_id=user_id, start_time=start_time, end_time=end_time
         )
-
-        stmt = self._apply_usage_filters(stmt, user_id, start_time, end_time)
-        result = (await session.exec(stmt)).first()
 
         input_tokens = result.input_tokens if result else 0
         output_tokens = result.output_tokens if result else 0
@@ -155,14 +158,14 @@ class UsageMixin(AIServiceBase):
             (success_count / total_requests * 100) if total_requests > 0 else 100.0
         )
 
-        return {
-            "total_tokens": input_tokens + output_tokens,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_cost": float(result.total_cost) if result else 0.0,
-            "total_requests": total_requests,
-            "success_rate": round(success_rate, 1),
-        }
+        return UsageTotals(
+            total_tokens=input_tokens + output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_cost=float(result.total_cost) if result else 0.0,
+            total_requests=total_requests,
+            success_rate=round(success_rate, 1),
+        )
 
     async def _get_model_breakdown(
         self,
@@ -170,40 +173,14 @@ class UsageMixin(AIServiceBase):
         user_id: str | None,
         start_time: datetime | None,
         end_time: datetime | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[ModelUsageStats]:
         """Get usage breakdown by model using SQL GROUP BY.
 
         Uses LEFT JOIN to include orphan usage records (models not in catalog).
         """
-        stmt = (
-            select(
-                LLMUsage.model_id,
-                func.coalesce(LargeLanguageModel.title, LLMUsage.model_id).label(
-                    "title"
-                ),
-                func.coalesce(LLMOrg.name, "unknown").label("vendor"),
-                func.coalesce(LLMOrg.color, "#808080").label("vendor_color"),
-                func.count(LLMUsage.id).label("requests"),
-                func.coalesce(
-                    func.sum(LLMUsage.input_tokens + LLMUsage.output_tokens), 0
-                ).label("tokens"),
-                func.coalesce(func.sum(LLMUsage.total_cost), 0.0).label("cost"),
-            )
-            .outerjoin(
-                LargeLanguageModel, LLMUsage.model_id == LargeLanguageModel.model_id
-            )
-            .outerjoin(LLMOrg, LargeLanguageModel.served_by_org_id == LLMOrg.id)
-            .group_by(
-                LLMUsage.model_id,
-                LargeLanguageModel.title,
-                LLMOrg.name,
-                LLMOrg.color,
-            )
-            .order_by(func.count(LLMUsage.id).desc())
+        results = await queries.usage_by_model(
+            session, user_id=user_id, start_time=start_time, end_time=end_time
         )
-
-        stmt = self._apply_usage_filters(stmt, user_id, start_time, end_time)
-        results = (await session.exec(stmt)).all()
 
         # Calculate total requests for percentage
         total_requests = sum(r.requests for r in results) if results else 0
@@ -212,16 +189,16 @@ class UsageMixin(AIServiceBase):
         for r in results:
             pct = (r.requests / total_requests * 100) if total_requests > 0 else 0
             models.append(
-                {
-                    "model_id": r.model_id,
-                    "model_title": r.title,
-                    "vendor": r.vendor,
-                    "vendor_color": r.vendor_color,
-                    "requests": r.requests,
-                    "tokens": r.tokens,
-                    "cost": float(r.cost),
-                    "percentage": round(pct, 1),
-                }
+                ModelUsageStats(
+                    model_id=r.model_id,
+                    model_title=r.title,
+                    vendor=r.vendor,
+                    vendor_color=r.vendor_color,
+                    requests=r.requests,
+                    tokens=r.tokens,
+                    cost=float(r.cost),
+                    percentage=round(pct, 1),
+                )
             )
 
         return models
@@ -233,53 +210,34 @@ class UsageMixin(AIServiceBase):
         start_time: datetime | None,
         end_time: datetime | None,
         limit: int,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RecentActivity]:
         """Get recent usage activity with model info.
 
-        Uses LEFT JOIN to include orphan usage records (models not in catalog).
+        Newest first; orphan rows (models not in catalog) included.
         """
-        stmt = (
-            select(
-                LLMUsage.timestamp,
-                LLMUsage.model_id,
-                LLMUsage.input_tokens,
-                LLMUsage.output_tokens,
-                LLMUsage.total_cost,
-                LLMUsage.success,
-                LLMUsage.action,
-            )
-            .order_by(LLMUsage.timestamp.desc())
-            .limit(limit)
+        results = await queries.recent_usage(
+            session,
+            user_id=user_id,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
         )
 
-        stmt = self._apply_usage_filters(stmt, user_id, start_time, end_time)
-        results = (await session.exec(stmt)).all()
-
         return [
-            {
-                "timestamp": r.timestamp.isoformat(),
-                "model": r.model_id,
-                "input_tokens": r.input_tokens,
-                "output_tokens": r.output_tokens,
-                "cost": float(r.total_cost),
-                "success": r.success,
-                "action": r.action,
-            }
+            RecentActivity(
+                timestamp=r.timestamp.isoformat(),
+                model=r.model_id,
+                input_tokens=r.input_tokens,
+                output_tokens=r.output_tokens,
+                cost=float(r.total_cost),
+                success=r.success,
+                action=r.action,
+                duration_ms=r.duration_ms,
+                cache_read_tokens=r.cache_read_tokens,
+                cache_write_tokens=r.cache_write_tokens,
+                tool_calls=r.tool_calls,
+                user_id=r.user_id,
+                error_message=r.error_message,
+            )
             for r in results
         ]
-
-    def _apply_usage_filters(
-        self,
-        stmt: Any,
-        user_id: str | None,
-        start_time: datetime | None,
-        end_time: datetime | None,
-    ) -> Any:
-        """Apply common filters to usage queries."""
-        if user_id:
-            stmt = stmt.where(LLMUsage.user_id == user_id)
-        if start_time:
-            stmt = stmt.where(LLMUsage.timestamp >= start_time)
-        if end_time:
-            stmt = stmt.where(LLMUsage.timestamp <= end_time)
-        return stmt

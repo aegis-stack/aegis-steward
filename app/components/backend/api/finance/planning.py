@@ -112,7 +112,7 @@ async def delete_envelope(
     service: FinanceService = Depends(get_finance_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> None:
-    from app.services.finance.domains.planning.envelopes import envelope_metadata
+    from app.services.finance.service import envelope_metadata
 
     account = await service.get_account(account_id, owner_user_id=owner_user_id)
     if account is None or envelope_metadata(account.metadata_) is None:

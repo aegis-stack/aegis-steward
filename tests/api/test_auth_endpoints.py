@@ -390,7 +390,7 @@ class TestSessionCookie:
     is no manual bearer plumbing in the Flet path. These tests verify the
     *backend* contract that flow depends on:
 
-    1. Successful login / register sets the ``<project>_session`` cookie with
+    1. Successful login / register sets the session cookie with
        the right flags (HttpOnly, SameSite=Lax, path=/).
     2. ``/auth/logout`` deletes the cookie.
     3. Protected routes accept the cookie alone — no Authorization header.
@@ -461,7 +461,7 @@ class TestSessionCookie:
         response = async_client_with_db.post("/api/v1/auth/logout")
 
         assert response.status_code == status.HTTP_200_OK
-        # FastAPI's delete_cookie emits ``Set-Cookie: <project>_session="";
+        # FastAPI's delete_cookie emits ``Set-Cookie: <session>="";
         # Max-Age=0`` — TestClient interprets that as a cookie removal,
         # so the jar drops it.
         assert SESSION_COOKIE not in async_client_with_db.cookies

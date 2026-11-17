@@ -1,4 +1,4 @@
-"""Scheduled jobs for AI service."""
+"""Scheduled jobs for AI service, and the worker's jobs it starts."""
 
 from app.core.log import logger
 
@@ -12,12 +12,12 @@ async def sync_llm_catalog_job() -> None:
     from sqlmodel import Session
 
     from app.core.db import engine
-    from app.services.ai.domains.llm.etl import sync_llm_catalog
+    from app.services.ai.service import sync_llm_catalog
 
     try:
         with Session(engine) as session:
             # Hosted and local: a model pulled since the last run joins the
-            # catalog without anyone running ``llm sync --source ollama``.
+            # catalog without anyone running ``llm sync --source local``.
             result = await sync_llm_catalog(session, source="all")
             logger.info(
                 f"LLM catalog sync complete: "
@@ -39,7 +39,7 @@ async def analyze_sentiment_job() -> None:
         logger.debug("Sentiment analysis disabled; skipping job")
         return
 
-    from app.services.ai.domains.chat.sentiment import score_unscored_conversations
+    from app.services.ai.service import score_unscored_conversations
 
     try:
         counts = await score_unscored_conversations()
@@ -49,3 +49,46 @@ async def analyze_sentiment_job() -> None:
         )
     except Exception as e:
         logger.error(f"Sentiment job failed: {e}")
+
+
+async def read_photo_job(user_id: str, key: str, media_type: str, title: str) -> bool:
+    """A picture shared in chat (``read_photo_task``): its line in the
+    user's paste index, and what it showed read once and kept there.
+
+    On the worker, after the turn: the turn that carried the picture saw
+    its bytes, and every later one reads this with ``pasted``. No session
+    is held over the vision call. False when nothing new was read: read
+    before, its bytes gone, or no model that can see is in force."""
+    from app.core.db import get_async_session
+    from app.core.storage import get_storage
+    from app.services.ai.service import Paste, keep_paste, paste_id, read_picture
+
+    picture = Paste(id=paste_id(key), key=key, media_type=media_type, title=title)
+    async with get_async_session() as session:
+        picture = await keep_paste(session, user_id, picture)
+    image = None if picture.reading_key else await get_storage().get(key)
+    text = image and await read_picture(image, media_type)
+    if not text:
+        return False
+    reading_key = await get_storage().put(text.encode(), content_type="text/plain")
+    async with get_async_session() as session:
+        await keep_paste(
+            session, user_id, picture.model_copy(update={"reading_key": reading_key})
+        )
+    return True
+
+
+async def fold_conversation_job(conversation_id: str, upto: int) -> bool:
+    """A conversation's turns that left its history window, folded into its
+    running summary (``fold_conversation_task``, on every worker engine): a
+    model call, so never on the request path. The condensing holds no
+    session; only the write opens one. False when nothing was folded."""
+    from app.core.db import get_async_session
+    from app.services.ai.service import fold_conversation, write_summary
+
+    folded = await fold_conversation(conversation_id, upto)
+    written = False
+    if folded is not None:
+        async with get_async_session() as session:
+            written = await write_summary(session, conversation_id, folded)
+    return written

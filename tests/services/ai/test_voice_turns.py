@@ -111,7 +111,7 @@ async def test_a_spoken_turn_is_the_typed_turn(
     # test once sent both turns to it for real (2026-09-25, 67k tokens).
     monkeypatch.setattr(settings, "AI_PROVIDER", "ollama")
     monkeypatch.setattr(
-        "app.services.ai.domains.llm.agents._ollama_model",
+        "app.services.ai.domains.llm.agents._local_model",
         lambda config, settings: FunctionModel(stream_function=_stream),
     )
 
@@ -187,6 +187,7 @@ async def test_the_turn_carries_its_context_and_the_hint(
         "user_id": OWNER,
         "agent_slug": AGENT,
         "surface": SURFACE,
+        "owner_user_id": None,
     }
     assert stt.calls[0][0].prompt == "Illiana, Robin"
 

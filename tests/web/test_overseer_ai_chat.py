@@ -1,33 +1,52 @@
-"""The Overseer's chat: steward's one chat surface, shown as the AI page's
-Chat section and in the Illiana drawer beside every other Overseer page.
-Everything the surface does (turns, settling, history) is steward's chat
-routes and is covered in test_chat.py; this covers the Overseer mounting it.
+"""The Overseer's chat: one server-rendered surface, shown as the AI page's
+Chat section and in the drawer beside every other Overseer page. The
+server renders every bubble (history, a settled turn); chat.js and
+voice.js only drive the live seconds, through data hooks the markup
+carries."""
 
-It is still Illiana. What differs is how she behaves there: the default
-agent, which carries the system's own context (health, usage, the model
-catalog), and a history of its own.
-"""
-
+import asyncio
 import json
+from pathlib import Path
+import re
+from types import SimpleNamespace
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
-from app.components.web_frontend.routes import chat
-from app.services.ai.domains.chat.agent_loader import DEFAULT_AGENT_SLUG
+from app.components.web_frontend import chat_attachments, chat_surface
+from app.components.web_frontend.chat_surface import ChatSurface
+from app.components.web_frontend.overseer_ai_chat import OVERSEER
+from app.services.ai.domains.chat.attachments import composer
 from app.services.ai.models import (
     AIProvider,
     Conversation,
     ConversationMessage,
     MessageRole,
 )
-from app.services.finance.domains.detection.analyst.shared import STANDALONE_USER_ID
-from app.services.system.models import ComponentStatus
-from tests.web.dom import none, one, select, text
-from tests.web.overseer import sign_in, status_with
+from tests.web.dom import one, select, text, triggers
+from tests.web.overseer import AI, sign_in, status_with
+
+# An agent is a saved row: its drawer needs an AI persistence backend.
+persisted = pytest.mark.skipif(
+    not chat_surface.PERSISTED, reason="agents need an AI persistence backend"
+)
 
 PAGE = "/overseer/services/ai"
+CHAT = "/partials/overseer/ai/chat"
+# A realtime model a live call can run on.
+LIVE = "gemini-3.8-live"
+SCRIPTS = Path(chat_surface.__file__).parent / "static/js"
+
+TRACE = [{"tool": "search_docs", "args": '{"q": "aegis"}', "result": "3 hits"}]
+SHOT = {"key": "ab/cd.png", "media_type": "image/png", "name": "shot.png"}
+# A page pasted into an earlier question: a marker in the message, its
+# line on the message's metadata.
+NOTES = {"id": "ab12cd34", "title": "Release notes", "chars": 2400}
+NOTES_MARKER = '[pasted text #ab12cd34: Release notes - 2,400 characters. Read it with pasted("ab12cd34")]'
+# A page pasted now: past the threshold, its first line its name.
+PASTED = "Your Orders\n" + "\n".join(f"Order {n}: one item" for n in range(200))
 
 
 def _conversation() -> Conversation:
@@ -36,14 +55,19 @@ def _conversation() -> Conversation:
         title="Hello",
         provider=AIProvider.OLLAMA,
         model="llama3",
-        metadata={"user_id": STANDALONE_USER_ID},
+        metadata={"user_id": OVERSEER.user},
         messages=[
-            ConversationMessage(id="m1", role=MessageRole.USER, content="What is due?"),
+            ConversationMessage(
+                id="m1",
+                role=MessageRole.USER,
+                content=f"What is Aegis?\n\n{NOTES_MARKER}",
+                metadata={"attachments": [SHOT], "pastes": [NOTES]},
+            ),
             ConversationMessage(
                 id="m2",
                 role=MessageRole.ASSISTANT,
-                content="A **bill**.",
-                metadata={"model": "llama3", "provider": "ollama"},
+                content="A **stack**.",
+                metadata={"model": "llama3", "provider": "ollama", "tool_trace": TRACE},
             ),
         ],
     )
@@ -51,16 +75,25 @@ def _conversation() -> Conversation:
 
 @pytest.fixture
 def client(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    async def conversations(surface: str = chat.SURFACE) -> list[Conversation]:
-        return [_conversation()] if surface == "overseer" else []
+    stored = _conversation()
 
-    async def model_icons(messages: list) -> dict[str, str]:
-        return {}
+    async def conversations(chat: ChatSurface) -> list[Conversation]:
+        return [stored]
 
-    monkeypatch.setattr(chat, "_conversations", conversations)
-    monkeypatch.setattr(chat, "model_icons", model_icons)
-    ai = ComponentStatus(name="ai", message="AI", metadata={"engine": "pydantic-ai"})
-    sign_in(app, monkeypatch, status_with(services=[ai]))
+    async def find(chat: ChatSurface, conversation_id: str) -> Conversation | None:
+        return stored if conversation_id == stored.id else None
+
+    async def assistant_name(chat: ChatSurface) -> str:
+        return "Illiana"
+
+    async def provider_icons(providers: list[str]) -> dict[str, str]:
+        return {p: f"/icons/{p}" for p in providers}
+
+    monkeypatch.setattr(chat_surface, "conversations", conversations)
+    monkeypatch.setattr(chat_surface, "find_conversation", find)
+    monkeypatch.setattr(chat_surface, "assistant_name", assistant_name)
+    monkeypatch.setattr(chat_surface, "provider_icons", provider_icons)
+    sign_in(app, monkeypatch, status_with(services=[AI]))
     return TestClient(app)
 
 
@@ -74,63 +107,550 @@ def test_the_section_opens_on_the_latest_conversation(client: TestClient) -> Non
     html = _chat_page(client)
     bubbles = select(html, "#chat-thread [data-role]")
     assert [b.get("data-role") for b in bubbles] == ["user", "assistant"]
+    assert "What is Aegis?" in text(bubbles[0])
     assert one(bubbles[1], "[data-body] strong") is not None  # markdown, server-side
     assert one(html, "#chat-conversation").get("value") == "c1"
 
 
-def test_it_is_illiana_with_the_system_s_context(client: TestClient) -> None:
-    """One chat and one name; in the Overseer she runs as the default
-    agent, the one the stream hands health, usage and the catalog to, and
-    her threads here are the Overseer's own."""
+def test_cards_waiting_for_approval_sit_beside_the_thread(
+    client: TestClient,
+) -> None:
+    """On the stacks that ship the change queue, the surface carries the
+    review list, fetched each time it is opened, and while open, again on
+    every decision (``changes.RESOLVED``)."""
+    found = select(_chat_page(client), "[data-approvals] [hx-get]")
+    expected = ["/partials/changes"] if chat_surface.CARDS else []
+    assert [e.get("hx-get") for e in found] == expected
+    if chat_surface.CARDS:
+        triggers = [t.strip() for t in found[0].get("hx-trigger").split(", ")]
+        assert triggers == [
+            "toggle[target.open] from:closest details",
+            f"{chat_surface.CARDS.RESOLVED}[this.closest('details').open] from:body",
+        ]
+
+
+def test_the_assistant_is_the_agent_by_name(client: TestClient) -> None:
     html = _chat_page(client)
-    config = json.loads(one(html, "#chat").get("data-chat"))
-    assert config["defaults"] == {
-        "user_id": STANDALONE_USER_ID,
-        "agent_slug": DEFAULT_AGENT_SLUG,
-        "surface": "overseer",
-    }
-    assert config["urls"] == chat.CHAT_URLS
-    assert one(html, "form#chat-composer").get("hx-post") == chat.TURNS
-    placeholder = one(html, "#chat-composer textarea").get("placeholder")
-    assert placeholder == f"Message {chat.ASSISTANT_NAME}"
+    # Her rows and the live call's row template name her, the same.
+    names = {text(n) for n in select(html, "[data-role=assistant] [data-assistant]")}
+    assert names == {"Illiana"}
+    assert one(html, "#chat-composer textarea").get("placeholder") == "Message Illiana"
 
 
 def test_the_header_carries_the_chat_verbs(client: TestClient) -> None:
     header = one(_chat_page(client), "#app-content header")
-    assert f"Ask {chat.ASSISTANT_NAME} anything" in text(header)
-    assert select(header, f"[hx-get='{chat.CONVERSATIONS}/new']")
-    assert select(header, f"[hx-get='{chat.CONVERSATIONS}?surface=overseer']")
+    assert "Ask Illiana anything" in text(header)
+    assert select(header, "[hx-get$='/conversations/new']")
+    assert select(header, "[hx-get$='/conversations']")
 
 
 def test_one_surface_per_document(client: TestClient) -> None:
-    """The page is the surface; the drawer beside it stays empty, so the
-    ids the scripts look up answer for one element only."""
+    """The page is the surface; the drawer frame beside it stays empty, so
+    the ids the scripts look up by id answer for one element only."""
     html = _chat_page(client)
     assert len(select(html, "#chat")) == 1
-    assert len(one(html, "#illiana-body")) == 0
+    assert not select(html, "#chat-drawer-body > *")
 
 
-def test_other_pages_carry_steward_s_drawer(client: TestClient) -> None:
-    html = client.get(PAGE).text
-    none(html, "#chat")
-    none(html, "#chat-fab")  # no second drawer
-    drawer = f"{chat.SECTION.path}/drawer?surface=overseer"
-    shell = one(html, f"[x-data=\"shell('{chat.SECTION.path}', false, '{drawer}')\"]")
-    one(shell, "#illiana-fab")
-
-
-def test_the_overseer_drawer_and_history_are_the_overseer_s(
+def test_other_pages_carry_the_drawer_and_it_fetches_the_surface(
     client: TestClient,
 ) -> None:
-    drawer = client.get(f"{chat.SECTION.path}/drawer?surface=overseer").text
-    assert one(drawer, "#chat-conversation").get("value") == "c1"
-    config = json.loads(one(drawer, "#chat").get("data-chat"))
-    assert config["defaults"]["surface"] == "overseer"
-    history = client.get(f"{chat.CONVERSATIONS}?surface=overseer").text
-    assert "Hello" in history
-    assert "Hello" not in client.get(chat.CONVERSATIONS).text
+    html = client.get(PAGE).text
+    assert not select(html, "#chat")
+    assert one(html, "#chat-fab") is not None
+    drawer = client.get(f"{CHAT}/drawer").text
+    assert len(select(drawer, "#chat")) == 1
 
 
-def test_an_unknown_surface_is_not_found(client: TestClient) -> None:
-    assert client.get(f"{chat.CONVERSATIONS}?surface=nope").status_code == 404
-    assert client.get(f"{chat.SECTION.path}/drawer?surface=nope").status_code == 404
+def test_a_turn_appends_the_question_and_a_bubble_to_stream_into(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        f"{CHAT}/turns",
+        data={
+            "message": " hi there ",
+            "conversation_id": "c1",
+            "attachment_names": ["a.png"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    user = one(response.text, "[data-role=user]")
+    assert text(one(user, "[data-text]")) == "hi there"
+    assert "a.png" in text(one(user, "[data-attached]"))
+    stream = one(response.text, "[data-stream]")
+    assert stream.get("data-text") == "hi there"
+    assert stream.get("data-conversation-id") == "c1"
+    # Where a quiet stretch is named (the stream's ``waiting`` frames),
+    # hidden until there is one.
+    assert one(stream, "[data-busy] [data-waiting]").get("hidden") is not None
+
+
+def test_the_composer_takes_what_the_server_says(client: TestClient) -> None:
+    """Its types and limits are the server's (``attachments.composer``),
+    the same the request holds."""
+    html = _chat_page(client)
+    told = json.loads(one(html, "[data-chat]").get("data-chat"))["composer"]
+    assert told == composer()
+    assert one(html, "#chat-attach").get("accept") == ",".join(told["types"])
+
+
+@persisted
+@pytest.mark.parametrize("path", [f"{PAGE}/chat", f"{CHAT}/conversations/c1"])
+def test_a_pasted_page_in_a_question_is_a_chip(client: TestClient, path: str) -> None:
+    """The reader sees the question and a chip; the marker is the model's."""
+    user = one(client.get(path).text, "[data-role=user]")
+    assert text(one(user, "[data-text]")) == "What is Aegis?"
+    # Send again sends what was sent: the marker too.
+    assert user.get("data-sent") == f"What is Aegis?\n\n{NOTES_MARKER}"
+    chip = one(user, "[data-pastes] [data-paste]")
+    assert chip.get("data-paste") == "ab12cd34"
+    assert chip.get("hx-get") == f"{CHAT}/pastes/ab12cd34"
+    assert "Release notes" in text(chip) and "2,400" in text(chip)
+
+
+@persisted
+def test_a_page_pasted_now_is_lifted_and_opens_whole(
+    client: TestClient, files: object, app: FastAPI
+) -> None:
+    # The lift keeps the paste in a session of its own (``lifted_turn``):
+    # the chip's dialog reads it there too, not in the test's request one.
+    from app.core.db import get_async_db
+
+    app.dependency_overrides.pop(get_async_db, None)
+    response = client.post(f"{CHAT}/turns", data={"message": f"late?\n\n{PASTED}"})
+
+    user = one(response.text, "[data-role=user]")
+    assert text(one(user, "[data-text]")) == "late?"
+    chip = one(user, "[data-paste]")
+    sent = one(response.text, "[data-stream]").get("data-text")
+    assert PASTED not in sent
+    assert user.get("data-sent") == sent
+    assert sent.startswith(
+        f"late?\n\n[pasted text #{chip.get('data-paste')}: Your Orders"
+    )
+    opened = client.get(chip.get("hx-get")).text
+    # Shown as it was pasted, line for line.
+    assert one(opened, "[data-paste-text]").text_content() == PASTED
+    assert client.get(f"{CHAT}/pastes/nope").status_code == 404
+
+
+@persisted
+def test_the_composer_keeps_a_paste_and_gets_its_marker(
+    client: TestClient, files: object
+) -> None:
+    """Only the browser knows a paste was a paste: it hands it over as it
+    lands and puts the marker in the box."""
+    answer = client.post(f"{CHAT}/pastes", data={"text": PASTED})
+    assert answer.json()["marker"].startswith("[pasted text #")
+    assert client.post(f"{CHAT}/pastes", data={"text": " "}).status_code == 422
+
+
+def test_images_alone_are_a_turn_and_nothing_is_refused(client: TestClient) -> None:
+    images = client.post(f"{CHAT}/turns", data={"attachment_names": ["a.png"]})
+    assert one(images.text, "[data-stream]").get("data-text")
+    assert client.post(f"{CHAT}/turns", data={"message": "  "}).status_code == 422
+
+
+def test_a_settled_turn_is_the_servers_html(client: TestClient) -> None:
+    html = client.get(f"{CHAT}/messages/c1/m2").text
+    bubble = one(html, "[data-role=assistant]")
+    assert bubble.get("data-message-id") == "m2"
+    assert one(bubble, "[data-body] strong") is not None
+    # The copy button carries the markdown source, not the rendered HTML.
+    assert one(bubble, "button[data-copy]").get("data-copy") == "A **stack**."
+    assert "llama3" in text(one(bubble, "[data-footer]"))
+    assert one(bubble, "[data-model-icon] img").get("src") == "/icons/ollama"
+    assert client.get(f"{CHAT}/messages/c1/nope").status_code == 404
+    assert client.get(f"{CHAT}/messages/other/m2").status_code == 404
+
+
+def test_a_reply_is_made_an_eval_where_the_evals_are(client: TestClient) -> None:
+    """The Overseer's replies open the Evals' dialog, named by their id; a
+    question, and a mount with no evals, have no such action."""
+    from app.components.web_frontend.overseer_ai_common import HAS_EVALS, PARTIALS
+
+    made = select(_chat_page(client), "[data-make-eval]")
+
+    assert [m.get("hx-get") for m in made] == (
+        [f"{PARTIALS}/evals/cases/new?turn=m2"] if HAS_EVALS else []
+    )
+
+
+def test_a_reply_cut_off_at_the_limit_says_so(client: TestClient) -> None:
+    """Ending mid-sentence reads as a broken app; the bubble says it was the
+    token limit, and how many tokens that was."""
+    message = asyncio.run(chat_surface.conversations(OVERSEER))[0].messages[1]
+    message.metadata |= {"finish_reason": "length", "output_tokens": 1000}
+    note = one(client.get(f"{CHAT}/messages/c1/m2").text, "[data-cut-off]")
+    assert "1,000" in text(note)
+
+
+def test_the_note_names_the_configured_limit(client: TestClient) -> None:
+    """The agent's max_tokens is the limit; output tokens can fall short of it."""
+    message = asyncio.run(chat_surface.conversations(OVERSEER))[0].messages[1]
+    message.metadata |= {
+        "finish_reason": "length",
+        "output_tokens": 998,
+        "agent": {"slug": "assistant", "temperature": 0.7, "max_tokens": 1000},
+    }
+    note = one(client.get(f"{CHAT}/messages/c1/m2").text, "[data-cut-off]")
+    assert "1,000-token" in text(note)
+
+
+def test_a_finished_reply_has_no_cut_off_note(client: TestClient) -> None:
+    assert not select(client.get(f"{CHAT}/messages/c1/m2").text, "[data-cut-off]")
+
+
+AGENT_ROW = {
+    "slug": "assistant",
+    "name": "Illiana",
+    "description": None,
+    "category": None,
+    "model_id": None,
+    "temperature": 0.9,
+    "max_tokens": 4000,
+    "system_prompt": "You are Illiana.",
+    "is_active": True,
+}
+SNAPSHOT = {"slug": "assistant", "temperature": 0.7, "max_tokens": 1000}
+
+
+@pytest.fixture
+def agent_drawer(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    from app.components.web_frontend import overseer_ai_agents
+
+    async def agent_row(db: Any, slug: str) -> dict[str, Any] | None:
+        return AGENT_ROW if slug == "assistant" else None
+
+    monkeypatch.setattr(overseer_ai_agents, "agent_row", agent_row)
+    message = asyncio.run(chat_surface.conversations(OVERSEER))[0].messages[1]
+    message.metadata |= {"agent": SNAPSHOT}
+    return client
+
+
+@persisted
+def test_the_name_on_a_reply_opens_its_agent_in_the_drawer(client: TestClient) -> None:
+    """The side drawer the Agents page edits in, not the centered modal."""
+    name = one(client.get(f"{CHAT}/messages/c1/m2").text, "[data-assistant]")
+    assert name.get("hx-get") == f"{CHAT}/messages/c1/m2/agent"
+    assert name.get("hx-target") == "#drawer-body"
+
+
+@persisted
+def test_the_agent_drawer_shows_what_the_reply_used_above_the_editor(
+    agent_drawer: TestClient,
+) -> None:
+    html = agent_drawer.get(f"{CHAT}/messages/c1/m2/agent").text
+    used = text(one(html, "#chat-reply-used"))
+    assert "llama3" in used and "0.7" in used and "1,000" in used
+    form = one(html, "form[data-agent]")
+    assert one(form, "input[name=max_tokens]").get("value") == "4000"  # live value
+    assert one(form, "input[name=stay]") is not None
+
+
+@persisted
+def test_raise_max_tokens_lands_on_that_field(agent_drawer: TestClient) -> None:
+    html = agent_drawer.get(f"{CHAT}/messages/c1/m2/agent?focus=max_tokens").text
+    assert one(html, "input[name=max_tokens]").get("autofocus") is not None
+
+
+def test_a_cut_off_reply_offers_raise_and_continue(client: TestClient) -> None:
+    message = asyncio.run(chat_surface.conversations(OVERSEER))[0].messages[1]
+    message.metadata |= {"finish_reason": "length", "output_tokens": 1000}
+    note = one(client.get(f"{CHAT}/messages/c1/m2").text, "[data-cut-off]")
+    if chat_surface.PERSISTED:  # Raise opens the agent, a saved row
+        raise_button = one(note, "button[data-raise]")
+        assert (
+            raise_button.get("hx-get")
+            == f"{CHAT}/messages/c1/m2/agent?focus=max_tokens"
+        )
+        assert raise_button.get("hx-target") == "#drawer-body"
+    resume = one(note, "button[data-continue]")
+    assert resume.get("hx-post") == f"{CHAT}/turns"
+    assert '"conversation_id": "c1"' in resume.get("hx-vals")
+
+
+def test_a_stored_image_shows_in_its_question(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    thumb = one(_chat_page(client), "[data-role=user] [data-attachments] img")
+    assert thumb.get("src").startswith(f"{CHAT}/attachments/ab/cd.png")
+
+    async def read(key: str) -> bytes | None:
+        return b"PNG" if key == "ab/cd.png" else None
+
+    monkeypatch.setattr(chat_attachments, "read_attachment", read)
+    image = client.get(thumb.get("src"))
+    assert image.content == b"PNG" and image.headers["content-type"] == "image/png"
+    assert client.get(f"{CHAT}/attachments/zz/none.png").status_code == 404
+
+
+def test_a_tool_run_opens_with_what_it_did(client: TestClient) -> None:
+    html = client.get(f"{CHAT}/messages/c1/m2").text
+    row = one(html, "[data-trail] button")
+    run = client.get(row.get("hx-get")).text
+    assert "search_docs" in run and "3 hits" in run
+    assert client.get(f"{CHAT}/messages/c1/m2/runs/9").status_code == 404
+
+
+def test_history_loads_a_conversation_in_place(client: TestClient) -> None:
+    history = client.get(f"{CHAT}/conversations").text
+    pick = one(history, "[data-history] button")
+    assert pick.get("hx-target") == "#chat-thread"
+    loaded = client.get(pick.get("hx-get")).text
+    assert "What is Aegis?" in loaded
+    assert one(loaded, "#chat-conversation").get("hx-swap-oob") == "true"
+
+
+def test_a_new_conversation_is_an_empty_thread(client: TestClient) -> None:
+    html = client.get(f"{CHAT}/conversations/new").text
+    assert not select(html, "[data-role]")
+    assert one(html, "#chat-conversation").get("value") == ""
+
+
+def test_the_hooks_the_scripts_read_are_the_ones_the_markup_emits(
+    client: TestClient,
+) -> None:
+    """The scripts and the templates meet only at ids and data attributes;
+    a rename on one side must fail here, not in a browser."""
+    script = "".join((SCRIPTS / name).read_text() for name in ("chat.js", "voice.js"))
+    ids = set(re.findall(r"getElementById\('([\w-]+)'\)", script))
+    hooks = set(re.findall(r"\[(data-[\w-]+)[\]=]", script))
+    from app.components.web_frontend.rendering import templates
+
+    # A drawn card, and its loader, as an answer with a card emits them.
+    macros = templates.env.get_template("components/macros/chat.html").module
+    frames = templates.env.get_template("partials/chat/cards/_frame.html").module
+    pages = [
+        _chat_page(client),
+        client.post(f"{CHAT}/turns", data={"message": "hi"}).text,
+        str(macros.card_loader("/cards/x", "the chart")),
+        str(frames.card_frame("path", "A flow", None, "/cards/x", caller=lambda: "")),
+        client.get(f"{CHAT}/stage").text,  # a call, full screen
+    ]
+    optional = {"dialog", "dialog-body"}
+    if not chat_surface.HAS_VOICE:
+        optional |= {"chat-mic", "chat-mic-states", "data-speak", "data-state"}
+    # A live call needs voice and a database (profiles and engines are rows).
+    if not (chat_surface.HAS_VOICE and chat_surface.PERSISTED):
+        optional |= {
+            "chat-live",
+            "chat-call",
+            "chat-mute",
+            "chat-live-turn",
+            "chat-stage",
+            "chat-stage-front",
+            "chat-stage-strip",
+            "data-countdown",
+            "data-call-voice",
+            "data-call-thinking",
+        }
+    for element_id in ids - optional:
+        assert any(select(h, f"#{element_id}") for h in pages), element_id
+    for hook in hooks - optional:
+        assert any(select(h, f"[{hook}]") for h in pages), hook
+
+
+@persisted
+def test_the_composer_names_the_agent_and_opens_it(client: TestClient) -> None:
+    """Who answers here, first among the composer's chips: it opens the
+    agent's editor, where what she runs on is changed."""
+    from app.components.web_frontend.overseer_ai_agents import agent_drawer_url
+    from app.services.ai.domains.chat.agent_loader import DEFAULT_AGENT_SLUG
+
+    page = _chat_page(client)
+    chip = one(page, "#chat-composer #chat-agent")
+
+    assert chip.get("hx-get") == agent_drawer_url(DEFAULT_AGENT_SLUG)
+    assert text(chip) == text(one(page, "[data-composer-chips] [data-assistant]"))
+
+
+class TestModelPicker:
+    """The composer's model chip opens the picker: the models this install
+    can call, grouped by vendor, the recently used leading, one search."""
+
+    @pytest.fixture(autouse=True)
+    def catalog(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        if not chat_surface.PERSISTED:
+            pytest.skip("the picker reads the catalog")
+        from app.components.web_frontend import chat_models as models
+
+        switched: list[str] = []
+
+        async def catalog(mode: str = "chat") -> list[dict[str, Any]]:
+            if mode == "realtime":
+                return [{"model_id": LIVE, "title": "Gemini Live", "vendor": "google"}]
+            return [
+                {"model_id": "llama3", "title": "Llama 3", "vendor": "Ollama"},
+                {"model_id": "claude-x", "title": "Claude X", "vendor": "Anthropic"},
+            ]
+
+        async def running() -> str:
+            return switched[-1] if switched else "llama3"
+
+        async def recent() -> list[str]:
+            return ["claude-x"]
+
+        async def switch(model_id: str) -> str | None:
+            if model_id == "nope":
+                return "OpenAI has no API key. Set OPENAI_API_KEY in .env first."
+            switched.append(model_id)
+            return None
+
+        async def icons(listed: list[dict[str, Any]]) -> dict[str, str]:
+            vendors = {m.get("vendor") for m in listed}
+            return {"Anthropic": "/icons/Anthropic"} if "Anthropic" in vendors else {}
+
+        monkeypatch.setattr(models, "catalog", catalog)
+        monkeypatch.setattr(models, "running_model", running)
+        monkeypatch.setattr(models, "recent_ids", recent)
+        monkeypatch.setattr(models, "switch", switch)
+        monkeypatch.setattr(models, "vendor_icons", icons)
+        return switched
+
+    def test_the_chip_names_the_model_and_opens_the_picker(
+        self, client: TestClient
+    ) -> None:
+        loader = one(_chat_page(client), "#chat-model")
+        # Inside the composer, whose target is the thread: the loader must
+        # name its own, or its swap replaces the whole thread.
+        assert loader.get("hx-target") == "this"
+        chip = one(client.get(loader.get("hx-get")).text, "#chat-model")
+        assert text(one(chip, "[data-model]")) == "llama3"
+        picker = client.get(chip.get("hx-get")).text
+        assert one(picker, "#model-picker") is not None
+        rows = [b.get("data-model-id") for b in select(picker, "[data-model-id]")]
+        # The model in use and the recently used lead, then each vendor's group.
+        assert rows[:2] == ["llama3", "claude-x"]
+        assert sorted(rows[2:]) == ["claude-x", "llama3"]
+        # Each vendor wears its mark from the icon route, not inlined bytes.
+        header = one(picker, "details summary img")
+        assert header.get("src") == "/icons/Anthropic"
+        current = [b.get("data-model-id") for b in select(picker, "[aria-current]")]
+        assert set(current) == {"llama3"} and len(current) == 2  # leading and grouped
+
+    def test_a_search_narrows_to_one_flat_list(self, client: TestClient) -> None:
+        picker = client.get(f"{CHAT}/models", params={"q": "claude"}).text
+        assert [b.get("data-model-id") for b in select(picker, "[data-model-id]")] == [
+            "claude-x"
+        ]
+
+    def test_a_pick_switches_and_updates_the_chip(
+        self, client: TestClient, catalog: list[str]
+    ) -> None:
+        response = client.post(f"{CHAT}/models", data={"model_id": "claude-x"})
+        assert catalog == ["claude-x"]
+        chip = one(response.text, "#chat-model")
+        assert chip.get("hx-swap-oob") == "true"
+        assert text(one(chip, "[data-model]")) == "claude-x"
+
+    def test_it_holds_the_chat_models_only(self, client: TestClient) -> None:
+        """What a call runs on is picked with the voice (the Calls chip): one
+        list of one kind, so its one check says one thing."""
+        picker = client.get(f"{CHAT}/models").text
+
+        assert LIVE not in {
+            b.get("data-model-id") for b in select(picker, "[data-model-id]")
+        }
+        assert select(picker, "[data-filters]") == []
+
+    def test_a_refused_pick_says_why(self, client: TestClient) -> None:
+        response = client.post(f"{CHAT}/models", data={"model_id": "nope"})
+        toast = triggers(response)["toast"]
+        assert toast["tone"] == "error" and "OPENAI_API_KEY" in toast["text"]
+
+
+class TestVoice:
+    @pytest.fixture(autouse=True)
+    def voice(self) -> None:
+        if not chat_surface.HAS_VOICE:
+            pytest.skip("no voice in this stack")
+
+    def test_the_mic_transcribes_what_was_said(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.components.backend.api.ai import speech
+
+        async def transcribe(audio: Any, language: str | None = None) -> Any:
+            return SimpleNamespace(text="  what is aegis  ")
+
+        monkeypatch.setattr(speech, "transcribe_audio", transcribe)
+        mic = one(_chat_page(client), "#chat-mic")
+        response = client.post(
+            mic.get("data-transcripts"),
+            files={"audio": ("clip.webm", b"....", "audio/webm")},
+        )
+        assert response.json() == {"text": "what is aegis"}
+
+    def test_nothing_heard_says_so(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.components.backend.api.ai import speech
+
+        async def transcribe(audio: Any, language: str | None = None) -> Any:
+            return SimpleNamespace(text="  ")
+
+        monkeypatch.setattr(speech, "transcribe_audio", transcribe)
+        response = client.post(
+            f"{CHAT}/speech/transcripts",
+            files={"audio": ("clip.webm", b"....", "audio/webm")},
+        )
+        assert response.status_code == 422 and response.json()["error"]
+
+    def test_sentences_and_answers_are_said_aloud(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        said: list[str] = []
+
+        async def speak(text: str) -> Any:
+            said.append(text)
+            return SimpleNamespace(audio=b"MP3", media_type="audio/mpeg")
+
+        monkeypatch.setattr(chat_surface, "synthesize", speak)
+        mic = one(_chat_page(client), "#chat-mic")
+        sentence = client.get(mic.get("data-say"), params={"text": "Hello there."})
+        assert sentence.content == b"MP3"
+        answer = one(client.get(f"{CHAT}/messages/c1/m2").text, "[data-speak]")
+        assert client.get(answer.get("data-speak")).content == b"MP3"
+        assert said == ["Hello there.", "A stack."]
+
+
+def test_an_app_mounts_the_surface_again_for_its_own_agent(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same routes at an app's own path: its user's conversations, its
+    agent answering, its own guard, and every link on the surface pointing
+    back at that mount rather than the Overseer's."""
+    from app.components.web_frontend.routes.partials.chat_surface import chat_router
+
+    # Steward serves its own chat at /chat: this app mounts beside it.
+    mine = ChatSurface(path="/helper", user="7", surface="app", agent_slug="helper")
+    asked: list[ChatSurface] = []
+
+    async def conversations(chat: ChatSurface) -> list[Conversation]:
+        asked.append(chat)
+        return []
+
+    async def assistant_name(chat: ChatSurface) -> str:
+        return f"Agent {chat.agent_slug}"
+
+    async def allow() -> None:
+        return None
+
+    monkeypatch.setattr(chat_surface, "conversations", conversations)
+    monkeypatch.setattr(chat_surface, "assistant_name", assistant_name)
+    # The app is shared: the mount is gone after the test.
+    monkeypatch.setattr(app.router, "routes", list(app.router.routes))
+    app.include_router(chat_router(mine, allow))
+
+    html = TestClient(app).get("/helper/drawer").text
+
+    assert asked == [mine]
+    # The page names only its path, and what a turn may carry: who a turn
+    # is for is the mount's.
+    surface = json.loads(one(html, "[data-chat]").get("data-chat"))
+    assert surface == {"path": "/helper", "composer": composer()}
+    assert one(html, "form[hx-post]").get("hx-post") == "/helper/turns"
+    # The agent drawer is the Overseer's editor; this mount has none.
+    response = TestClient(app).get("/helper/messages/c1/m2/agent")
+    assert response.status_code == 404

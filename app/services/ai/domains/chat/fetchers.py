@@ -1,9 +1,9 @@
-"""Memory-module fetcher registry.
+"""Context-module fetcher registry.
 
-The dynamic half of memory modules: a ``memory_module`` row's
+The dynamic half of context modules: a ``context_module`` row's
 ``fetch_function`` names a fetcher registered here, and the context
 renderer runs it per request to pull live, per-user data into the
-prompt. Mirrors the tool registry (``tools.py``): the database decides
+prompt. Mirrors the tool registry (``app.core.tools``): the database decides
 WHICH fetchers a module uses; this module decides WHAT each name runs.
 
 Applications register their own domain fetchers at import time:
@@ -38,6 +38,9 @@ class FetchContext:
     user_id: str
     days_back: int | None = None
     session: Any | None = None
+    # What the turn is about (``current_subject``): a project's briefing
+    # reads its project here, as a user's reads ``user_id``.
+    subject: str | None = None
 
 
 FetcherFunc = Callable[[FetchContext], Awaitable[str | None]]

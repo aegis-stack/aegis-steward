@@ -269,10 +269,7 @@ async def _attach_holding_icons(db: AsyncSession, items: list[HoldingResponse]) 
     match; an unrecognized family is left ``None`` (initial-letter
     fallback) rather than risking a wrong guessed logo.
     """
-    from app.services.finance.domains.ledger.merchant_icon import (
-        fund_family_domain,
-        icons_for_names,
-    )
+    from app.services.finance.service import fund_family_domain, icons_for_names
 
     domains = {
         item.name: domain

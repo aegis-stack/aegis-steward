@@ -1,5 +1,5 @@
 """Reads for the chat domain: conversations and their messages, agent
-rows, memory modules, per-user memory, and sentiment verdicts.
+rows, context modules, per-user memory, and sentiment verdicts.
 
 Everything runs on an ``AsyncSession``: the conversation store is
 async like every other store, so nothing here waits on the event loop.
@@ -21,7 +21,8 @@ from app.services.ai.models.agents import (
     Agent,
     AgentPromptChange,
     AgentUserMemory,
-    MemoryModule,
+    ContextModule,
+    ContextModuleEntry,
 )
 from app.services.ai.models.conversation import ConversationStats
 from app.services.ai.models.sentiment import SentimentAnalysis
@@ -133,8 +134,7 @@ async def recent_conversations_for(
         .order_by(col(Conversation.updated_at).desc())
         .limit(limit)
     )
-    if since is not None:
-        stmt = stmt.where(col(Conversation.updated_at) >= since)
+    stmt = stmt.where(*within(col(Conversation.updated_at), since, None))
     return (await session.exec(stmt)).all()
 
 
@@ -241,7 +241,7 @@ async def recent_negative_sentiments(
     ).all()
 
 
-# --- Agents, memory modules, user memory (async) -----------------------
+# --- Agents, context modules, user memory (async) -----------------------
 
 
 async def agent_by_slug(session: AsyncSession, slug: str) -> Agent | None:
@@ -300,33 +300,72 @@ async def all_agents(session: AsyncSession) -> Sequence[Agent]:
     ).all()
 
 
-async def memory_module_by_slug(
+async def context_module_by_slug(
     session: AsyncSession, slug: str
-) -> MemoryModule | None:
+) -> ContextModule | None:
     return (
-        await session.exec(select(MemoryModule).where(MemoryModule.slug == slug))
+        await session.exec(select(ContextModule).where(ContextModule.slug == slug))
     ).first()
 
 
-async def memory_modules_by_priority(
+async def context_modules_by_priority(
     session: AsyncSession, *, active_only: bool = True
-) -> Sequence[MemoryModule]:
+) -> Sequence[ContextModule]:
     """Lowest priority number first - the order they render in."""
-    stmt = select(MemoryModule).order_by(MemoryModule.priority)  # type: ignore[arg-type]
+    stmt = select(ContextModule).order_by(ContextModule.priority)  # type: ignore[arg-type]
     if active_only:
-        stmt = stmt.where(MemoryModule.is_active)
+        stmt = stmt.where(ContextModule.is_active)
     return (await session.exec(stmt)).all()
 
 
-async def memory_modules_by_slugs(
+async def context_modules_by_slugs(
     session: AsyncSession, slugs: Iterable[str]
-) -> dict[str, MemoryModule]:
+) -> dict[str, ContextModule]:
     rows = (
         await session.exec(
-            select(MemoryModule).where(MemoryModule.slug.in_(list(slugs)))  # type: ignore[attr-defined]
+            select(ContextModule).where(ContextModule.slug.in_(list(slugs)))  # type: ignore[attr-defined]
         )
     ).all()
     return {module.slug: module for module in rows}
+
+
+async def context_entry(
+    session: AsyncSession, module_id: int, subject: str
+) -> ContextModuleEntry | None:
+    return (
+        await session.exec(
+            select(ContextModuleEntry).where(
+                ContextModuleEntry.module_id == module_id,
+                ContextModuleEntry.subject == subject,
+            )
+        )
+    ).first()
+
+
+async def context_entries_of(
+    session: AsyncSession, module_id: int
+) -> Sequence[ContextModuleEntry]:
+    """Every subject's entry in one module."""
+    return (
+        await session.exec(
+            select(ContextModuleEntry).where(ContextModuleEntry.module_id == module_id)
+        )
+    ).all()
+
+
+async def context_entries_for(
+    session: AsyncSession, module_ids: Iterable[int], subject: str
+) -> dict[int, str]:
+    """Each module's text for ``subject``, in one query: ``{module_id: text}``."""
+    rows = (
+        await session.exec(
+            select(ContextModuleEntry.module_id, ContextModuleEntry.content).where(
+                col(ContextModuleEntry.module_id).in_(list(module_ids)),
+                ContextModuleEntry.subject == subject,
+            )
+        )
+    ).all()
+    return dict(rows)
 
 
 async def user_memory_for(
@@ -337,3 +376,16 @@ async def user_memory_for(
             select(AgentUserMemory).where(AgentUserMemory.user_id == user_id)
         )
     ).first()
+
+
+async def user_memories_for(
+    session: AsyncSession, user_ids: Iterable[str]
+) -> Sequence[AgentUserMemory]:
+    """Each of ``user_ids``' memory rows that exists, in one query."""
+    return (
+        await session.exec(
+            select(AgentUserMemory).where(
+                col(AgentUserMemory.user_id).in_(list(user_ids))
+            )
+        )
+    ).all()

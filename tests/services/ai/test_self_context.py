@@ -18,28 +18,16 @@ from app.services.ai.domains.chat.self_context import (
     record_turn_context,
 )
 from app.services.ai.models import (
-    AIProvider,
     Conversation,
     MessageRole,
 )
-from app.services.ai.service.prompt import PromptMixin
+from tests.services.ai._threads import built as _build
+from tests.services.ai._threads import thread
 
 
 def _conversation(*sizes: int) -> Conversation:
     """A thread whose messages are the given lengths, oldest first."""
-    conversation = Conversation(id="c1", provider=AIProvider.OLLAMA, model="test-model")
-    for index, size in enumerate(sizes):
-        role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
-        conversation.add_message(role, "x" * size)
-    conversation.add_message(MessageRole.USER, "and now?")
-    return conversation
-
-
-def _build(conversation: Conversation, budget: int) -> str:
-    """The history builder, which reads nothing off ``self``."""
-    return PromptMixin._build_conversation_context(  # type: ignore[arg-type]
-        None, conversation, history_budget=budget
-    )
+    return thread(["x" * size for size in sizes], "and now?")
 
 
 class TestWhatFellOutIsCounted:
@@ -76,6 +64,121 @@ class TestWhatFellOutIsCounted:
 
         assert "NEWEST" in built
         assert "OLDEST" not in built
+
+
+# A reply that filed a card and ran a script: the trace entries
+# ``record_tool_call`` / ``record_tool_result`` keep on the message.
+_TRACE = [
+    {
+        "tool": "propose",
+        "args": '{"change_type": "rename", "title": "Rename it"}',
+        "result": '{"pending_change_id": "pc-7"}',
+        "component": {"kind": "pending_change", "pending_change_id": "pc-7"},
+    },
+    {
+        "tool": "run_code",
+        "code": "# what is left\nrows = await ledger(months=3)\nprint(len(rows))",
+        "nested": [{"tool": "ledger", "args": '{"months": 3}'}],
+        "result": "42",
+    },
+]
+
+
+def _replied(conversation: Conversation, text: str, trace: object) -> None:
+    conversation.add_message(
+        MessageRole.ASSISTANT, text, metadata={"tool_trace": trace}
+    )
+
+
+class TestWhatAReplyDid:
+    """History carried only a reply's words, and the sandbox resets every
+    turn: "try again" re-queried for the ids the last turn had in hand.
+    Each reply's steps ride ahead of its words."""
+
+    def test_a_replys_steps_ride_ahead_of_its_words(self) -> None:
+        conversation = _conversation(10)
+        _replied(conversation, "Filed it.", _TRACE)
+        conversation.add_message(MessageRole.USER, "try again")
+
+        built = _build(conversation, budget=10_000)
+
+        steps = (
+            'Assistant steps: propose({"change_type": "rename", "title": '
+            '"Rename it"}) -> card pc-7; run_code[ledger({"months": 3})] -> 42'
+        )
+        assert f"{steps}\nAssistant: Filed it." in built
+
+    def test_a_script_with_no_dispatches_reads_as_its_first_line(self) -> None:
+        from app.core.chat_transcript import steps_line
+
+        assert steps_line([{"tool": "run_code", "code": "# x\nprint(1)"}]) == (
+            "run_code[print(1)]"
+        )
+
+    def test_the_line_is_capped(self) -> None:
+        from app.core.chat_transcript import steps_line
+
+        huge = [{"tool": "lookup", "args": "y" * 5_000}] * 10
+
+        assert len(steps_line(huge)) <= 1_200
+
+    def test_a_reply_without_steps_is_its_words(self) -> None:
+        conversation = _conversation(10)
+        _replied(conversation, "Just words.", [])
+        conversation.add_message(MessageRole.USER, "ok")
+
+        assert "Assistant steps" not in _build(conversation, budget=10_000)
+
+    def test_an_older_replys_steps_hold_from_turn_to_turn(self) -> None:
+        """A prompt cache reuses what the last turn sent up to its first
+        changed byte: a steps line kept only for the newest replies would
+        change an older reply's line every turn."""
+        conversation = _conversation()
+        for turn in range(5):
+            conversation.messages[-1].content = f"question {turn}"
+            _replied(conversation, f"answer {turn}", _TRACE)
+            conversation.add_message(MessageRole.USER, "and now?")
+        before = _build(conversation, budget=50_000)
+
+        _replied(conversation, "answer 5", _TRACE)
+        conversation.add_message(MessageRole.USER, "and then?")
+        after = _build(conversation, budget=50_000)
+
+        history = before.rsplit("\n\nUser: and now?", 1)[0]
+        assert "Assistant steps" in history
+        assert after.startswith(history)
+
+
+class TestTheDays:
+    def test_a_line_reads_the_same_after_midnight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reply from an earlier day was dated against today: at midnight
+        every reply of the day gained a date, and the first turn after it
+        read the whole history afresh. A day is marked once, ahead of its
+        first message, from the messages alone."""
+        from datetime import UTC, datetime, timedelta
+
+        from app.core import time
+        from app.services.ai.service.prompt import history_lines
+
+        earlier = _conversation(10, 10, 10, 10).messages[:-1]
+        evening = datetime(2026, 11, 15, 22, tzinfo=UTC)
+        for hours, message in enumerate(earlier):  # 22:00 to 01:00
+            message.timestamp = evening + timedelta(hours=hours)
+
+        monkeypatch.setattr(time, "utcnow", lambda: datetime(2026, 11, 15, 23))
+        before = history_lines(earlier)
+        monkeypatch.setattr(time, "utcnow", lambda: datetime(2026, 11, 16, 9))
+        after = history_lines(earlier)
+
+        assert before == after
+        assert [("2026-11-15" in line, "2026-11-16" in line) for line in after] == [
+            (True, False),
+            (False, False),
+            (False, True),
+            (False, False),
+        ]
 
 
 class TestTheReport:
@@ -117,113 +220,19 @@ class TestTheReport:
 
 
 class TestTheAgentCanActuallyCallIt:
-    def test_the_chat_agent_is_granted_it(self) -> None:
-        from app.services.finance.domains.detection.analyst.seeds import (
-            FINANCE_CHAT_TOOL_NAMES,
-        )
-
-        assert "context" in FINANCE_CHAT_TOOL_NAMES
-
     def test_the_name_resolves_to_a_callable(self) -> None:
         """A granted name with no registered callable is skipped with a
-        warning, so the grant alone proves nothing."""
+        warning, so a grant alone proves nothing."""
         from app.services.ai.domains.chat.tools import resolve_tools
 
         assert len(resolve_tools(["context"])) == 1
 
+    def test_seeding_alone_registers_it(self) -> None:
+        """The registry only holds tools whose module was imported, and
+        seeding runs in processes that never build a chat agent."""
+        from app.core.tools import registered_tool_names
 
-class TestReadingsBelongToTheUser:
-    """Stored per conversation, twelve pages of extracted Amazon orders
-    were invisible the moment a new thread was opened, and recovering
-    them meant reading them back out of the database by hand."""
-
-    @pytest.mark.asyncio
-    async def test_a_reading_recorded_in_one_turn_is_there_for_the_next(
-        self,
-    ) -> None:
-        from app.services.ai.domains.chat.readings import (
-            merge_staged_readings,
-            user_readings,
-        )
-
-        reading = {"kind": "order", "title": "Amazon July 6", "items": [{"label": "x"}]}
-        await merge_staged_readings("reader-1", [reading])
-
-        assert await user_readings("reader-1") == [reading]
-
-    @pytest.mark.asyncio
-    async def test_one_user_never_sees_another_user_reading(self) -> None:
-        from app.services.ai.domains.chat.readings import (
-            merge_staged_readings,
-            user_readings,
-        )
-
-        await merge_staged_readings(
-            "reader-2",
-            [{"kind": "order", "title": "theirs", "items": [{"label": "x"}]}],
-        )
-
-        assert await user_readings("reader-3") == []
-
-    @pytest.mark.asyncio
-    async def test_the_oldest_drop_once_the_cap_is_reached(self) -> None:
-        """Readings are re-injected every turn, so the list is bounded."""
-        from app.services.ai.domains.chat.readings import (
-            _MAX_READINGS_PER_USER,
-            merge_staged_readings,
-            user_readings,
-        )
-
-        pages = [
-            {"kind": "order", "title": f"page {i}", "items": [{"label": "x"}]}
-            for i in range(_MAX_READINGS_PER_USER + 3)
-        ]
-        await merge_staged_readings("reader-4", pages)
-
-        kept = await user_readings("reader-4")
-        assert len(kept) == _MAX_READINGS_PER_USER
-        assert kept[0]["title"] == "page 3"
-
-    @pytest.mark.asyncio
-    async def test_an_in_flight_thread_keeps_what_it_already_read(self) -> None:
-        """Readings recorded before the store moved ride the first write
-        for a user who has none, so the cutover costs nobody their pages."""
-        from app.services.ai.domains.chat.readings import (
-            merge_staged_readings,
-            user_readings,
-        )
-
-        old = {"kind": "order", "title": "recorded earlier", "items": [{"label": "x"}]}
-        new = {"kind": "order", "title": "recorded now", "items": [{"label": "y"}]}
-
-        await merge_staged_readings("reader-5", [new], legacy=[old])
-
-        assert [r["title"] for r in await user_readings("reader-5")] == [
-            "recorded earlier",
-            "recorded now",
-        ]
-
-    @pytest.mark.asyncio
-    async def test_legacy_is_ignored_once_the_user_has_a_store(self) -> None:
-        """One home: the fallback exists for the cutover, not forever."""
-        from app.services.ai.domains.chat.readings import (
-            merge_staged_readings,
-            user_readings,
-        )
-
-        first = {"kind": "order", "title": "first", "items": [{"label": "x"}]}
-        await merge_staged_readings("reader-6", [first])
-
-        await merge_staged_readings(
-            "reader-6",
-            [{"kind": "order", "title": "second", "items": [{"label": "y"}]}],
-            legacy=[{"kind": "order", "title": "stale", "items": [{"label": "z"}]}],
-        )
-
-        assert [r["title"] for r in await user_readings("reader-6")] == [
-            "first",
-            "second",
-        ]
+        assert "context" in registered_tool_names()
 
 
 class TestItSurvivesWithoutATurn:

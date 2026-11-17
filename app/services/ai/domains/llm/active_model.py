@@ -184,16 +184,17 @@ async def sync_from_db(settings: Any) -> bool:
 async def config_for_active(
     settings: Any, agent: AgentSampling | None = None
 ) -> AIServiceConfig:
-    """The config for the selection in force, ``agent``'s sampling and
-    pinned model overlaid (``AIServiceConfig.for_agent``).
+    """The config for the selection actually in force, ``agent``'s sampling
+    and pinned model overlaid (``AIServiceConfig.for_agent``).
 
-    ``settings`` already carries it wherever a model runs: the webserver
-    applies a switch as it is made, and the worker reads the selection as
-    each job starts (``worker/queues/system.on_job_start``, #390). The
-    scheduler runs no model - it only enqueues.
+    The selection is a database row, and only the webserver re-reads it per
+    request. Anything headless - a worker task, a scheduled job - resolves
+    through here, or it runs on the .env bootstrap model while the dashboard
+    shows the model the user picked.
     """
     from app.services.ai.domains.llm.config import AIServiceConfig
 
+    await sync_from_db(settings)
     return AIServiceConfig.from_settings(settings).for_agent(agent)
 
 
@@ -213,7 +214,7 @@ async def agent_in_force(
 
 
 async def model_for_active(settings: Any) -> tuple[Any, str]:
-    """A model instance for the selection in force, and its name
+    """A model instance for the selection actually in force, and its name
     (``config_for_active``)."""
     from app.services.ai.domains.llm import providers
 

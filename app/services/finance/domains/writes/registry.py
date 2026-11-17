@@ -1,109 +1,78 @@
-"""The change-type registry: what the queue knows how to execute.
+"""Steward's change types, registered on the template's queue (``change_queue``).
 
-One entry per mutation kind. FW-06..09 grow by REGISTERING here - a
-payload contract, an executor, a describer - never by adding queue
-machinery. The payload model validates at propose time (a card the user
-cannot safely approve should never exist) and again at approve time
-(the world may have moved between the two).
+Steward's executors predate the queue's shape: ``execute`` answers a dict
+of what changed and ``describe`` reads one payload at a time.
+``finance_type`` takes one as written and hands the queue its own
+``ChangeExecutor``, so there is one queue, one registry and one approval
+path. On the way it runs every approval as the proposer's action in the
+transaction edit log (#325), a batch's cards as one action, and re-reads
+the unfiled documents a fact change may now explain (#409).
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+import functools
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.change_queue import ChangeDisplayRow, ChangeExecutor, approving
+
+Execute = Callable[[AsyncSession, Any, int | None], Awaitable[dict[str, Any]]]
+Describe = Callable[[AsyncSession, Any, int | None], Awaitable[list[ChangeDisplayRow]]]
 
 
-@dataclass(frozen=True)
-class ChangeExecutor:
-    """One kind of proposable mutation.
+class Executed(BaseModel):
+    """What an approval changed, as the executor said it: kept whole in the
+    row's ``result`` (the ids an announcement quotes back)."""
 
-    ``execute`` runs the REAL service mutation and returns an audit
-    summary; ``describe`` resolves the payload's ids into the typed
-    card rows the confirmation surface renders - system truth from the
-    database, never model-authored copy. Rows are ``ChangeDisplayRow``
-    end to end; they become plain dicts only at the freeze into the
-    audit column and at the tool-result boundary.
-    """
-
-    change_type: str
-    title: str
-    payload_model: type[BaseModel]
-    execute: Callable[[AsyncSession, Any, int | None], Awaitable[dict[str, Any]]]
-    describe: Callable[
-        [AsyncSession, Any, int | None], Awaitable[list[ChangeDisplayRow]]
-    ]
-    # Whether the person answering the card may put their own words on
-    # it first (``queue.revise``). A card off a From header says "Optum"
-    # because that is the domain; the reader knows it is Optum Financial.
-    # Off by default: a categorize is a yes/no, not a form.
-    editable: bool = False
-    # Work that needs the change COMMITTED first, run with its result
-    # once the approval lands (a filed photo's reading goes to the
-    # worker, which must find the new document row). Never fails an
-    # approval that already landed.
-    after_commit: Callable[[dict[str, Any]], Awaitable[None]] | None = None
-    # For an editable type, the fields that are a choice rather than
-    # free text: ``{"kind": PARTY_KINDS}`` draws a select.
-    choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    # For an editable type, the only fields that may be edited, where not
-    # every text field is the reader's to change: a check card's scans
-    # and row are the card's own, its payee is not (#420). Empty: every
-    # text field.
-    edits: tuple[str, ...] = ()
-    # Where the pictures a card shows live (storage keys, in the order its
-    # display marks rows ``scan``): a check's front, a photo, a combined
-    # document's pages (#439). None for a type that pictures nothing.
-    scan: Callable[[AsyncSession, Any, int | None], Awaitable[list[str]]] | None = None
+    model_config = ConfigDict(extra="allow")
 
 
-_EXECUTORS: dict[str, ChangeExecutor] = {}
-
-
-def register(executor: ChangeExecutor) -> ChangeExecutor:
-    """Add one change type. Double registration is a wiring bug, not a
-    merge - two executors silently fighting over one type is exactly
-    the ambiguity a confirmation queue cannot carry."""
-    if executor.change_type in _EXECUTORS:
-        raise ValueError(f"change type {executor.change_type!r} already registered")
-    _EXECUTORS[executor.change_type] = executor
-    return executor
-
-
-def executor_for(change_type: str) -> ChangeExecutor:
-    try:
-        return _EXECUTORS[change_type]
-    except KeyError:
-        raise ValueError(f"unknown change type: {change_type!r}") from None
-
-
-def current_payload(
-    executor: ChangeExecutor, payload: dict[str, Any]
-) -> dict[str, Any]:
-    """A stored card read through its contract, so one filed in an older
-    shape (a check's payee as a cited reading) edits as today's does."""
-    return executor.payload_model(**payload).model_dump(mode="json")
-
-
-def editable_fields(executor: ChangeExecutor) -> list[str]:
-    """The fields a person - or Illiana - may change on a pending card of
-    this type: ``edits`` where it names them, else every text field."""
-    if not executor.editable:
-        return []
-    texts = [
-        name
-        for name, info in executor.payload_model.model_fields.items()
-        if info.annotation in (str, str | None)
-    ]
-    return (
-        [name for name in texts if name in executor.edits] if executor.edits else texts
+def finance_type(
+    *, change_type: str, execute: Execute, describe: Describe, **options: Any
+) -> ChangeExecutor:
+    """The queue's ``ChangeExecutor`` for one of Steward's change types;
+    ``options`` are the rest of its fields (``title``, ``payload_model``,
+    ``editable``...)."""
+    return ChangeExecutor(
+        change_type=change_type,
+        execute=_logged(change_type, execute),
+        describe=_each(describe),
+        **options,
     )
 
 
-def registered_change_types() -> tuple[str, ...]:
-    return tuple(sorted(_EXECUTORS))
+def _logged(change_type: str, execute: Execute) -> Any:
+    @functools.wraps(execute)
+    async def run(
+        db: AsyncSession, payload: Any, owner_user_id: int | None
+    ) -> Executed:
+        from app.services.documents.service import filing
+        from app.services.finance.domains.ledger import changelog
+
+        row = approving.get()
+        actor = (row.proposed_by_agent if row else None) or "you"
+        # A batch's cards are one action, undone as one: they share its id.
+        with changelog.acting(actor, join=True, batch=row.batch_id if row else None):
+            result = await execute(db, payload, owner_user_id)
+        if change_type in filing.FACT_CHANGES:
+            # What just landed may be what an unfiled document prints.
+            await filing.reread_unfiled(db, owner_user_id=owner_user_id)
+        return Executed(**result)
+
+    return run
+
+
+def _each(describe: Describe) -> Any:
+    # ponytail: one describe per card, so a queue of N costs N reads of each
+    # type; give a type a list-based describe where a long queue is slow.
+    @functools.wraps(describe)
+    async def run(
+        db: AsyncSession, payloads: list[Any], owner_user_id: int | None
+    ) -> list[list[ChangeDisplayRow]]:
+        return [await describe(db, payload, owner_user_id) for payload in payloads]
+
+    return run

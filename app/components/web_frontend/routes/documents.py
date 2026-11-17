@@ -185,6 +185,11 @@ async def upload(
     return dialog_done(SECTION.path, f"Filed {document.title}")
 
 
+def reading_url(document_id: int) -> str:
+    """Where an approval card opens the paper it read (``document``)."""
+    return f"{SECTION.path}/{document_id}?reading=1"
+
+
 @router.get("/{document_id:int}", include_in_schema=False)
 async def document(
     request: Request, document_id: int, reading: bool = False

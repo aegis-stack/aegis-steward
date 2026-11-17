@@ -9,6 +9,7 @@ fine-tunes) name the repository they came from, so a re-upload points at
 its origin instead of claiming the model.
 """
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 import httpx
 from sqlmodel import Session
 
+from app.core.concurrency import fanout
 from app.core.log import logger
 from app.core.safe_fetch import BlockedAddressError, fetch_image
 from app.services.ai.domains.llm.etl import queries
@@ -29,6 +31,12 @@ _SEARCH_URL = "https://huggingface.co/api/models"
 _ORG_URL = "https://huggingface.co/api/organizations/{slug}/overview"
 _TIMEOUT = 8.0
 _CANDIDATES = 5
+# Lookups a sync runs at once: enough to hide the registry's latency, few
+# enough that it does not notice.
+_LOOKUPS = 8
+# An org's name and logo as one run read them, by slug: its models share
+# the read (``resolve_lab``).
+Orgs = dict[str, "asyncio.Task[tuple[str, str | None]]"]
 
 
 @dataclass(frozen=True)
@@ -107,8 +115,20 @@ async def _org_avatar(client: httpx.AsyncClient, url: str | None) -> str | None:
     return base64.b64encode(image).decode() if image else None
 
 
-async def resolve_lab(model_id: str) -> LabInfo | None:
-    """The lab that published a model, or None.
+async def _org(client: httpx.AsyncClient, slug: str) -> tuple[str, str | None]:
+    """An org's display name and logo (base64): its slug and no logo when
+    it has no overview."""
+    org = await client.get(_ORG_URL.format(slug=slug))
+    if org.status_code != 200:
+        return slug, None
+    payload = org.json()
+    display = str(payload.get("fullname") or slug)
+    return display, await _org_avatar(client, payload.get("avatarUrl"))
+
+
+async def resolve_lab(model_id: str, orgs: Orgs | None = None) -> LabInfo | None:
+    """The lab that published a model, or None. ``orgs`` is what this run
+    has read of each org, so a lab's models read its overview once.
 
     Network-bound and best-effort: a registry that is unreachable, a
     model nobody published, and an org without an overview all resolve
@@ -127,13 +147,10 @@ async def resolve_lab(model_id: str) -> LabInfo | None:
             if repo_id is None:
                 return None
             slug = repo_id.split("/")[0]
-            display, avatar_url = slug, None
-            org = await client.get(_ORG_URL.format(slug=slug))
-            if org.status_code == 200:
-                payload = org.json()
-                display = str(payload.get("fullname") or slug)
-                avatar_url = payload.get("avatarUrl")
-            icon_b64 = await _org_avatar(client, avatar_url)
+            known = {} if orgs is None else orgs
+            if slug not in known:
+                known[slug] = asyncio.ensure_future(_org(client, slug))
+            display, icon_b64 = await known[slug]
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         logger.warning(f"Lab lookup failed for {model_id}: {exc}")
         return None
@@ -161,8 +178,9 @@ async def attach_labs(session: Session, model_ids: list[str]) -> None:
     """Attach each model to the org that published it.
 
     One registry lookup per model that has no lab yet, so a re-sync
-    of an unchanged catalog costs nothing. A model the registry does
-    not know keeps a null lab - unmarked beats mislabelled.
+    of an unchanged catalog costs nothing, run a few at a time and each
+    org read once. A model the registry does not know keeps a null lab -
+    unmarked beats mislabelled.
 
     Every lookup runs before anything is written: a write left pending
     across a network call holds SQLite's lock - the one every other
@@ -173,8 +191,15 @@ async def attach_labs(session: Session, model_ids: list[str]) -> None:
     unlabelled = [
         models[i] for i in model_ids if i in models and models[i].made_by_org_id is None
     ]
-    found = [(model, await resolve_lab(model.model_id)) for model in unlabelled]
-    labs = [(model, info) for model, info in found if info is not None]
+    orgs: Orgs = {}
+    found = await fanout(
+        lambda model: resolve_lab(model.model_id, orgs), unlabelled, limit=_LOOKUPS
+    )
+    labs = [
+        (model, outcome.value)
+        for model, outcome in zip(unlabelled, found, strict=True)
+        if isinstance(outcome.value, LabInfo)
+    ]
     if not labs:
         return
     orgs = {org.slug: org for org in queries.all_rows(session, LLMOrg)}

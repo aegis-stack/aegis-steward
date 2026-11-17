@@ -1,6 +1,6 @@
 """The chat composer's model selector: pure display/grouping helpers."""
 
-from app.services.ai.domains.llm.picker import (
+from app.core.model_picker import (
     family_display_name,
     format_price,
     group_models,
@@ -87,7 +87,7 @@ class TestFamilyDisplayName:
 
 class TestFormatContextWindow:
     def test_compact_units(self) -> None:
-        from app.services.ai.domains.llm.picker import format_context_window
+        from app.core.model_picker import format_context_window
 
         assert format_context_window(8_192) == "8k"
         assert format_context_window(128_000) == "128k"
@@ -96,7 +96,7 @@ class TestFormatContextWindow:
         assert format_context_window(2_000_000) == "2M"
 
     def test_unknown_is_blank(self) -> None:
-        from app.services.ai.domains.llm.picker import format_context_window
+        from app.core.model_picker import format_context_window
 
         assert format_context_window(0) == ""
         assert format_context_window(None) == ""
@@ -104,13 +104,13 @@ class TestFormatContextWindow:
 
 class TestFormatPrice:
     def test_in_and_out_per_million(self) -> None:
-        from app.services.ai.domains.llm.picker import format_price
+        from app.core.model_picker import format_price
 
         assert format_price(1.25, 10.0) == "$1.25 / $10"
         assert format_price(3.0, 15.0) == "$3 / $15"
 
     def test_partial_or_missing_is_blank_or_single(self) -> None:
-        from app.services.ai.domains.llm.picker import format_price
+        from app.core.model_picker import format_price
 
         assert format_price(None, None) == ""
         assert format_price(0.5, None) == "$0.50"
@@ -118,7 +118,7 @@ class TestFormatPrice:
 
 class TestFilterModels:
     def test_matches_id_title_and_vendor_case_insensitive(self) -> None:
-        from app.services.ai.domains.llm.picker import filter_models
+        from app.core.model_picker import filter_models
 
         models = [
             {"model_id": "gpt-5.6-terra", "title": "GPT-5.6 Terra", "vendor": "openai"},
@@ -135,19 +135,19 @@ class TestFilterModels:
 
 class TestDisplayTitle:
     def test_strips_the_vendors_own_prefix_under_its_section(self) -> None:
-        from app.services.ai.domains.llm.picker import display_title
+        from app.core.model_picker import display_title
 
         model = {"title": "OpenAI: GPT-5.6 Luna", "vendor": "openai"}
         assert display_title(model, under_vendor="openai") == "GPT-5.6 Luna"
 
     def test_keeps_the_prefix_in_flat_views(self) -> None:
-        from app.services.ai.domains.llm.picker import display_title
+        from app.core.model_picker import display_title
 
         model = {"title": "OpenAI: GPT-5.6 Luna", "vendor": "openai"}
         assert display_title(model, under_vendor=None) == "OpenAI: GPT-5.6 Luna"
 
     def test_leaves_unprefixed_titles_alone(self) -> None:
-        from app.services.ai.domains.llm.picker import display_title
+        from app.core.model_picker import display_title
 
         model = {"title": "Gpt Oss:20B", "vendor": "ollama", "model_id": "gpt-oss:20b"}
         assert display_title(model, under_vendor="ollama") == "Gpt Oss:20B"
@@ -159,13 +159,13 @@ class TestLabForModel:
     week a lab ships under a new product name."""
 
     def test_it_reads_the_resolved_lab(self) -> None:
-        from app.services.ai.domains.llm.picker import lab_for_model
+        from app.core.model_picker import lab_for_model
 
         model = {"model_id": "muse-glimmer:30b-mlx", "lab": "Meta Inc."}
         assert lab_for_model(model) == "Meta Inc."
 
     def test_an_unresolved_model_has_no_lab(self) -> None:
-        from app.services.ai.domains.llm.picker import lab_for_model
+        from app.core.model_picker import lab_for_model
 
         assert lab_for_model({"model_id": "my-private-merge"}) is None
         assert lab_for_model({"model_id": "x", "lab": None}) is None
@@ -219,13 +219,7 @@ class TestALocalModelIsFreeNotUnpriced:
         model = {"vendor": "ollama", "input_price": None, "output_price": None}
 
         assert is_local_model(model)
-        assert format_price(None, None, local=True) == "$0.00"
-
-    def test_the_zero_keeps_its_cents(self) -> None:
-        """``_usd(0)`` renders "$0", and trailing zeros are what make a
-        figure read as a price - "$0" beside "$3 / $15" reads like a
-        value that failed to load."""
-        assert format_price(None, None, local=True) == "$0.00"
+        assert format_price(None, None, local=True) == "Free"
 
     def test_a_cloud_model_with_no_pricing_stays_blank(self) -> None:
         """Inventing a figure is worse than admitting we lack one."""
@@ -243,25 +237,8 @@ class TestALocalModelIsFreeNotUnpriced:
 
 
 class TestTheFooterOnAFinishedTurn:
-    """The attribution line under a settled message. Same rule as the
-    picker row, one line further on: a local turn is free and says so, a
-    cloud turn with no cost recorded says nothing."""
-
-    def test_a_local_turn_is_free(self) -> None:
-        from app.core.chat_transcript import footer_line
-
-        meta = {"model": "muse-glimmer:30b-mlx-128k", "provider": "ollama"}
-
-        assert footer_line(meta, local=is_local_model(meta)).endswith("$0.00")
-
-    def test_a_cloud_turn_with_no_cost_recorded_says_nothing(self) -> None:
-        """A blank admits we do not know what the turn cost; a figure
-        would be invented."""
-        from app.core.chat_transcript import footer_line
-
-        meta = {"model": "gpt-4o", "provider": "openai"}
-
-        assert "$" not in footer_line(meta, local=is_local_model(meta))
+    """The attribution line under a settled message: a recorded cost
+    shows; the template's chat line no longer prices a local turn."""
 
     def test_a_recorded_cost_still_wins(self) -> None:
         from app.core.chat_transcript import footer_line

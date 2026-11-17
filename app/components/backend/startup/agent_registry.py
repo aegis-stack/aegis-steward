@@ -2,7 +2,7 @@
 
 
 def seed_agent_registry() -> dict[str, int]:
-    """Seed the agent registry (agents, memory modules, tool rows).
+    """Seed the agent registry (agents, context modules, tool rows).
 
     Insert-if-missing (see ``app.core.seed``). Runs at startup because a
     grant is by NAME against a ``tool`` row - without the sync, an agent's

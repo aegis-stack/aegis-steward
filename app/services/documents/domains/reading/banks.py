@@ -37,6 +37,7 @@ async def propose_bank(
 
     Never moves a bank: an account held somewhere was said by somebody.
     """
+    from app.services.change_queue import propose
     from app.services.documents.domains.reading.asked import (
         already_asked,
         read_pages,
@@ -47,7 +48,7 @@ async def propose_bank(
         _sender,
     )
     from app.services.documents.service import DocumentService
-    from app.services.finance.service import account_by_id, propose
+    from app.services.finance.service import account_by_id
 
     document = await DocumentService(db).get(document_id)
     if document is None:

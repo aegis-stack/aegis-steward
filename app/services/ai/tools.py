@@ -1,12 +1,18 @@
-"""The AI service's tools, for ``app.core.tools.load_tools``: the cards a
-chat agent draws, the memory it keeps, what it reads about itself and the
-user, what the user pasted, and the web. Each registers where it is
-defined; this names them."""
+"""The AI service's tools, for ``app.core.tools.load_tools``: what a chat
+agent reads about itself and the user (``readings``, ``self_context``),
+what it does on the page the chat is on (``page_actions``),
+what it knows (``knowledge``, with RAG), the web (``web_tools``) and, with
+a database behind it,
+the cards it draws, the memory it keeps, what a shared picture showed
+(``pastes``), the model catalog and, with the evals, their datasets and
+runs (``evals``). Each
+registers where it is defined; this names them."""
 
 import app.services.ai.domains.chat.cards  # noqa: F401
 import app.services.ai.domains.chat.memory_tools  # noqa: F401
+import app.services.ai.domains.chat.page_actions  # noqa: F401
 import app.services.ai.domains.chat.pastes  # noqa: F401
 import app.services.ai.domains.chat.readings  # noqa: F401
 import app.services.ai.domains.chat.self_context  # noqa: F401
-import app.services.ai.domains.chat.user_memory  # noqa: F401
 import app.services.ai.domains.chat.web_tools  # noqa: F401
+import app.services.ai.domains.llm.catalog  # noqa: F401

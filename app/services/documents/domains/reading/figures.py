@@ -168,7 +168,8 @@ async def propose_figure(
     accounts propose nothing - a fact is about SOMEBODY, and a card
     asking whose this is would be a question rather than a proposal.
     """
-    from app.services.finance.service import get_subject, propose
+    from app.services.change_queue import propose
+    from app.services.finance.service import get_subject
     from app.services.matters.service import PartyService
 
     if await asked(db, FIGURE, document_id):

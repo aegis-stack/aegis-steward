@@ -11,16 +11,18 @@ the rules are findings."""
 import ast
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from functools import cache, cached_property
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
 from app.core import source_index
+from app.core.concurrency import once
 from app.core.ontology import Kind, current
 from app.core.ontology.model import node_id, parse_node_id
 from app.core.ontology.parts import node_of, service_folders
 from app.core.source_index import Index, Module, within
-from app.services.system import pattern_findings, patterns
+from app.services.system import facade_reach, pattern_findings, patterns
+from app.services.system.facade_reach import DOMAINS, Import
 from app.services.system.file_budget import (
     DECLARATION_LINES,
     LOGIC_LINES,
@@ -47,11 +49,10 @@ MODELS_ELSEWHERE = {
 DATABASE = ("sqlmodel", "sqlalchemy")
 # A service's top-level files as the standard names them, each the piece it
 # is opened up (``service_pieces``): its title, and its lane, the way a call
-# goes (in, wiring, the facade, its data; health a probe beside;
-# constants, schemas and a settings mixin, declarations imported from
-# every lane, on the rail above them all). The package its subsystems
-# live in makes a piece of each too; any other top-level module is a
-# subsystem left loose.
+# goes (in, wiring, the facade, its data; health a probe beside; constants,
+# schemas and a settings mixin, declarations imported from every lane, on
+# the rail above them all). The package its subsystems live in makes a
+# piece of each too; any other top-level module is a subsystem left loose.
 ROUTER = "Router"
 PIECES = {
     "service": ("Facade", "facade"),
@@ -69,14 +70,11 @@ PIECES = {
     "tools": ("Tools", "entry"),
     "change_types": ("Change types", "entry"),
     "sources": ("Sources", "entry"),  # research sources a plugin registers
+    "overseer": ("Overseer", "entry"),  # its own page (app.core.overseer_pages)
     # What it talks to (providers, file formats, collectors): logic, drawn
     # with the domains, a package of its own so what it knows stays apart.
     "adapters": ("Adapters", "domains"),
 }
-DOMAINS = "domains"
-# What a service keeps to itself: another service importing one reaches
-# past its facade (service.py; its schemas and deps are public too).
-INTERNALS = frozenset({DOMAINS, "adapters", "queries", "models"})
 
 
 def is_health(word: str) -> bool:
@@ -222,23 +220,27 @@ class Folder:
 
     @cached_property
     def reaching(self) -> list[str]:
-        """Each line importing another service's ``INTERNALS``: one line
-        once, however many names it imports."""
-        found = {
-            (m.path, min(m.uses.get((local,), (1,))))
-            for m in [*self.modules, *self.routers]
-            for local, (source, member) in m.imported.items()
-            if self._internal(f"{source}.{member}" if member else source)
-        }
-        order = {m.path: n for n, m in enumerate([*self.modules, *self.routers])}
-        return [f"{p}:{n}" for p, n in sorted(found, key=lambda f: (order[f[0]], f[1]))]
+        return facade_reach.reaching(
+            [*self.modules, *self.routers], self.services, self.service
+        )
 
-    def _internal(self, module: str) -> bool:
-        words = module.split(".")
-        if self.service is None or words[:2] != ["app", "services"]:
-            return False
-        theirs = self.services.get(words[2]) if len(words) > 3 else None
-        return theirs not in (None, self.service) and words[3] in INTERNALS
+    @cached_property
+    def skips(self) -> list[Import]:
+        """Its own ways in importing its internals (``facade_reach.skips``):
+        its router and each piece in the entry lane (a tool, a job), then
+        app code outside the services."""
+        entry = [
+            m
+            for m in self.modules
+            if (piece := piece_of(self.words(m)[0])) and piece[1] == "entry"
+        ]
+        return facade_reach.skips(
+            self.index, self.package, self.service, [*self.routers, *entry]
+        )
+
+    @cached_property
+    def skipping(self) -> list[str]:
+        return facade_reach.lines(self.skips)
 
     @cached_property
     def unwired(self) -> list[str]:
@@ -337,11 +339,10 @@ def folders(source: Any = None) -> list[tuple[str, Folder]]:
     return [(f.subject, f) for f in found]
 
 
-@cache
+@once
 def report() -> Report:
     """This project's parts report, built once a process (Overseer's page
-    and map share it): the code it reads changes only by a reload, which
-    starts a new one."""
+    and map share it): the code changes only by a reload, a new process."""
     return patterns.report(PARTS)
 
 
@@ -464,6 +465,19 @@ PARTS = Pattern(
                 "Call what you need through the other service's service.py, "
                 "adding it there if it is missing."
             ),
+        ),
+        Rule(
+            "own-facade",
+            "Its own ways in through its facade",
+            "A way in (its router, a tool, a job, the CLI, a page) that imports "
+            "its own service's domains, queries or models skips service.py: "
+            "what the service offers becomes however it is organised inside, "
+            "and the map draws the line red.",
+            lambda f: not f.skipping,
+            exempt=_not_held,
+            enforced=True,
+            evidence=lambda f: f.skipping,
+            action="Import it from the service's service.py, adding it there if missing.",
         ),
         Rule(
             "facade",

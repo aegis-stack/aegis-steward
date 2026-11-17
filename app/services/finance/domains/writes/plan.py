@@ -15,13 +15,13 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import before_and_after
 from app.core.schema import require_one_of
+from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.domains.detection.insights.formatting import (
     format_apr,
     format_usd,
 )
 from app.services.finance.domains.planning.retirement import TYPES, label
-from app.services.finance.domains.writes.registry import ChangeExecutor
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.finance.domains.writes.registry import finance_type
 
 
 class PlanSavePayload(BaseModel):
@@ -133,7 +133,7 @@ async def plan_save_describe(
 
 # Registered by ``executors``, which arms every change type.
 CHANGES = (
-    ChangeExecutor(
+    finance_type(
         change_type="plan.save",
         title="Change the plan to retirement",
         payload_model=PlanSavePayload,

@@ -102,6 +102,7 @@ PARTS: dict[str, Part] = {
                     "cohere",
                     "google",
                     "groq",
+                    "llamacpp",
                     "mistral",
                     "ollama",
                     "openai",
@@ -122,6 +123,7 @@ PARTS: dict[str, Part] = {
             ),
             Option(name="rag", mode="flag", choices=("rag",), answer="ai_rag"),
             Option(name="voice", mode="flag", choices=("voice",), answer="ai_voice"),
+            Option(name="evals", mode="flag", choices=("evals",), answer="ai_evals"),
         ),
     ),
     "auth": Part(
@@ -340,16 +342,16 @@ PARTS: dict[str, Part] = {
         category=Category.AI,
         cli="inference",
         marker="app/components/inference/ollama.py",
-        containers=("ollama",),
+        containers=("ollama", "llamacpp", "kokoro-fastapi"),
         tier=2,
         page="inference",
         order=110,
-        description="Local AI models via Ollama",
+        description="Local AI models via Ollama or llama.cpp, speech via Kokoro",
         options=(
             Option(
                 name="engine",
                 mode="single",
-                choices=("ollama",),
+                choices=("ollama", "llamacpp"),
                 default="ollama",
                 answer="inference_engine",
             ),
@@ -362,11 +364,22 @@ PARTS: dict[str, Part] = {
                 about=(
                     (
                         "host",
-                        "Use the Ollama already running on this machine. The default.",
+                        "Use the one already running on this machine. The default.",
                     ),
+                    ("docker", "Run it as a container in the project's compose stack."),
+                ),
+            ),
+            Option(
+                name="speech",
+                mode="single",
+                choices=("none", "kokoro_fastapi"),
+                default="none",
+                answer="inference_speech",
+                about=(
+                    ("none", "No speech server. The default."),
                     (
-                        "docker",
-                        "Run Ollama as a container in the project's compose stack.",
+                        "kokoro_fastapi",
+                        "Text to speech for ai[voice], where the model server runs.",
                     ),
                 ),
             ),

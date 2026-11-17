@@ -6,11 +6,14 @@ ensuring API responses match expected CLI input format and handle errors correct
 """
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 from httpx import ASGITransport, AsyncClient
 import pytest
 
 from app.integrations.main import create_integrated_app
+from app.services.system import ComponentStatus, ComponentStatusType, SystemStatus
 
 
 class TestHealthEndpoints:
@@ -268,6 +271,28 @@ class TestHealthEndpoints:
                 )
                 assert worker_component["name"] == "worker"
                 assert isinstance(worker_component["healthy"], bool)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["/health/detailed", "/health/dashboard"])
+    async def test_a_warning_is_reported_as_a_warning(
+        self, async_client: AsyncClient, path: str
+    ) -> None:
+        """Not healthy, and not "unhealthy" either: the CLI reads this field."""
+        root = ComponentStatus(
+            name="aegis", status=ComponentStatusType.WARNING, message="has issues"
+        )
+        warned = SystemStatus(
+            components={"aegis": root},
+            overall_healthy=False,
+            timestamp=datetime.now(UTC),
+        )
+        with patch(
+            "app.components.backend.api.health.get_system_status",
+            AsyncMock(return_value=warned),
+        ):
+            response = await async_client.get(path)
+
+        assert response.json()["status"] == "warning"
 
     @pytest.mark.asyncio
     async def test_dashboard_endpoint_accessible(

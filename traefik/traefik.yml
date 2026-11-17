@@ -45,8 +45,8 @@ providers:
 certificatesResolvers:
   letsencrypt:
     acme:
-      # Filled in from ACME_EMAIL when the prod container starts
-      # (docker-compose.prod.yml): the repo is public.
+      # Filled in from ACME_EMAIL (.env.deploy, or what the deploy stamps)
+      # when the prod container starts: no email in a committed file.
       email: __ACME_EMAIL__
       storage: /letsencrypt/acme.json
       httpChallenge:

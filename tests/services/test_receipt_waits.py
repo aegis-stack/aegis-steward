@@ -16,13 +16,13 @@ import pytest
 from sqlmodel import select as sql_select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import approve, list_changes, reject
 from app.services.documents.domains.reading import receipts
 from app.services.documents.models import DocumentPage
 from app.services.documents.queries import tagged_with
 from app.services.documents.service import DocumentService
 from app.services.finance.adapters.importers.base import ImportResult
 from app.services.finance.constants import transaction_tag
-from app.services.finance.domains.writes.queue import approve, list_changes, reject
 from app.services.finance.models import FinanceInsight
 from app.services.finance.service import FinanceService
 from app.services.finance.utils import current_date
@@ -126,7 +126,7 @@ class TestItWaits:
         assert await receipts.match_waiting(db, owner_user_id=None) == 0  # pending
 
         (card,) = await _cards(db)
-        await approve(db, int(card.id or 0))
+        await approve(db, int(card.id or 0), owner_user_id=None)
         filed = await tagged_with(db, [transaction_tag(charge)])
         assert filed[transaction_tag(charge)] == [document_id]
         assert await receipts.match_waiting(db, owner_user_id=None) == 0
@@ -141,7 +141,7 @@ class TestItWaits:
         await _charge(db, -1080, BOUGHT)
         await receipts.match_waiting(db, owner_user_id=None)
         (card,) = await _cards(db)
-        await reject(db, int(card.id or 0))
+        await reject(db, int(card.id or 0), owner_user_id=None)
 
         assert await receipts.match_waiting(db, owner_user_id=None) == 0
 
@@ -204,6 +204,7 @@ class TestItWaits:
 
 
 class TestItStopsWaiting:
+    @pytest.mark.real_clock  # seeds its age from the real clock
     @pytest.mark.asyncio
     @pytest.mark.queryspy(threshold=4)  # the sweep, three times
     async def test_after_the_wait_it_needs_attention_once(
@@ -284,12 +285,12 @@ class TestWhenItLooksAgain:
         await propose_reading(opens(db), document_id)
         (metadata,) = [
             c
-            for c in await list_changes(db, status="pending")
+            for c in await list_changes(db, status="pending", owner_user_id=None)
             if c.change_type == "document.metadata"
         ]
         assert metadata.payload["kind"]["value"] == "receipt"
 
-        await approve(db, int(metadata.id or 0))
+        await approve(db, int(metadata.id or 0), owner_user_id=None)
         (card,) = await _cards(db)
         assert card.payload["document_id"] == document_id
 

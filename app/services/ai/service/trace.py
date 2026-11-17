@@ -11,25 +11,19 @@ from typing import Any
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
+    ToolCallPart,
+    ToolReturnPart,
 )
 
-from app.core.chat_transcript import script_line
-
-# The tools whose results become approval cards, the kinds of card a
-# trace records (a drawn card is ``cards.MARKER``), and which id names
-# which: the web layer draws each from its kind.
-CARD_TOOLS = (
-    "propose",
-    "propose_many",
-    "pending",
-    "save_memory",
-    "replace_memory",
-    "update_memory",
-    "forget_memory",
+from app.core import steps
+from app.core.chat_transcript import (
+    card_component,
+    first_code_line,
+    script_of,
+    trail_label,
 )
-CHANGE_MARKER = "pending_change"
-BATCH_MARKER = "pending_change_batch"
-IDENTITY_KEYS = {"batch_id": BATCH_MARKER, "pending_change_id": CHANGE_MARKER}
+from app.core.tools import get_tool, result_text
+from app.services.ai.models import StreamingMessage
 
 
 def call_args_preview(args: Any) -> str:
@@ -39,210 +33,133 @@ def call_args_preview(args: Any) -> str:
     line - the UI trail should say what each script was FOR, not dump
     the program. Ordinary calls keep their (clipped) arguments.
     """
-    parsed: Any = args
-    if isinstance(args, str):
-        try:
-            parsed = json.loads(args)
-        except ValueError:
-            parsed = args
-    if isinstance(parsed, dict) and isinstance(parsed.get("code"), str):
-        line = script_line(parsed["code"])
+    script = script_of(args)
+    if script is not None:
+        line = first_code_line(script)
         return json.dumps({"code": line}) if line else ""
-    text = args if isinstance(args, str) else json.dumps(parsed)
+    text = args if isinstance(args, str) else json.dumps(args)
     return (text or "")[:120]
+
+
+def tool_notice(
+    tool_name: str,
+    *,
+    message_id: str,
+    conversation_id: str | None,
+    stream_delta: bool,
+    args: Any = "",
+) -> StreamingMessage:
+    """A content-free chunk naming a tool call, for the UI trail: its
+    arguments previewed, and its trail line (``trail_label``), read from
+    the whole call while a script's first comment is still there."""
+    return StreamingMessage(
+        content="",
+        is_final=False,
+        is_delta=stream_delta,
+        message_id=message_id,
+        conversation_id=conversation_id,
+        metadata={
+            "event": "tool",
+            "tool": tool_name,
+            "args": call_args_preview(args),
+            "label": trail_label(tool_name, args),
+        },
+    )
 
 
 # Trace-entry size caps: the trace persists on the message row and rides
 # the final SSE event, so a pathological payload must not bloat either.
-_TRACE_CODE_CAP = 6_000
+TRACE_CODE_CAP = 6_000
 _TRACE_RESULT_CAP = 2_000
+# A call's id, on its entry: what its result is matched by.
+CALL_ID = "call_id"
+
+
+def _trace_args(args: Any) -> str:
+    """A call's arguments as the trace keeps them: JSON, clipped."""
+    text = args if isinstance(args, str) else json.dumps(args)
+    return (text or "")[:_TRACE_RESULT_CAP]
 
 
 def record_tool_call(trace: list[dict[str, Any]], event: FunctionToolCallEvent) -> None:
-    """Append a trace entry for a starting tool call (full code kept)."""
+    """Append a trace entry for a starting tool call (full code kept), with
+    the id its result is matched by (``record_tool_result``). A call the
+    registry does not run (a code-mode script) is heard here as a step by
+    whoever is watching the turn (``steps.heard``); a registered tool is
+    heard where it runs (``resolve_tools``)."""
     entry: dict[str, Any] = {"tool": event.part.tool_name}
     if call_id := getattr(event.part, "tool_call_id", None):
-        entry["call_id"] = call_id
+        entry[CALL_ID] = call_id
     args = event.part.args
-    parsed: Any = None
-    if isinstance(args, str):
-        try:
-            parsed = json.loads(args)
-        except ValueError:
-            parsed = None
-    elif isinstance(args, dict):
-        parsed = args
-    if isinstance(parsed, dict) and isinstance(parsed.get("code"), str):
-        entry["code"] = parsed["code"][:_TRACE_CODE_CAP]
+    if (script := script_of(args)) is not None:
+        entry["code"] = script[:TRACE_CODE_CAP]
     else:
-        text = args if isinstance(args, str) else json.dumps(args)
-        entry["args"] = (text or "")[:_TRACE_RESULT_CAP]
+        entry["args"] = _trace_args(args)
     trace.append(entry)
+    if get_tool(entry["tool"]) is None:
+        steps.heard(entry["tool"], entry.get("code") or entry.get("args", ""))
 
 
 def record_tool_result(
     trace: list[dict[str, Any]], event: FunctionToolResultEvent
-) -> None:
+) -> dict[str, Any]:
     """Attach a completing call's result (and nested dispatches) to its
-    trace entry, creating one if the call event was never seen. Matched by
-    the call's id: parallel calls of one tool finish in any order, and by
-    name alone each result landed on another call's args (#428)."""
+    trace entry, creating one if the call event was never seen, and return
+    it. Its own by id: calls to one tool made at once finish in any order."""
     name = event.part.tool_name
     call_id = getattr(event.part, "tool_call_id", None)
-    waiting = [e for e in trace if e["tool"] == name and "result" not in e]
-    entry = next((e for e in waiting if call_id and e.get("call_id") == call_id), None)
-    if entry is None and not call_id and waiting:
-        # A result with no id (a caller that never had one) takes the
-        # last call of its name, as before.
-        entry = waiting[-1]
+    entry = next(
+        (
+            e
+            for e in reversed(trace)
+            if e["tool"] == name
+            and "result" not in e
+            and e.get(CALL_ID, call_id) == call_id
+        ),
+        None,
+    )
     if entry is None:
         entry = {"tool": name}
         trace.append(entry)
     content = event.part.content
-    text = content if isinstance(content, str) else json.dumps(content, default=str)
-    entry["result"] = text[:_TRACE_RESULT_CAP]
-    marker = _component_marker(name, content, text)
+    entry["result"] = result_text(content)[:_TRACE_RESULT_CAP]
+    marker = card_component(name, content)
     if marker is not None:
         entry["component"] = marker
-    nested = nested_tool_calls(event)
+    # A script's dispatches keep their arguments as a direct call does; the
+    # trail's one-line preview is ``nested_tool_calls``.
+    nested = sandbox_calls(event.part)
     if nested:
-        entry["nested"] = [{"tool": n, "args": a} for n, a in nested]
+        entry["nested"] = [
+            {"tool": call.tool_name, "args": _trace_args(call.args)}
+            for call, _ in nested
+        ]
+    return entry
 
 
-def _component_marker(
-    name: str, content: Any, text: str
-) -> dict[str, Any] | list[dict[str, Any]] | None:
-    """A compact, parse-safe payload for results the UI must RENDER.
+def sandbox_calls(part: Any) -> list[tuple[ToolCallPart, ToolReturnPart | None]]:
+    """Each call a completing ``run_code`` dispatched inside its sandbox, in
+    call order, with its return (None when it never returned).
 
-    The result field above is clipped for display; a large proposal
-    batch truncates to invalid JSON, and a card built by parsing it
-    silently vanished. The card needs only identity - the queue is
-    fetched for the rows - so identity rides here, under any cap. A
-    ``pending`` listing carries one identity per card it holds.
+    Code mode keeps both in the return part's metadata, keyed
+    ``<parent_id>__<n>``; any other part has no such metadata and yields
+    nothing.
     """
-    if name not in CARD_TOOLS:
-        return None
-    data: Any = content
-    if isinstance(content, str):
-        try:
-            data = json.loads(text if len(text) < _TRACE_RESULT_CAP else content)
-        except (TypeError, ValueError):
-            return None
-    if not isinstance(data, dict) or data.get("error"):
-        return None
-    if name == "pending":
-        # The TOOL nominates what is worth drawing, because it is the
-        # only place that knows whether the user asked about a card.
-        # This used to draw everything the listing held, and the listing
-        # holds every card the agent filed in a fortnight - so a routine
-        # "what have I already filed" check repainted the whole thread
-        # with cards decided weeks ago.
-        #
-        # ``draw`` absent means a trace stored before that was settled
-        # here; those keep their old behaviour so old conversations do
-        # not lose their cards.
-        rows = data.get("draw")
-        if rows is None:
-            rows = (data.get("pending") or []) + (data.get("decided") or [])
-        return _pending_markers(rows) or None
-    return _identity_marker(data)
-
-
-def _pending_markers(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One marker per listed card, in listing order."""
-    identities = [
-        {
-            **card,
-            "count": card.get("rows"),
-            "pending_change_id": (card.get("pending_change_ids") or [None])[0],
-        }
-        for card in cards
-    ]
-    return [m for m in map(_identity_marker, identities) if m is not None]
-
-
-def card_identity(data: dict[str, Any]) -> tuple[str, str, Any] | None:
-    """The approval card a proposal's result names: its kind, and the id
-    field and value that name it (a batch's, else one change's)."""
-    for key, kind in IDENTITY_KEYS.items():
-        if data.get(key):
-            return kind, key, data[key]
-    return None
-
-
-def _identity_marker(data: dict[str, Any]) -> dict[str, Any] | None:
-    found = card_identity(data)
-    if found is None:
-        return None
-    kind, key, value = found
-    marker = {
-        "kind": kind,
-        key: value,
-        "change_type": data.get("change_type"),
-        "title": data.get("title"),
-    }
-    if kind == BATCH_MARKER:
-        marker["count"] = data.get("count")
-    else:
-        marker["status"] = data.get("status", "pending")
-    return marker
-
-
-def nested_tool_calls(event: FunctionToolResultEvent) -> list[tuple[str, str]]:
-    """(name, compact args) per sandbox-dispatched call, in call order.
-
-    A completing ``run_code`` carries its nested dispatches in the return
-    part's metadata keyed ``<parent_id>__<n>``; other tool results have no
-    such metadata and yield nothing.
-    """
-    metadata = getattr(event.part, "metadata", None) or {}
+    metadata = getattr(part, "metadata", None) or {}
     calls = metadata.get("tool_calls") or {}
+    returns = metadata.get("tool_returns") or {}
 
     def order(call_id: str) -> int:
         _, _, suffix = call_id.rpartition("__")
         return int(suffix) if suffix.isdigit() else 0
 
-    out: list[tuple[str, str]] = []
-    for call_id in sorted(calls, key=order):
-        part = calls[call_id]
-        args = part.args if isinstance(part.args, str) else json.dumps(part.args)
-        out.append((part.tool_name, (args or "")[:120]))
-    return out
+    return [
+        (calls[call_id], returns.get(call_id)) for call_id in sorted(calls, key=order)
+    ]
 
 
-# The steps line replayed into the next turn's history (#242): what a
-# turn DID, compactly. History used to carry only final text, and the
-# sandbox resets every turn, so "try again" re-queried for ids the last
-# turn had in hand. Proposal payloads carry those ids, so they get the
-# most room; a script's own printout gets a clip.
-_STEPS_CAP = 1_200
-_STEP_ARGS_CAP = 400
-_STEP_RESULT_CAP = 120
-# A script's whole entry, so lookups can never crowd the proposal after
-# them out of the cap: three of them once cut a payload mid-word
-# ("replaces": "With Vanes", 2026-09-23).
-_STEP_SCRIPT_CAP = 240
-
-
-def steps_line(trace: list[dict[str, Any]]) -> str:
-    """One capped line saying what each tool call of a turn did."""
-    parts: list[str] = []
-    for entry in trace:
-        tool = entry.get("tool", "?")
-        if "code" in entry:
-            called = ", ".join(
-                f"{n.get('tool')}({(n.get('args') or '')[:60]})"
-                for n in entry.get("nested") or []
-            )
-            first = json.loads(call_args_preview({"code": entry["code"]}) or "{}")
-            said = f"run_code[{called or first.get('code', '')}]"
-            if entry.get("result"):
-                said += f" -> {entry['result'][:_STEP_RESULT_CAP]}"
-            said = said[:_STEP_SCRIPT_CAP]
-        else:
-            said = f"{tool}({(entry.get('args') or '')[:_STEP_ARGS_CAP]})"
-            marker = entry.get("component")
-            if isinstance(marker, dict) and (named := card_identity(marker)):
-                said += f" -> card {named[2]}"
-        parts.append(said)
-    return "; ".join(parts)[:_STEPS_CAP]
+def nested_tool_calls(event: FunctionToolResultEvent) -> list[tuple[str, str]]:
+    """(name, compact args) per sandbox-dispatched call, in call order."""
+    return [
+        (c.tool_name, call_args_preview(c.args)) for c, _ in sandbox_calls(event.part)
+    ]

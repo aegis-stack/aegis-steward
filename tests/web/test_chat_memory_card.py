@@ -1,5 +1,5 @@
 """A memory the assistant asks to keep is an ordinary approval card (#484):
-the chat's change card draws it, and approving there is what saves it."""
+the queue's card draws it, and approving there is what saves it."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.ai.domains.chat import user_memory
 from app.services.ai.domains.chat.user_memory import get_user_memory, save_user_fact
 from app.services.finance.service import FinanceService
 from tests._session import opens
@@ -17,24 +18,29 @@ from tests.web.dom import one, text
 async def test_memory_card_draws_and_approves_in_place(
     hx: TestClient, finance: FinanceService, async_db_session: AsyncSession
 ) -> None:
-    change = await finance.propose_change(
-        "memory.save",
-        {"user_id": "u1", "fact": "house is worth $711,200", "category": "finance"},
-        owner_user_id=None,
-    )
+    # Filed, a memory change is the turn's user's (``memory_changes``).
+    turn = user_memory.current_user_id.set("u1")
+    try:
+        change = await finance.propose_change(
+            "memory.save",
+            {"fact": "house is worth $711,200", "category": "finance"},
+            owner_user_id=None,
+        )
+    finally:
+        user_memory.current_user_id.reset(turn)
     await finance.db.commit()
 
     card = one(
-        hx.get(f"/chat/components/change/{change.id}").text,
-        "[data-component=pending_change]",
+        hx.get(f"/partials/changes/{change.id}").text,
+        "[data-change]",
     )
     assert "house is worth $711,200" in text(card)
     assert text(one(card, "[data-tone=warn]")) == "Awaiting your approval"
     assert await get_user_memory(async_db_session, "u1") is None
 
-    approved = hx.post(f"/chat/components/change/{change.id}/approve")
+    approved = hx.post(f"/partials/changes/{change.id}/approve")
 
-    after = one(approved.text, "[data-component=pending_change]")
+    after = one(approved.text, "[data-change]")
     assert text(one(after, "[data-tone=ok]")) == "Approved"
     row = await get_user_memory(async_db_session, "u1")
     assert row is not None

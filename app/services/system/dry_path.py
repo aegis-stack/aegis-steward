@@ -118,9 +118,9 @@ async def of(key: str) -> DryPath:
     """The running app's route behind ``key`` (``"GET /api/v1/..."``),
     walked off the event loop (it reads the source); ValueError naming the
     form when there is none."""
-    from app.core.ontology.system import running_app
+    from app.components.backend.main import get_configured_app
 
-    app = running_app()
+    app = get_configured_app()
     found = find(app.routes if app else [], key)
     if found is None:
         raise ValueError(f"No route {key!r}; name one as 'METHOD /path'.")

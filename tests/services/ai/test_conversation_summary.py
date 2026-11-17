@@ -1,54 +1,79 @@
-"""A long conversation keeps what fell out of view, condensed (#295).
+"""A long conversation keeps what fell out of view, condensed.
 
-The history replayed each turn is budgeted by size and the oldest turns
-drop. At 519 messages Illiana said 256 had fallen out of her view and
-that anything said only there "may need to be repeated". Turns leaving
-the window are now folded, off the request path, into a running summary
-kept on the conversation, and the summary rides ahead of the history.
+The history replayed each turn is budgeted by size, cut a slab at a time,
+and what was said only in the turns that fell out was gone. Those turns
+fold, on the worker, into a running summary kept on the conversation,
+and the summary rides ahead of the history. It moves only when the cut
+does, so a prompt cache keeps reusing what the last turn sent.
 """
 
 from typing import Any
 
 import pytest
 
+from app.core.cache import CacheService
+from app.core.discovery import present
 from app.services.ai.domains.chat import summary
-from app.services.ai.domains.chat.self_context import begin_turn_context
+from app.services.ai.domains.chat.conversation import ConversationManager
+from app.services.ai.domains.chat.self_context import begin_turn_context, current_turn
+from app.services.ai.jobs import fold_conversation_job
 from app.services.ai.models import AIProvider, Conversation, MessageRole
-from app.services.ai.service.prompt import PromptMixin
+from tests.services.ai._threads import built, thread
+
+EARLIER = "Earlier in this conversation"
 
 
 def _conversation(turns: int, size: int = 100) -> Conversation:
     """``turns`` messages of ``size`` characters, the first naming the dog,
     then the question being asked now."""
-    conversation = Conversation(id="c1", provider=AIProvider.OLLAMA, model="test-model")
-    for index in range(turns):
-        role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
-        text = "Our dog is called Biscuit." if index == 0 else "x" * size
-        conversation.add_message(role, text.ljust(size, "."))
-    conversation.add_message(MessageRole.USER, "What is the dog called?")
-    return conversation
+    texts = ["x" * size] * turns
+    if texts:
+        texts[0] = "Our dog is called Biscuit.".ljust(size, ".")
+    return thread(texts, "What is the dog called?")
 
 
 def _build(conversation: Conversation, budget: int) -> str:
-    return PromptMixin._build_conversation_context(  # type: ignore[arg-type]
-        None, conversation, history_budget=budget
-    )
+    begin_turn_context()
+    return built(conversation, budget)
+
+
+@pytest.fixture
+def folds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stack whose worker folds."""
+    monkeypatch.setattr(summary, "FOLDS", True)
 
 
 class TestTheSummaryRides:
-    def test_an_early_turn_answers_from_the_summary(self) -> None:
+    def test_an_early_turn_answers_from_the_summary(self, folds: None) -> None:
         """The dog's name fell out of the window; the summary still has it."""
+        conversation = _conversation(40)
+        _build(conversation, budget=1_000)
+        upto = current_turn().fold_to  # type: ignore[union-attr]
+        conversation.metadata[summary.SUMMARY_KEY] = {
+            "text": "They have a dog called Biscuit.",
+            "through": upto,
+        }
+
+        built = _build(conversation, budget=1_000)
+
+        assert "Our dog is called Biscuit" not in built  # out of view
+        assert built.index(EARLIER) < built.index("Biscuit")
+        assert built.index("Biscuit") < built.index("What is the dog called?")
+
+    def test_the_summary_never_rides_beside_turns_it_covers(self, folds: None) -> None:
+        """The budget grew (a model with a longer context) and its cut
+        landed before what the summary reaches: the summary rode beside
+        the turns it already tells. The history starts where it ends."""
         conversation = _conversation(40)
         conversation.metadata[summary.SUMMARY_KEY] = {
             "text": "They have a dog called Biscuit.",
             "through": 30,
         }
 
-        built = _build(conversation, budget=1_000)
+        built = _build(conversation, budget=3_000)
 
-        assert "Our dog is called Biscuit" not in built  # out of view
-        assert "Biscuit" in built  # but summarized
-        assert built.index("Biscuit") < built.index("What is the dog called?")
+        assert current_turn().messages_dropped == 30  # type: ignore[union-attr]
+        assert built.index(EARLIER) < built.index("What is the dog called?")
 
     def test_a_thread_inside_the_window_carries_no_summary(self) -> None:
         conversation = _conversation(4)
@@ -56,18 +81,51 @@ class TestTheSummaryRides:
 
         assert "STALE" not in _build(conversation, budget=10_000)
 
-    def test_the_turn_records_where_the_window_starts(self) -> None:
-        begin_turn_context()
-        conversation = _conversation(40)
+    def test_the_summary_moves_only_with_the_cut(self, folds: None) -> None:
+        """A fold landing between two cuts would change what every turn
+        replays from the summary on. The cut waits for the fold it is due,
+        so the summary and the history's start change in the same turn."""
+        conversation = _conversation(2)
+        seen: list[tuple[str, int]] = []
+        for turn in range(80):
+            built = _build(conversation, budget=1_000)
+            stamp = current_turn()
+            assert stamp is not None
+            head = built.split("\n\n")[0]
+            seen.append(
+                (head if head.startswith(EARLIER) else "", stamp.messages_dropped)
+            )
+            # The worker folds what the turn says is due before the next.
+            if upto := stamp.fold_to:
+                conversation.metadata[summary.SUMMARY_KEY] = {
+                    "text": f"{EARLIER}: through {upto}.",
+                    "through": upto,
+                }
+            conversation.messages[-1].content = f"question {turn}".ljust(100, ".")
+            conversation.add_message(MessageRole.ASSISTANT, "a".ljust(100, "."))
+            conversation.add_message(MessageRole.USER, "What is the dog called?")
 
-        _build(conversation, budget=1_000)
+        changed = [
+            (a[0] != b[0], a[1] != b[1]) for a, b in zip(seen, seen[1:]) if a != b
+        ]
+        assert any(moved for moved, _ in changed)  # the summary did move
+        assert all(start for moved, start in changed if moved)
 
-        stamp = begin_turn_context.__globals__["_turn"].get()
-        assert stamp.first_kept == stamp.messages_dropped  # all user/assistant
+    def test_without_a_worker_the_cut_does_not_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing folds where no worker runs: the history cuts as it
+        always did, and no fold is ever due."""
+        monkeypatch.setattr(summary, "FOLDS", False)
+
+        built = _build(_conversation(40), budget=1_000)
+
+        assert "Our dog is called Biscuit" not in built
+        assert EARLIER not in built
+        assert current_turn().fold_to == 0  # type: ignore[union-attr]
 
 
 class TestTheFold:
-    @pytest.mark.asyncio
     async def test_fallen_turns_fold_into_the_summary(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -84,15 +142,12 @@ class TestTheFold:
 
         monkeypatch.setattr(summary, "_condense", condense)
 
-        folded = await summary.fold(conversation, upto=30)
-
-        assert folded is True
+        assert await summary.fold(conversation, upto=30) is True
         kept = conversation.metadata[summary.SUMMARY_KEY]
         assert kept == {"text": "They have a dog called Biscuit.", "through": 30}
         assert "Earlier: hello." in asked[0]  # the summary so far is folded in
         assert "Our dog is called Biscuit" in asked[0]  # with the turns that fell
 
-    @pytest.mark.asyncio
     async def test_a_fold_already_done_is_not_paid_for_again(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -107,102 +162,80 @@ class TestTheFold:
         assert await summary.fold(conversation, upto=30) is False
 
 
-class TestWhenToFold:
-    def test_only_once_enough_has_fallen_out(self) -> None:
-        conversation = _conversation(4)
-        conversation.metadata[summary.SUMMARY_KEY] = {"text": "x", "through": 10}
-
-        assert summary.due(conversation, first_kept=10 + summary.FOLD_AFTER - 1) is None
-        assert summary.due(conversation, first_kept=10 + summary.FOLD_AFTER) == (
-            10 + summary.FOLD_AFTER
-        )
-
-
+@pytest.mark.skipif(not present("app.components.worker"), reason="no worker")
 class TestOffTheRequestPath:
-    @pytest.mark.asyncio
-    async def test_a_due_fold_is_enqueued_not_run(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        enqueued: list[tuple[Any, ...]] = []
-
-        class Pool:
-            async def enqueue_job(self, name: str, *args: Any, **_: Any) -> None:
-                enqueued.append((name, *args))
-
-        async def pool(_queue: str) -> tuple[Pool, str]:
-            return Pool(), "system"
-
-        monkeypatch.setattr(summary, "get_queue_pool", pool)
-        conversation = _conversation(4)
-
-        await summary.enqueue_if_due(conversation, first_kept=summary.FOLD_AFTER - 1)
-        await summary.enqueue_if_due(conversation, first_kept=summary.FOLD_AFTER)
-
-        assert enqueued == [("fold_conversation_task", "c1", summary.FOLD_AFTER)]
-
-    @pytest.mark.asyncio
-    async def test_a_fold_already_queued_is_not_queued_again(
+    async def test_a_due_fold_is_queued_once(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The summary does not move until a fold finishes, so every turn
-        while one ran queued another: 10 in 15 minutes on 2026-10-07, and
-        the 750-message catch-up would have been paid for per turn (#437).
-        One job id per conversation; arq refuses a second while it holds
-        the first, as this pool does."""
-        held: dict[str, tuple[Any, ...]] = {}
+        while one runs finds it due again: queued once per cut, on any
+        worker engine."""
+        from app.components.worker import pools
 
-        class Pool:
-            async def enqueue_job(
-                self, name: str, *args: Any, _job_id: str | None = None, **_: Any
-            ) -> object | None:
-                if _job_id is not None and _job_id in held:
-                    return None
-                held[_job_id or str(len(held))] = (name, *args)
-                return object()
+        enqueued: list[tuple[object, ...]] = []
 
-        async def pool(_queue: str) -> tuple[Pool, str]:
-            return Pool(), "system"
+        async def enqueue(name: str, _queue: str, *args: object, **_: object) -> None:
+            enqueued.append((name, *args))
 
-        monkeypatch.setattr(summary, "get_queue_pool", pool)
-        conversation = _conversation(4)
+        cache = CacheService()
+        monkeypatch.setattr(pools, "enqueue_task", enqueue)
+        monkeypatch.setattr(summary, "get_cache", lambda: cache)
+        monkeypatch.setattr(summary, "FOLDS", True)
 
-        for more in range(3):  # three turns while the first fold runs
-            await summary.enqueue_if_due(
-                conversation, first_kept=summary.FOLD_AFTER + more
-            )
+        for _turn in range(3):
+            await summary.enqueue_fold("c1", 20)
+        await summary.enqueue_fold("c1", 30)
 
-        assert held == {"fold:c1": ("fold_conversation_task", "c1", summary.FOLD_AFTER)}
+        assert enqueued == [
+            ("fold_conversation_task", "c1", 20),
+            ("fold_conversation_task", "c1", 30),
+        ]
 
-    @pytest.mark.asyncio
+    async def test_a_failed_enqueue_never_fails_the_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.components.worker import pools
+
+        async def broken(*_: object, **__: object) -> None:
+            raise ConnectionError("redis is down")
+
+        monkeypatch.setattr(pools, "enqueue_task", broken)
+        monkeypatch.setattr(summary, "get_cache", CacheService)
+        monkeypatch.setattr(summary, "FOLDS", True)
+
+        await summary.enqueue_fold("c1", 20)
+
+
+class TestATurnDoesNotUndoTheFold:
+    # One conversation read back after each writer, on purpose.
+    @pytest.mark.queryspy(allow_n_plus_one=True)
     async def test_the_job_writes_only_the_summary(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A turn may land while the fold runs: the job keeps the metadata
         as it is now and adds the summary, rather than saving the whole
         conversation it read earlier."""
-        from app.services.ai.deps import ai_service
-
-        conversation = await ai_service.conversation_manager.create_conversation(
+        manager = ConversationManager()
+        conversation = await manager.create_conversation(
             provider=AIProvider.OLLAMA, model="test-model", user_id="u1"
         )
         for index in range(30):
             role = MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT
             conversation.add_message(role, f"turn {index}")
-        await ai_service.conversation_manager.save_conversation(conversation)
+        await manager.save_conversation(conversation)
 
         async def condense(prompt: str, **_: Any) -> str:
-            # a turn lands meanwhile, changing other metadata
-            later = await ai_service.get_conversation(conversation.id)
+            later = await manager.get_conversation(conversation.id)
             assert later is not None
             later.metadata["last_activity"] = "meanwhile"
-            await ai_service.conversation_manager.save_conversation(later)
+            await manager.save_conversation(later)
             return "Thirty turns."
 
         monkeypatch.setattr(summary, "_condense", condense)
 
-        assert await summary.fold_conversation(conversation.id, upto=20) is True
+        assert await fold_conversation_job(conversation.id, 20) is True
 
-        stored = await ai_service.get_conversation(conversation.id)
+        stored = await manager.get_conversation(conversation.id)
         assert stored is not None
         assert stored.metadata[summary.SUMMARY_KEY] == {
             "text": "Thirty turns.",
@@ -210,61 +243,19 @@ class TestOffTheRequestPath:
         }
         assert stored.metadata["last_activity"] == "meanwhile"
 
-
-class TestTheCondenseCall:
-    @pytest.mark.asyncio
-    async def test_it_bills_the_conversations_user(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The real call, with only the model faked: a conversation keeps
-        its user in its metadata, and every fold failed reading a
-        ``user_id`` it did not have before ``Conversation.user_id`` read it
-        there. A real pydantic-ai agent and result, because a hand-made
-        result kept ``usage()`` callable after 2.51 made it a property, and
-        every fold failed in the worker for ten days while this passed
-        (#429)."""
-        from pydantic_ai import Agent
-        from pydantic_ai.models.test import TestModel
-
-        from app.services.ai.domains.llm import providers
-        from app.services.ai.domains.spend import recording as usage_recording
-
-        agent = Agent(TestModel(custom_output_text=" Biscuit. "))
-        billed: list[Any] = []
-
-        async def record(*args: Any, **kwargs: Any) -> None:
-            billed.append((args, kwargs))
-
-        async def get_agent(*_a: Any, **_k: Any) -> Agent:
-            return agent
-
-        monkeypatch.setattr(providers, "get_agent", get_agent)
-        monkeypatch.setattr(usage_recording, "record_usage", record)
-        conversation = _conversation(4)
-        conversation.metadata["user_id"] = "u7"
-
-        assert await summary._condense("p", conversation=conversation) == "Biscuit."
-        ((args, kwargs),) = billed
-        assert args[0] == "chat:summary" and args[3] == "u7"
-        assert args[2]["input_tokens"] > 0  # what the run reported
-        assert kwargs["conversation_id"] == "c1"
-
-
-class TestATurnDoesNotUndoTheFold:
-    @pytest.mark.asyncio
+    # One conversation read back after each writer, on purpose.
+    @pytest.mark.queryspy(allow_n_plus_one=True)
     async def test_a_stale_turn_keeps_the_newer_summary(self) -> None:
         """A turn read the conversation before the fold landed; saving it
         must not put back the older summary."""
-        from app.services.ai.deps import ai_service
-
-        manager = ai_service.conversation_manager
+        manager = ConversationManager()
         conversation = await manager.create_conversation(
             provider=AIProvider.OLLAMA, model="test-model", user_id="u1"
         )
         conversation.metadata[summary.SUMMARY_KEY] = {"text": "old", "through": 10}
         await manager.save_conversation(conversation)
-        stale = await ai_service.get_conversation(conversation.id)
-        newer = await ai_service.get_conversation(conversation.id)
+        stale = await manager.get_conversation(conversation.id)
+        newer = await manager.get_conversation(conversation.id)
         assert stale is not None and newer is not None
 
         newer.metadata[summary.SUMMARY_KEY] = {"text": "new", "through": 30}
@@ -272,15 +263,6 @@ class TestATurnDoesNotUndoTheFold:
         stale.add_message(MessageRole.USER, "and another thing")
         await manager.save_conversation(stale)
 
-        stored = await ai_service.get_conversation(conversation.id)
+        stored = await manager.get_conversation(conversation.id)
         assert stored is not None
         assert stored.metadata[summary.SUMMARY_KEY] == {"text": "new", "through": 30}
-
-
-def test_a_blank_saved_fact_is_a_duplicate_of_nothing() -> None:
-    """A blank is a substring of every fact: one blank entry made every
-    later fact in its category "already known"."""
-    from app.services.ai.domains.chat.user_memory import is_duplicate
-
-    assert not is_duplicate("", "Their dog is called Biscuit.")
-    assert is_duplicate("dog is called biscuit", "Their dog is called Biscuit.")

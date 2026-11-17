@@ -1,4 +1,4 @@
-"""Cards Illiana draws, in the thread (#266).
+"""Cards the assistant draws, in the thread (tested on the Overseer's mount).
 
 A drawn card rides the trace as a marker; the settled message places a
 loader for it, and the card route draws the kind's template from the
@@ -11,15 +11,31 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
-from app.components.backend.api.ai.router import ai_service
-from app.components.web_frontend.routes.chat_cards import CARDS
+from app.components.backend.api.ai.service import ai_service
+from app.components.web_frontend.overseer_ai_chat import OVERSEER
 from app.services.ai.models import AIProvider, MessageRole
 from app.services.ai.models.chat_card import ChatCard
-from app.services.finance.domains.detection.analyst.shared import STANDALONE_USER_ID
 from tests.web.dom import none, one, select, text
+from tests.web.overseer import AI, sign_in, status_with
+
+CARDS = f"{OVERSEER.path}/cards"
+
+
+@pytest.fixture
+def client(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    sign_in(app, monkeypatch, status_with(services=[AI]))
+    return TestClient(app)
+
+
+@pytest.fixture
+def hx(client: TestClient) -> TestClient:
+    client.headers["HX-Request"] = "true"
+    return client
+
 
 PAYLOADS: dict[str, dict[str, Any]] = {
     "trend": {
@@ -60,30 +76,32 @@ PAYLOADS: dict[str, dict[str, Any]] = {
         "columns": ["Month", "Charged", "Note"],
         "rows": [{"label": "Aug", "values": ["$18.00", "Paid late; letter sent"]}],
     },
-    # How a part is wired: kept as the node, drawn from the map when opened.
-    "path": {"title": "How the database is wired", "node": "component:database"},
 }
+
+
+async def _store(conversation: str, kind: str, payload: dict[str, Any]) -> str:
+    """One more card on ``conversation``, stored as the app stores them."""
+    from app.core.db import get_async_session
+
+    async with get_async_session() as session:
+        card = ChatCard(conversation_id=conversation, kind=kind, payload=payload)
+        session.add(card)
+    return card.id
 
 
 @pytest.fixture
 async def drawn() -> dict[str, str]:
-    """A conversation whose answer drew one card of each kind. Stored the
-    way the app stores them: through its own session opener, which the
-    card route reads with."""
-    from app.core.db import get_async_session
-
+    """A conversation whose answer drew one card of each kind."""
     conversation = await ai_service.conversation_manager.create_conversation(
         provider=AIProvider.OLLAMA,
         model="gpt-5.6-luna",
-        user_id=STANDALONE_USER_ID,
-        surface="finance",
+        user_id=OVERSEER.user,
+        surface=OVERSEER.surface,
     )
-    ids = {}
-    async with get_async_session() as session:
-        for kind, payload in PAYLOADS.items():
-            card = ChatCard(conversation_id=conversation.id, kind=kind, payload=payload)
-            session.add(card)
-            ids[kind] = card.id
+    ids = {
+        kind: await _store(conversation.id, kind, payload)
+        for kind, payload in PAYLOADS.items()
+    }
     conversation.add_message(MessageRole.USER, "Show me")
     reply = conversation.add_message(
         MessageRole.ASSISTANT,
@@ -107,10 +125,34 @@ class TestInTheThread:
     def test_the_answer_places_a_loader_for_its_card(
         self, hx: TestClient, drawn: dict[str, str]
     ) -> None:
-        html = hx.get(f"/chat/messages/{drawn['conversation']}/{drawn['message']}").text
-        loader = one(html, "[data-components] [data-component-load=chat_card]")
+        html = hx.get(
+            f"{OVERSEER.path}/messages/{drawn['conversation']}/{drawn['message']}"
+        ).text
+        loader = one(html, "[data-card-load]")
         assert loader.get("hx-get") == f"{CARDS}/{drawn['trend']}"
         assert loader.get("hx-trigger") == "load"
+
+    # Three requests (the answer, its card, the card larger), each reading
+    # the conversation: three reads by construction, not a loop.
+    @pytest.mark.queryspy(allow_n_plus_one=True)
+    def test_a_reload_keeps_the_card_drawn_not_draws_it_again(
+        self, hx: TestClient, drawn: dict[str, str]
+    ) -> None:
+        """A call's thread reloads as each turn is saved, while she is
+        still talking about its card: the card already up is moved into
+        the reload (htmx keeps an ``hx-preserve`` element by its id), not
+        drawn again mid-sentence (2026-10-24)."""
+        html = hx.get(
+            f"{OVERSEER.path}/messages/{drawn['conversation']}/{drawn['message']}"
+        ).text
+        loader = one(html, "[data-card-load]")
+        card = one(hx.get(f"{CARDS}/{drawn['trend']}").text, "[data-card]")
+        assert loader.get("id") and loader.get("id") == card.get("id")
+        assert "hx-preserve" in loader.attrib
+        # A card kept too would keep its own loader when it loads.
+        assert "hx-preserve" not in card.attrib
+        large = hx.get(f"{CARDS}/{drawn['trend']}?size=large").text
+        assert not one(large, "[data-card]").get("id")  # the dialog's is a copy
 
 
 class TestTheCards:
@@ -126,10 +168,8 @@ class TestTheCards:
         assert data["series"][0]["values"] == [612.5, 589.0]
         assert len(data["labels"]) == 2
 
-    def test_a_bar_is_pulses_bar_chart(
-        self, hx: TestClient, drawn: dict[str, str]
-    ) -> None:
-        """Vertical bars in the order she gave them, drawn by the app's
+    def test_a_bar_is_a_bar_chart(self, hx: TestClient, drawn: dict[str, str]) -> None:
+        """Vertical bars in the order the assistant gave them, drawn by the app's
         chart code: the highest bright teal, the lowest violet, the rest a
         darker teal (Pulse's day-of-week chart)."""
         html = hx.get(f"{CARDS}/{drawn['bar']}").text
@@ -140,9 +180,7 @@ class TestTheCards:
         assert series["values"] == [400.0, 250.0, 100.0]
         assert series["tones"] == ["high", "mid", "low"]
 
-    def test_a_pie_is_the_overviews_doughnut(
-        self, hx: TestClient, drawn: dict[str, str]
-    ) -> None:
+    def test_a_pie_is_a_doughnut(self, hx: TestClient, drawn: dict[str, str]) -> None:
         """Parts of a whole, drawn like the Overview's spending chart."""
         html = hx.get(f"{CARDS}/{drawn['pie']}").text
         canvas = one(html, "[data-card=pie] canvas[data-chart=doughnut]")
@@ -155,6 +193,41 @@ class TestTheCards:
     ) -> None:
         html = hx.get(f"{CARDS}/{drawn['compare']}").text
         assert text(one(html, "[data-card=compare] [data-change]")) == "-25.0%"
+
+    async def test_a_share_charts_as_a_percent(
+        self, hx: TestClient, drawn: dict[str, str]
+    ) -> None:
+        """A share is a percent to one decimal (the app's own ``percent``
+        format), never a count or dollars."""
+        rows = [
+            {"date": "2026-08-01", "value": 86.1},
+            {"date": "2026-10-01", "value": 39.4},
+        ]
+        trend = {
+            "title": "Bot share",
+            "measure": "Bot share",
+            "unit": "percent",
+            "rows": rows,
+        }
+        card = await _store(drawn["conversation"], "trend", trend)
+        html = hx.get(f"{CARDS}/{card}").text
+        canvas = one(html, "[data-card=trend] canvas[data-chart=line]")
+        data = json.loads(text(one(html, f"#{canvas.get('data-chart-data')}")))
+        assert data["format"] == "percent"
+        assert data["series"][0]["values"] == [86.1, 39.4]
+
+    async def test_a_share_compares_as_a_percent(
+        self, hx: TestClient, drawn: dict[str, str]
+    ) -> None:
+        shares = {"unit": "percent", "before": 55.1, "after": 29.3}
+        card = await _store(
+            drawn["conversation"], "compare", PAYLOADS["compare"] | shares
+        )
+        html = hx.get(f"{CARDS}/{card}").text
+        figures = [text(n) for n in select(html, "[data-card=compare] .tabular-nums")]
+        assert figures[:2] == ["55.1%", "29.3%"]
+        # Two percents differ by points, not by a percent of a percent.
+        assert text(one(html, "[data-card=compare] [data-change]")) == "-25.8 pts"
 
     def test_a_table_heads_every_column(
         self, hx: TestClient, drawn: dict[str, str]
@@ -174,27 +247,7 @@ class TestTheCards:
         assert [text(c) for c in select(html, "td.whitespace-normal")] == [
             "Paid late; letter sent"
         ]
-        one(html, "[data-card=table][data-fit]")
-
-    def test_a_parts_wiring_is_the_map_still_in_the_thread(
-        self, hx: TestClient, drawn: dict[str, str]
-    ) -> None:
-        html = hx.get(f"{CARDS}/{drawn['path']}").text
-        card = one(html, "[data-card=path]")
-        assert "How the database is wired" in text(card)
-        assert "Wiring" in text(card)
-        # Shown whole in the thread too.
-        one(
-            html,
-            "[data-card=path] [data-thumb] [data-scene-map][inert][data-fit-whole]",
-        )
-
-    def test_opened_larger_a_wiring_fits_the_dialog_whole(
-        self, hx: TestClient, drawn: dict[str, str]
-    ) -> None:
-        large = hx.get(f"{CARDS}/{drawn['path']}", params={"size": "large"}).text
-        one(large, "[data-card=path] [data-scene-map][data-fit-whole]")
-        none(large, "[data-card=path] [data-thumb]")
+        one(html, "[data-card=table][data-snug]")
 
     def test_a_card_opens_larger_in_the_dialog(
         self, hx: TestClient, drawn: dict[str, str]
@@ -218,26 +271,26 @@ class TestTheCards:
         one(response.text, "[data-card-missing]")
 
 
-class TestOverTheApi:
-    """The Overseer chat is API-only: it draws a card from its kind and
-    the payload that kind keeps (#630)."""
+class TestTheMessage:
+    def test_the_card_is_the_one_the_reply_drew(self) -> None:
+        from app.components.web_frontend.chat_surface import drawn_card_urls
 
-    def test_a_card_is_its_kind_and_kept_payload(
-        self, client: TestClient, drawn: dict[str, str]
-    ) -> None:
-        response = client.get(
-            f"/api/v1/ai/cards/{drawn['bar']}", params={"user_id": STANDALONE_USER_ID}
-        )
-        assert response.status_code == 200
-        body = response.json()
-        assert body["kind"] == "bar"
-        assert body["card"]["unit"] == "money"  # the kept shape's default
-        assert [r["label"] for r in body["card"]["rows"]][0] == "ShopRite"
+        trace = [
+            {"tool": "run_code", "component": [{"kind": "chat_card", "id": "abc"}]},
+            {
+                "tool": "propose",
+                "component": {"kind": "pending_change", "pending_change_id": "7"},
+            },
+        ]
+        assert drawn_card_urls(OVERSEER, trace) == [f"{CARDS}/abc"]
 
-    @pytest.mark.parametrize("user_id", [STANDALONE_USER_ID, "someone-else"])
-    def test_gone_or_not_theirs_is_absent(
-        self, client: TestClient, drawn: dict[str, str], user_id: str
-    ) -> None:
-        card = "nope" if user_id == STANDALONE_USER_ID else drawn["bar"]
-        response = client.get(f"/api/v1/ai/cards/{card}", params={"user_id": user_id})
-        assert response.status_code == 404
+    def test_a_redraw_replaces_the_card_before_it(self) -> None:
+        """One card per answer: a card drawn, then fixed and drawn again,
+        shows once - the last one drawn."""
+        from app.components.web_frontend.chat_surface import drawn_card_urls
+
+        trace = [
+            {"tool": "run_code", "component": [{"kind": "chat_card", "id": "first"}]},
+            {"tool": "run_code", "component": [{"kind": "chat_card", "id": "fixed"}]},
+        ]
+        assert drawn_card_urls(OVERSEER, trace) == [f"{CARDS}/fixed"]

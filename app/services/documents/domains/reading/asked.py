@@ -15,11 +15,11 @@ async def already_asked(
     Reading again must not stack a second one on top of it. ``key`` is
     the payload field that names the thing asked about, for a card that
     is about an account rather than the paper."""
-    from app.services.finance.service import list_changes
+    from app.services.change_queue import list_changes
 
     return any(
         change.payload.get(key) == document_id
-        for change in await list_changes(db, status="pending")
+        for change in await list_changes(db, owner_user_id=None, status="pending")
         if change.change_type == change_type
     )
 

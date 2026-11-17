@@ -76,6 +76,9 @@ def get_webhook_url() -> str | None:
 PLAID_KEYS = ("PLAID_CLIENT_ID", "PLAID_SECRET")
 
 
+PLAID_KEYS = ("PLAID_CLIENT_ID", "PLAID_SECRET")
+
+
 class PlaidClient:
     """Async Plaid client. Reads its credentials on each call through
     ``app.core.secrets`` (``.env``, then the secrets store) unless overridden

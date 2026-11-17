@@ -12,14 +12,15 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from app.core.db import engine
-from app.services.ai.domains.llm.etl import CatalogStats, get_catalog_stats
-from app.services.ai.domains.llm.llm_service import (
+from app.services.ai.service import (
+    CatalogStats,
     CurrentLLMConfig,
     LLMListResult,
     ModalityListResult,
     SetModelResult,
     VendorListResult,
     clear_active_model,
+    get_catalog_stats,
     get_current_config,
     list_modalities,
     list_models,
@@ -56,69 +57,22 @@ class VendorResponse(BaseModel):
     icon_b64: str | None = None
 
 
-# The vendors the shipped provider layer can actually drive, mapped to
-# the settings field that unlocks each; None means keyless (local).
-# Catalog vendors outside this map cannot be called at all, so a
-# ``usable`` listing never shows them.
-_CALLABLE_VENDORS: dict[str, str | None] = {
-    "ollama": None,
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "google": "GOOGLE_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
-    "cohere": "COHERE_API_KEY",
-}
-
-# Brand domains, stated outright: the merchant-icon guess would coin
-# "mistral.com" and miss.
-_VENDOR_ICON_DOMAINS: dict[str, str] = {
-    "ollama": "ollama.com",
-    "openai": "openai.com",
-    "anthropic": "anthropic.com",
-    "google": "google.com",
-    "groq": "groq.com",
-    "mistral": "mistral.ai",
-    "cohere": "cohere.com",
-}
-
-
-def _usable_vendor_names() -> set[str]:
+async def _usable_vendor_names() -> set[str]:
     """Vendors whose models the running install can answer with."""
     from app.core.config import settings
+    from app.services.ai.service import usable_providers
 
-    return {
-        vendor
-        for vendor, key in _CALLABLE_VENDORS.items()
-        if key is None or getattr(settings, key, None)
-    }
+    return set(await usable_providers(settings))
 
 
-async def vendor_icon_urls(names: list[str]) -> dict[str, str]:
-    """``{vendor: URL}`` for the vendors whose logo is stored, served by
-    the icon route so a browser caches each once (``vendor_icons`` has the
-    bytes, for a page that must inline them)."""
-    from app.services.finance.service import icon_url
-
-    return {
-        name: icon_url(_VENDOR_ICON_DOMAINS[name]) for name in await vendor_icons(names)
-    }
-
-
-async def vendor_icons(names: list[str]) -> dict[str, str]:
-    """``{vendor: base64 png}`` via the merchant icon cache; misses
-    resolve on a later request once the background fill lands."""
-
+async def _vendor_icons(names: list[str]) -> dict[str, str]:
+    """``{vendor: base64 png}`` from the catalog's org marks (filled at
+    sync time from each brand's homepage)."""
     from app.core.db import get_async_session
-    from app.services.finance.service import icons_for_names
+    from app.services.ai.service import org_icons
 
-    wanted = [n for n in names if n in _VENDOR_ICON_DOMAINS]
-    if not wanted:
-        return {}
     async with get_async_session() as session:
-        return await icons_for_names(
-            session, wanted, domains_by_name=_VENDOR_ICON_DOMAINS
-        )
+        return await org_icons(session, names)
 
 
 class ModelResponse(BaseModel):
@@ -133,7 +87,6 @@ class ModelResponse(BaseModel):
     input_price: float | None
     output_price: float | None
     released_on: str | None
-    per_minute: float | None = None
 
 
 class CurrentConfigResponse(BaseModel):
@@ -243,9 +196,9 @@ async def get_vendors(
         results: list[VendorListResult] = await list_vendors()
         icons: dict[str, str] = {}
         if usable:
-            allowed = _usable_vendor_names()
+            allowed = await _usable_vendor_names()
             results = [v for v in results if v.name in allowed and v.model_count]
-            icons = await vendor_icons([v.name for v in results])
+            icons = await _vendor_icons([v.name for v in results])
         return [
             VendorResponse(
                 name=v.name,
@@ -287,8 +240,8 @@ async def get_models(
     usable: bool = Query(
         False, description="Only models this install can call (key configured)"
     ),
-    mode: str = Query(
-        "chat", description="Kind of model: chat, realtime, audio_transcription, ..."
+    mode: str | None = Query(
+        "chat", description="Kind of model (chat, realtime, ...); none for all"
     ),
 ) -> list[ModelResponse]:
     """
@@ -300,7 +253,7 @@ async def get_models(
     """
     try:
         if usable:
-            allowed = _usable_vendor_names()
+            allowed = await _usable_vendor_names()
             if vendor is not None:
                 allowed &= {vendor}
             results: list[LLMListResult] = await list_models(
@@ -331,7 +284,6 @@ async def get_models(
                 input_price=m.input_price,
                 output_price=m.output_price,
                 released_on=m.released_on,
-                per_minute=m.per_minute,
             )
             for m in results
         ]

@@ -3,8 +3,8 @@
     everywhere. Deciding it fires change:resolved, and the contact page
     behind redraws. -#}
 {% from "components/macros/layout.html" import dialog_title %}
-{% from "components/macros/changes.html" import component %}
+{% from "components/macros/chat.html" import card_loader %}
 {% call dialog_title("What we found for " ~ party.name) %}
 <p class="text-sm text-aegis-muted mb-4">Nothing is saved until you approve it. Each line says where it was read.</p>
 {% endcall %}
-{{ component(marker) }}
+{{ card_loader(card_url, "the change") }}

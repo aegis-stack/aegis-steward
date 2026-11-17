@@ -105,6 +105,6 @@ class TestSheCanSayWhoseItIs:
             )
 
     def test_it_is_registered_as_a_change_type(self) -> None:
-        from app.services.finance.domains import writes
+        from app.services import change_queue
 
-        assert "account.whose" in writes.registered_change_types()
+        assert "account.whose" in change_queue.registered_change_types()

@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import before_and_after
+from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.domains.detection.insights.formatting import format_usd
 from app.services.finance.domains.ledger import categories
 from app.services.finance.domains.planning.budgets.lines import (
@@ -28,7 +29,7 @@ from app.services.finance.domains.planning.budgets.lines import (
 )
 from app.services.finance.domains.planning.budgets.outlook import parse_budget_goal
 from app.services.finance.models import FinanceBudgetCategory
-from app.services.finance.schemas import ChangeDisplayRow, LimitCents, PeriodMonth
+from app.services.finance.schemas import LimitCents, PeriodMonth
 from app.services.finance.utils import current_period_month, period_label
 
 _NO_MONEY = "moves none: it is what the month allows, not a transfer"

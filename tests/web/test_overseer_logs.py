@@ -174,6 +174,14 @@ def test_every_line_comes_and_the_filters_keep_their_state(client: TestClient) -
     assert "window" in form.get("hx-trigger")
 
 
+async def test_the_stream_appends_new_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    followed = {REDIS.name: [_at(4, json.dumps({"level": "info", "event": "Saved"}))]}
+    use_runtime(monkeypatch, FakeRuntime(REDIS, followed=followed))
+    frames = [f async for f in overseer_logs.events("redis")]
+    sent = [f for f in frames if f.startswith(f"event: {overseer_logs.EVENT}")]
+    assert len(sent) == 1 and "Saved" in sent[0]
+
+
 def test_each_filter_list_is_one_the_page_narrows_by(client: TestClient) -> None:
     """app.js reads a facets form's lists by ``data-checklist``: without it
     a tick narrows nothing. Its button counts the ticks as they change."""
@@ -182,14 +190,6 @@ def test_each_filter_list_is_one_the_page_narrows_by(client: TestClient) -> None
     assert levels.get("data-checklist") is not None
     assert select(levels, 'input[name="level"]')
     assert "ticked" in one(levels, "summary [x-text]").get("x-text")
-
-
-async def test_the_stream_appends_new_lines(monkeypatch: pytest.MonkeyPatch) -> None:
-    followed = {REDIS.name: [_at(4, json.dumps({"level": "info", "event": "Saved"}))]}
-    use_runtime(monkeypatch, FakeRuntime(REDIS, followed=followed))
-    frames = [f async for f in overseer_logs.events("redis")]
-    sent = [f for f in frames if f.startswith(f"event: {overseer_logs.EVENT}")]
-    assert len(sent) == 1 and "Saved" in sent[0]
 
 
 def test_without_a_deploy_target_it_says_so_and_follows_nothing(

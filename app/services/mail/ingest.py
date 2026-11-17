@@ -18,11 +18,11 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.db import OpenSession
 from app.core.log import logger
 from app.core.time import utcnow
+from app.services.change_queue import PendingChange, propose
 from app.services.documents.domains.extraction.dispatch import read_quietly
 from app.services.documents.domains.reading.identity import parties_by_email
 from app.services.documents.models import DocumentPage
 from app.services.documents.service import DocumentService
-from app.services.finance.service import FinancePendingChange, propose
 from app.services.mail import parse
 from app.services.mail.models import (
     SOURCE_FILE,
@@ -375,9 +375,9 @@ async def cards_by_address(db: AsyncSession) -> dict[str, str]:
     """
     rows = (
         await db.exec(
-            select(FinancePendingChange)
-            .where(FinancePendingChange.change_type == "contact.create")
-            .order_by(col(FinancePendingChange.id))
+            select(PendingChange)
+            .where(PendingChange.change_type == "contact.create")
+            .order_by(col(PendingChange.id))
         )
     ).all()
     return {

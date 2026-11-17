@@ -18,8 +18,8 @@ from app.components.frontend.controls.inputs import StyledTextField
 from app.components.frontend.controls.text import SecondaryText
 from app.components.frontend.theme import AegisTheme as Theme
 from app.core.log import logger
+from app.core.model_picker import model_label
 from app.core.sse import stream_sse_post
-from app.services.ai.service import model_label
 
 from .attachments_ui import AttachmentsMixin, attachment_payload
 from .change_api import ChangeApi
@@ -35,7 +35,6 @@ from .stream import (
     StreamAccumulator,
     narration_note,
     strip_attachment_marker,
-    tool_label,
 )
 
 # Render at most this often while streaming; chunks buffer in between.
@@ -220,12 +219,6 @@ class ChatPanel(AttachmentsMixin, HistoryMixin, ModelChipMixin, ft.Container):
 
         return get_session_state(self.page).api_client
 
-    async def _fetch_card(self, card_id: str) -> dict[str, Any] | None:
-        body = await self._api().get(
-            f"/api/v1/ai/cards/{card_id}", {"user_id": self.user_id}
-        )
-        return body if isinstance(body, dict) else None
-
     # -- history -----------------------------------------------------------
 
     async def _resume_latest(self) -> None:
@@ -262,8 +255,6 @@ class ChatPanel(AttachmentsMixin, HistoryMixin, ModelChipMixin, ft.Container):
                     on_action=self._changes.resolve,
                     on_batch_action=self._changes.resolve_batch,
                     fetch_items=self._changes.fetch_batch,
-                    fetch_card=self._fetch_card,
-                    on_card_drawn=self._scroll_to_latest,
                 )
                 bubble.set_components(cards)
                 # Snapshot state is propose-time state: a resolution made
@@ -365,9 +356,7 @@ class ChatPanel(AttachmentsMixin, HistoryMixin, ModelChipMixin, ft.Container):
                     accumulator.reset_text()
                     if note:
                         reply.add_tool_call(note)
-                    reply.add_tool_call(
-                        tool_label(payload.get("tool", ""), payload.get("args", ""))
-                    )
+                    reply.add_tool_call(payload.get("label", ""))
                     self._scroll_to_latest()
                 elif event == "final":
                     accumulator.add_final(payload)
@@ -401,8 +390,6 @@ class ChatPanel(AttachmentsMixin, HistoryMixin, ModelChipMixin, ft.Container):
                     on_action=self._changes.resolve,
                     on_batch_action=self._changes.resolve_batch,
                     fetch_items=self._changes.fetch_batch,
-                    fetch_card=self._fetch_card,
-                    on_card_drawn=self._scroll_to_latest,
                 )
                 reply.set_components(cards)
                 self._track_cards(cards)

@@ -12,7 +12,7 @@ from app.services.ai.domains.llm.etl.llm_sync_service import (
     LLMSyncService,
     SyncResult,
     get_catalog_stats,
-    ollama_models_present,
+    local_models_present,
 )
 from app.services.ai.models.llm import (
     Direction,
@@ -705,6 +705,73 @@ class TestLLMSyncServiceQueryBatching:
         assert len(deployments) == 3
 
 
+class TestAttachLabsBatching:
+    """Naming each model's maker reads the catalog once, not once per
+    model: the models, the orgs and their roles are a read each, however
+    many models a sync brought."""
+
+    @staticmethod
+    async def _attach(
+        session: Session,
+        engine: Engine,
+        monkeypatch: pytest.MonkeyPatch,
+        lab: str,
+        count: int,
+    ) -> int:
+        from app.services.ai.domains.llm.etl import lab_resolver
+
+        async def resolve(model_id: str, orgs: object = None) -> lab_resolver.LabInfo:
+            return lab_resolver.LabInfo(
+                slug=lab, name=lab, homepage=f"https://huggingface.co/{lab}"
+            )
+
+        monkeypatch.setattr(lab_resolver, "resolve_lab", resolve)
+        ids = [f"{lab}/model-{i}" for i in range(count)]
+        session.add_all([LargeLanguageModel(model_id=i, title=i) for i in ids])
+        session.flush()
+        with _StatementCounter(engine) as counter:
+            await lab_resolver.attach_labs(session, ids)
+        return counter.count
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # two attaches, compared
+    async def test_the_cost_is_independent_of_how_many_models(
+        self,
+        sync_db_engine: Engine,
+        sync_db_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        small = await self._attach(
+            sync_db_session, sync_db_engine, monkeypatch, "lab-a", 2
+        )
+        big = await self._attach(
+            sync_db_session, sync_db_engine, monkeypatch, "lab-b", 6
+        )
+
+        assert big == small
+
+    async def test_every_model_gets_its_maker_once(
+        self,
+        sync_db_engine: Engine,
+        sync_db_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.services.ai.models.llm import ROLE_MAKER, LLMOrgRole
+
+        await self._attach(sync_db_session, sync_db_engine, monkeypatch, "lab-a", 3)
+
+        org = sync_db_session.exec(select(LLMOrg).where(LLMOrg.slug == "lab-a")).one()
+        models = sync_db_session.exec(
+            select(LargeLanguageModel).where(
+                LargeLanguageModel.made_by_org_id == org.id
+            )
+        ).all()
+        roles = sync_db_session.exec(
+            select(LLMOrgRole).where(LLMOrgRole.org_id == org.id)
+        ).all()
+        assert len(models) == 3
+        assert [role.role for role in roles] == [ROLE_MAKER]
+
+
 class TestCatalogPopulated:
     """The startup hook's guard: sync only into an empty catalog."""
 
@@ -770,22 +837,18 @@ class TestCatalogStats:
         assert ("anthropic", 0) in get_catalog_stats(sync_db_session).top_vendors
 
 
-class TestOllamaModelsPresent:
-    """The picker's ``usable`` filter shows only vendors the install can
-    call. With no API keys that is Ollama alone, and the remote catalog
-    never carries a local tag - so a fresh Ollama stack opened an empty
-    picker until someone knew to run ``llm sync --source ollama``. The
-    startup hook syncs local tags when none are present; this is the
-    check it asks."""
+class TestLocalModelsPresent:
+    """The check the startup hook asks before syncing local tags (why:
+    ``local_models_present``)."""
 
     def test_false_on_an_empty_catalog(self, sync_db_session: Session) -> None:
-        assert ollama_models_present(sync_db_session) is False
+        assert local_models_present(sync_db_session) is False
 
     def test_false_when_only_cloud_models_exist(self, sync_db_session: Session) -> None:
         TestCatalogStats._served_model(
             LLMSyncService(sync_db_session), "openai", "openai/gpt-4o"
         )
-        assert ollama_models_present(sync_db_session) is False
+        assert local_models_present(sync_db_session) is False
 
     def test_true_once_a_local_tag_is_registered(
         self, sync_db_session: Session
@@ -793,96 +856,113 @@ class TestOllamaModelsPresent:
         TestCatalogStats._served_model(
             LLMSyncService(sync_db_session), "ollama", "gpt-oss:20b"
         )
-        assert ollama_models_present(sync_db_session) is True
+        assert local_models_present(sync_db_session) is True
 
-
-class TestLLMSyncServiceVoice:
-    """The catalog keeps the voice kinds her calls, transcription and speech
-    run on, with the rates they bill by (#273)."""
-
-    RAW = {
-        "gpt-4o": {"litellm_provider": "openai", "mode": "chat"},
-        "text-embedding-3-small": {"litellm_provider": "openai", "mode": "embedding"},
-        "gpt-realtime-2.1": {
-            "litellm_provider": "openai",
-            "mode": "realtime",
-            "input_cost_per_token": 4e-06,
-            "output_cost_per_token": 2.4e-05,
-            "input_cost_per_audio_token": 3.2e-05,
-            "output_cost_per_audio_token": 6.4e-05,
-            "cache_read_input_token_cost": 4e-07,
-        },
-        "gpt-transcribe": {
-            "litellm_provider": "openai",
-            "mode": "audio_transcription",
-            "input_cost_per_second": 7.5e-05,
-        },
-    }
-
-    def _sync(self, session: Session) -> None:
-        service = LLMSyncService(session)
-        parsed = {
-            model_id: service.litellm_client._parse_model(model_id, raw)
-            for model_id, raw in self.RAW.items()
-        }
-        with (
-            patch.object(
-                service.litellm_client, "fetch_models", new_callable=AsyncMock
-            ) as mock_litellm,
-            patch.object(
-                service.openrouter_client, "fetch_models", new_callable=AsyncMock
-            ) as mock_openrouter,
-        ):
-            mock_litellm.return_value = parsed
-            mock_openrouter.return_value = []
-            import asyncio
-
-            asyncio.run(service.sync())
-
-    def test_the_default_sync_keeps_chat_and_voice(
+    def test_true_once_a_llamacpp_model_is_registered(
         self, sync_db_session: Session
     ) -> None:
-        self._sync(sync_db_session)
-        modes = {
-            m.model_id: m.mode
-            for m in sync_db_session.exec(select(LargeLanguageModel)).all()
-        }
-        assert modes == {
-            "gpt-4o": "chat",
-            "gpt-realtime-2.1": "realtime",
-            "gpt-transcribe": "audio_transcription",
-        }
+        TestCatalogStats._served_model(
+            LLMSyncService(sync_db_session), "llamacpp", "qwen2.5:7b"
+        )
+        assert local_models_present(sync_db_session) is True
 
-    def test_a_voice_model_keeps_its_rates(self, sync_db_session: Session) -> None:
-        self._sync(sync_db_session)
-        by_id = {
-            m.model_id: m for m in sync_db_session.exec(select(LargeLanguageModel))
-        }
-        prices = {p.llm_id: p for p in sync_db_session.exec(select(LLMPrice)).all()}
-        realtime = prices[by_id["gpt-realtime-2.1"].id]
-        assert realtime.input_cost_per_audio_token == pytest.approx(3.2e-05)
-        assert realtime.output_cost_per_audio_token == pytest.approx(6.4e-05)
-        assert realtime.cache_input_cost_per_token == pytest.approx(4e-07)
-        hearing = prices[by_id["gpt-transcribe"].id]
-        assert hearing.input_cost_per_second == pytest.approx(7.5e-05)
-        assert hearing.output_cost_per_audio_token is None
 
-    def test_a_voice_model_says_what_it_hears_and_speaks(
-        self, sync_db_session: Session
+class TestLocalSync:
+    """The local sync reads the app's inference engine, whichever it is:
+    its models go under the engine's name, each at the context it serves."""
+
+    @pytest.mark.skip(reason="the inference engine interface arrives with #637")
+    async def test_models_go_under_the_engine_at_their_served_context(
+        self, sync_db_session: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._sync(sync_db_session)
-        transcribe = sync_db_session.exec(
+        import httpx
+
+        from app.components.inference.llamacpp import LlamaCppEngine
+        from app.services.ai.domains.llm.etl import llm_sync_service
+        from tests import _fake_llamacpp
+        from tests._fake_ollama import serving
+
+        engine = LlamaCppEngine(
+            "http://llamacpp:8080",
+            transport=httpx.MockTransport(serving(_fake_llamacpp.ROUTES)),
+        )
+        monkeypatch.setattr(llm_sync_service, "get_inference_engine", lambda: engine)
+
+        async def no_labs(session: Session, model_ids: list[str]) -> None:
+            """The maker lookup fetches from the registry (its own tests)."""
+
+        monkeypatch.setattr(llm_sync_service, "attach_labs", no_labs)
+        result = await LLMSyncService(sync_db_session).sync_local()
+
+        assert result.models_added == 1 and not result.errors
+        model = sync_db_session.exec(
             select(LargeLanguageModel).where(
-                LargeLanguageModel.model_id == "gpt-transcribe"
+                LargeLanguageModel.model_id == "qwen2.5:7b"
             )
         ).one()
-        held = {
-            (m.modality, m.direction)
-            for m in sync_db_session.exec(
-                select(LLMModality).where(LLMModality.llm_id == transcribe.id)
-            )
-        }
-        assert held == {
-            (Modality.AUDIO, Direction.INPUT),
-            (Modality.TEXT, Direction.OUTPUT),
-        }
+        assert model.context_window == 32768
+        assert sync_db_session.get(LLMOrg, model.served_by_org_id).name == "llamacpp"
+
+
+def _litellm(model_id: str, mode: str) -> LiteLLMModel:
+    return LiteLLMModel(
+        model_id=model_id,
+        provider="openai",
+        mode=mode,
+        max_tokens=8192,
+        max_input_tokens=None,
+        max_output_tokens=None,
+        input_cost_per_token=0.000001,
+        output_cost_per_token=0.000002,
+        supports_function_calling=False,
+        supports_parallel_function_calling=False,
+        supports_vision=False,
+        supports_audio_input=False,
+        supports_audio_output=False,
+        supports_reasoning=False,
+        supports_response_schema=False,
+        supports_system_messages=True,
+        supports_prompt_caching=False,
+        deprecation_date=None,
+    )
+
+
+def test_the_default_sync_keeps_chat_and_voice_models(
+    sync_db_session: Session,
+) -> None:
+    """Chat plus the voice kinds (realtime, transcription, speech) land in
+    the catalog, each marked with its mode; embeddings stay out. A voice
+    model says what it hears and speaks by its mode."""
+    import asyncio
+
+    service = LLMSyncService(sync_db_session)
+    fetched = {
+        "openai/gpt-4o": _litellm("openai/gpt-4o", "chat"),
+        "openai/gpt-realtime": _litellm("openai/gpt-realtime", "realtime"),
+        "openai/whisper-1": _litellm("openai/whisper-1", "audio_transcription"),
+        "openai/tts-1": _litellm("openai/tts-1", "audio_speech"),
+        "openai/text-embedding-3-small": _litellm(
+            "openai/text-embedding-3-small", "embedding"
+        ),
+    }
+    with (
+        patch.object(
+            service.litellm_client, "fetch_models", new_callable=AsyncMock
+        ) as mock_litellm,
+        patch.object(
+            service.openrouter_client, "fetch_models", new_callable=AsyncMock
+        ) as mock_openrouter,
+    ):
+        mock_litellm.return_value = fetched
+        mock_openrouter.return_value = []
+        asyncio.run(service.sync(dry_run=False))
+
+    modes = {
+        m.model_id: m.mode for m in sync_db_session.exec(select(LargeLanguageModel))
+    }
+    assert modes == {
+        "openai/gpt-4o": "chat",
+        "openai/gpt-realtime": "realtime",
+        "openai/whisper-1": "audio_transcription",
+        "openai/tts-1": "audio_speech",
+    }

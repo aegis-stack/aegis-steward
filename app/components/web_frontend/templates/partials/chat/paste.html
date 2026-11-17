@@ -1,7 +1,6 @@
+{# A paste, opened from its chip in the modal (``chat_pastes``): shown as it
+   was pasted, monospaced and scrolling, since a page reflowed as prose
+   would change the thing the reader opened it to check. #}
 {% from "components/macros/layout.html" import dialog_title %}
-{# Dialog body: a block of text the user pasted, read back from the
-   store. Monospaced and scrolling, because what was pasted was a page -
-   reflowing it as prose would change the thing the reader opened it to
-   check. A fragment-only response (never a page), so no layout. #}
-{{ dialog_title(paste.title, facts="{:,}".format(paste.chars) ~ " characters · #" ~ paste.id) }}
-<pre class="max-h-[60vh] overflow-auto rounded-lg border border-aegis-border bg-aegis-bg p-3 text-xs font-mono whitespace-pre-wrap text-aegis-text">{{ text }}</pre>
+{{ dialog_title(paste.title, facts=paste.size ~ " · #" ~ paste.id) }}
+<pre data-paste-text class="max-h-[60vh] overflow-auto rounded-lg border border-aegis-border bg-aegis-bg p-3 text-xs font-mono whitespace-pre-wrap text-aegis-text">{{ text }}</pre>

@@ -1,5 +1,7 @@
-"""An agent's tools resolved from the registry (name -> callable); the
-registry itself is ``tests/core/test_tools.py``.
+"""An agent's tools: names resolved from the core registry.
+
+The registry's own contract (registration, effects, what MCP may serve)
+is tested in ``tests/core/test_tools.py``.
 
 ``resolve_tools`` hands back instrumented callables, not the registered
 objects themselves: every call is wrapped for the tool-call ledger on the
@@ -7,20 +9,15 @@ way out. So resolution is asserted on what the wrapper wraps, which is also
 what the model sees as the tool.
 """
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 import inspect
 from typing import Any
 from unittest.mock import MagicMock
 
+from pydantic import BaseModel
 import pytest
 
-from app.core.tools import (
-    ADMIN_ONLY,
-    acting_as,
-    register_tool,
-    registered_tool_names,
-    unregister_tool,
-)
+from app.core.tools import ADMIN_ONLY, Refused, acting_as, register_tool
 from app.services.ai.domains.chat.tools import resolve_tools
 
 
@@ -29,59 +26,17 @@ def unwrapped(tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
     return [inspect.unwrap(tool) for tool in tools]
 
 
-@pytest.fixture(autouse=True)
-def clean_registry() -> Generator[None]:
-    """Remove tools registered by a test so cases stay independent."""
-    before = set(registered_tool_names())
-    yield
-    for name in set(registered_tool_names()) - before:
-        unregister_tool(name)
-
-
-def _echo(text: str) -> str:
-    """Echo the given text back."""
+def first(text: str) -> str:
+    """First tool."""
     return text
 
 
-class TestRegistration:
-    def test_register_and_resolve(self) -> None:
-        register_tool("echo", _echo, description="Echo a string", effect="read")
-
-        assert "echo" in registered_tool_names()
-        assert unwrapped(resolve_tools(["echo"])) == [_echo]
-
-    def test_replace_allows_rebinding(self) -> None:
-        register_tool("echo", _echo, effect="read")
-
-        def other(text: str) -> str:
-            """Alternative echo."""
-            return text.upper()
-
-        register_tool("echo", other, effect="read", replace=True)
-        assert unwrapped(resolve_tools(["echo"])) == [other]
-
-    @pytest.mark.asyncio
-    async def test_a_script_reads_the_money_the_model_is_shown(self) -> None:
-        """#460: the model is shown each ``*_cents`` with its ``*_usd``; a
-        script calling the same tool got cents alone, read ``amount_usd``
-        off a bill, found None, and she said no bill was $250."""
-
-        async def bill() -> dict[str, Any]:
-            """One bill."""
-            return {"bills": [{"amount_cents": 25_000}]}
-
-        def count() -> dict[str, Any]:
-            """A count."""
-            return {"spent_cents": 1_920}
-
-        register_tool("bill", bill, effect="read")
-        register_tool("count", count, effect="read")
-        resolved_bill, resolved_count = resolve_tools(["bill", "count"])
-
-        assert (await resolved_bill())["bills"][0]["amount_usd"] == "$250.00"
-        assert resolved_count()["spent_usd"] == "$19.20"
+def second(text: str) -> str:
+    """Second tool."""
+    return text
 
 
+@pytest.mark.usefixtures("clean_registry")
 class TestResolution:
     def test_unknown_name_is_skipped_with_warning(
         self, monkeypatch: pytest.MonkeyPatch
@@ -91,25 +46,17 @@ class TestResolution:
 
         warned = MagicMock()
         monkeypatch.setattr(tools_module.logger, "warning", warned)
-        register_tool("echo", _echo, effect="read")
+        register_tool("first", first, effect="read")
 
-        resolved = resolve_tools(["echo", "missing-tool"])
+        resolved = resolve_tools(["first", "missing-tool"])
 
-        assert unwrapped(resolved) == [_echo]
+        assert unwrapped(resolved) == [first]
         # The skip must be surfaced: a silently ignored tool row would be
         # undebuggable.
         warned.assert_called_once()
         assert warned.call_args.kwargs.get("tool_name") == "missing-tool"
 
     def test_resolution_preserves_order(self) -> None:
-        def first(text: str) -> str:
-            """First tool."""
-            return text
-
-        def second(text: str) -> str:
-            """Second tool."""
-            return text
-
         register_tool("second", second, effect="read")
         register_tool("first", first, effect="read")
 
@@ -121,6 +68,7 @@ async def peek() -> str:
     return "the logs"
 
 
+@pytest.mark.usefixtures("clean_registry")
 async def test_an_admin_tool_answers_only_an_admin() -> None:
     """Chat checks a tool's ``admin`` as MCP does, at the call: an agent
     granted it serves whoever is chatting, admin or not."""
@@ -128,6 +76,74 @@ async def test_an_admin_tool_answers_only_an_admin() -> None:
     (tool,) = resolve_tools(["peek"])
 
     with acting_as(None, "assistant", admin=False):
-        assert await tool() == ADMIN_ONLY
+        assert await tool() == Refused(error=ADMIN_ONLY)
     with acting_as(None, "assistant", admin=True):
         assert await tool() == "the logs"
+
+
+async def strict(component: str) -> str:
+    """A tool refusing an argument it does not know, naming the known."""
+    raise ValueError(f"No component {component!r}; known: backend")
+
+
+def strict_sync(component: str) -> str:
+    """The same, not async."""
+    raise ValueError(f"No component {component!r}; known: backend")
+
+
+@pytest.mark.usefixtures("clean_registry")
+async def test_a_refused_argument_is_the_models_to_correct() -> None:
+    """A tool's ValueError is its answer, so the model asks again: raised,
+    it ended a whole live call (2026-10-17, ``health("service:documents")``)."""
+    register_tool("strict", strict, effect="read")
+    register_tool("strict_sync", strict_sync, effect="read")
+    tool, sync_tool = resolve_tools(["strict", "strict_sync"])
+
+    told = Refused(error="ValueError: No component 'x'; known: backend")
+    assert await tool(component="x") == told
+    assert sync_tool(component="x") == told
+
+
+@pytest.mark.usefixtures("clean_registry")
+async def test_each_call_is_a_step_for_whoever_is_watching() -> None:
+    """Heard where the call runs, not where the model asked for it: a read
+    run inside a code-mode script is a step too, as its tool says it."""
+    from app.core.steps import watching
+
+    register_tool("strict", strict, effect="read", doing="Checking the part")
+    register_tool("strict_sync", strict_sync, effect="read")
+    tool, sync_tool = resolve_tools(["strict", "strict_sync"])
+    steps: list[str] = []
+
+    with watching(steps.append):
+        await tool(component="x")
+        sync_tool(component="x")
+
+    assert steps == ["Checking the part", "Strict sync"]
+
+
+class Spend(BaseModel):
+    spent_cents: int
+
+
+async def spend_model() -> Spend:
+    """A tool handing back a model."""
+    return Spend(spent_cents=88_202)
+
+
+def spend_dict() -> dict[str, int]:
+    """A tool handing back a dict, not async."""
+    return {"spent_cents": 88_202}
+
+
+@pytest.mark.usefixtures("clean_registry")
+async def test_a_tools_money_reaches_the_model_in_dollars_too() -> None:
+    """Every tool's return passes this seam, natively or inside a script:
+    its cents get their dollars, model or dict alike."""
+    register_tool("spend_model", spend_model, effect="read")
+    register_tool("spend_dict", spend_dict, effect="read")
+    model_tool, dict_tool = resolve_tools(["spend_model", "spend_dict"])
+
+    dollared = {"spent_cents": 88_202, "spent_usd": "$882.02"}
+    assert await model_tool() == dollared
+    assert dict_tool() == dollared

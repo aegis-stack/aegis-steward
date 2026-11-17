@@ -1,6 +1,7 @@
 """Building a PydanticAI agent: the four provider shapes."""
 
 from collections.abc import Sequence
+from contextvars import ContextVar
 import json
 from typing import Any
 
@@ -10,6 +11,7 @@ from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
+from app.core.config import settings as app_settings
 from app.core.log import logger
 from app.services.ai.domains.llm.base import (
     ProviderError,
@@ -17,12 +19,48 @@ from app.services.ai.domains.llm.base import (
 )
 from app.services.ai.domains.llm.config import AIServiceConfig
 from app.services.ai.domains.llm.model_factory import (
+    TemperatureTolerant,
     _grant_kwargs,
+    _local_model,
     _model_settings,
-    _ollama_model,
-    model_for,
+    _provider_model,
 )
 from app.services.ai.models import AIProvider
+from app.services.ai.models.provider_names import LOCAL_PROVIDERS, provider_label
+
+# The command a hint tells a person to type: the project's own CLI.
+_CLI = app_settings.PROJECT_NAME
+
+_DEFAULT_PROMPT = (
+    "You are a helpful AI assistant. Provide clear, accurate, "
+    "and concise responses. Be friendly and professional."
+)
+
+# A model every agent built in this context answers on instead of its
+# provider's: the eval harness plays a case's script through the real turn
+# with it. Unset everywhere else.
+MODEL_OVERRIDE: ContextVar[Any | None] = ContextVar("model_override", default=None)
+
+
+def _agent(
+    model: Any,
+    config: AIServiceConfig,
+    system_prompt: str,
+    *,
+    tools: Sequence[Any],
+    capabilities: Sequence[Any],
+    agent_name: str | None,
+) -> Agent:
+    """An agent on ``model``, the one place an agent's model is set: each
+    provider's builder ends here, so every one is ``TemperatureTolerant``
+    (a temperature it refuses is retried without) and carries the row's
+    settings and grants."""
+    return Agent(
+        model=TemperatureTolerant(model),
+        model_settings=_model_settings(config),
+        system_prompt=system_prompt,
+        **_grant_kwargs(tools, capabilities, agent_name),
+    )
 
 
 async def get_agent(
@@ -53,6 +91,15 @@ async def get_agent(
     Raises:
         ProviderError: If agent creation fails
     """
+    if (override := MODEL_OVERRIDE.get()) is not None:
+        return _agent(
+            override,
+            config,
+            system_prompt_override or _DEFAULT_PROMPT,
+            tools=tools,
+            capabilities=capabilities,
+            agent_name=agent_name,
+        )
     try:
         # Special handling for PUBLIC provider (anonymous tier works keyless;
         # LLM7_API_KEY unlocks premium models)
@@ -76,9 +123,9 @@ async def get_agent(
                 agent_name=agent_name,
             )
 
-        # Special handling for OLLAMA provider (local, no API key required)
-        if config.provider == AIProvider.OLLAMA:
-            return _create_ollama_agent(
+        # A local provider (no API key required)
+        if config.provider in LOCAL_PROVIDERS:
+            return _create_local_agent(
                 config,
                 settings,
                 system_prompt_override,
@@ -87,25 +134,17 @@ async def get_agent(
                 agent_name=agent_name,
             )
 
-        # Key check, env-var handoff, and model construction all live in
-        # ``model_for`` so agent-building and model-only callers cannot drift.
-        model, _ = await model_for(config, settings)
-
-        # Determine system prompt
-        system_prompt = system_prompt_override or (
-            "You are a helpful AI assistant. Provide clear, accurate, "
-            "and concise responses. Be friendly and professional."
+        # Key check and model construction live in ``_provider_model``,
+        # which ``model_for`` builds on too, so agent-building and
+        # model-only callers cannot drift.
+        return _agent(
+            await _provider_model(config, settings),
+            config,
+            system_prompt_override or _DEFAULT_PROMPT,
+            tools=tools,
+            capabilities=capabilities,
+            agent_name=agent_name,
         )
-
-        # Create agent with system prompt, model settings, and grants
-        agent = Agent(
-            model=model,
-            model_settings=_model_settings(config),
-            system_prompt=system_prompt,
-            **_grant_kwargs(tools, capabilities, agent_name),
-        )
-
-        return agent
 
     except Exception as e:
         error_str = str(e)
@@ -115,7 +154,7 @@ async def get_agent(
             provider_name = config.provider.value.lower()
             raise ProviderNotInstalledError(
                 provider=config.provider.value,
-                cli_command=f"{{ project_slug }} ai add-provider {provider_name}",
+                cli_command=f"{_CLI} ai add-provider {provider_name}",
             ) from e
 
         # Other errors still log and raise normally
@@ -222,15 +261,14 @@ async def _create_public_agent(
             "Be friendly and professional."
         )
 
-        # Create agent with system prompt, model settings, and grants
-        agent = Agent(
-            model=model,
-            model_settings=_model_settings(config),
-            system_prompt=system_prompt,
-            **_grant_kwargs(tools, capabilities, agent_name),
+        return _agent(
+            model,
+            config,
+            system_prompt,
+            tools=tools,
+            capabilities=capabilities,
+            agent_name=agent_name,
         )
-
-        return agent
 
     except Exception as e:
         error_msg = (
@@ -238,11 +276,11 @@ async def _create_public_agent(
             "RECOMMENDED - Groq (Fastest, Most Generous Free Tier):\n"
             "   1. Visit: https://console.groq.com/keys\n"
             "   2. Get API key: export GROQ_API_KEY=your_key_here\n"
-            "   3. Switch: {{ project_slug }} ai config set-provider groq\n\n"
+            f"   3. Switch: {_CLI} ai config set-provider groq\n\n"
             "Google AI Studio (Also Free):\n"
             "   1. Visit: https://aistudio.google.com/app/apikey\n"
             "   2. Get API key: export GOOGLE_API_KEY=your_key_here\n"
-            "   3. Switch: {{ project_slug }} ai config set-provider google"
+            f"   3. Switch: {_CLI} ai config set-provider google"
         )
         logger.error(f"Failed to create PUBLIC agent: {e}")
         raise ProviderError(error_msg) from e
@@ -299,24 +337,26 @@ async def _create_pollinations_agent(
             "Be friendly and professional."
         )
 
-        return Agent(
-            model=model,
-            model_settings=_model_settings(config),
-            system_prompt=system_prompt,
-            **_grant_kwargs(tools, capabilities, agent_name),
+        return _agent(
+            model,
+            config,
+            system_prompt,
+            tools=tools,
+            capabilities=capabilities,
+            agent_name=agent_name,
         )
 
     except Exception as e:
         error_msg = (
             f"Pollinations endpoint failed ({e}). The keyless 'public' provider "
             "(LLM7.io) is a drop-in alternative: "
-            "{{ project_slug }} ai config set-provider public"
+            f"{_CLI} ai config set-provider public"
         )
         logger.error(f"Failed to create POLLINATIONS agent: {e}")
         raise ProviderError(error_msg) from e
 
 
-def _create_ollama_agent(
+def _create_local_agent(
     config: AIServiceConfig,
     settings: Any,
     system_prompt_override: str | None = None,
@@ -326,9 +366,8 @@ def _create_ollama_agent(
     agent_name: str | None = None,
 ) -> Agent:
     """
-    Create agent for OLLAMA provider using local Ollama server.
-
-    Uses Ollama's OpenAI-compatible API endpoint.
+    Create agent for a local provider (Ollama, llama.cpp), over its
+    server's OpenAI-compatible API endpoint.
 
     Args:
         config: AI service configuration
@@ -336,34 +375,33 @@ def _create_ollama_agent(
         system_prompt_override: Optional custom system prompt (for RAG mode)
     """
     try:
-        model = _ollama_model(config, settings)
+        model = _local_model(config, settings)
 
         # Determine system prompt
         system_prompt = system_prompt_override or (
-            "You are a helpful AI assistant running locally via Ollama. "
+            "You are a helpful AI assistant running locally. "
             "Provide clear, accurate, and concise responses. "
             "Be friendly and professional."
         )
 
-        # Create agent with system prompt, model settings, and grants
-        agent = Agent(
-            model=model,
-            model_settings=_model_settings(config),
-            system_prompt=system_prompt,
-            **_grant_kwargs(tools, capabilities, agent_name),
+        return _agent(
+            model,
+            config,
+            system_prompt,
+            tools=tools,
+            capabilities=capabilities,
+            agent_name=agent_name,
         )
-
-        return agent
 
     except Exception as e:
+        # A local provider is its engine, by name (``OLLAMA_BASE_URL``).
+        label = provider_label(config.provider)
         error_msg = (
-            f"Ollama connection failed ({e}).\n\n"
-            "Make sure Ollama is running:\n"
-            "   1. Install Ollama: https://ollama.com/download\n"
-            "   2. Start Ollama: ollama serve\n"
-            "   3. Pull a model: ollama pull llama3.2\n"
-            "   4. Sync models: {{ project_slug }} llm sync --source=ollama\n\n"
-            "If Ollama is running on a different host/port, set OLLAMA_BASE_URL in .env"
+            f"{label} connection failed ({e}).\n\n"
+            "Make sure it is running and serves a model, then sync it: "
+            "llm sync --source=local\n\n"
+            "If it runs on another host or port, set "
+            f"{config.provider.value.upper()}_BASE_URL in .env"
         )
-        logger.error(f"Failed to create OLLAMA agent: {e}")
+        logger.error(f"Failed to create {label} agent: {e}")
         raise ProviderError(error_msg) from e

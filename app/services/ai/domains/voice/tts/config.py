@@ -5,18 +5,21 @@ Configuration management for TTS providers and settings.
 Follows the same pattern as STTConfig for consistency.
 """
 
-from typing import Any
+from typing import Any, Self
 
 from pydantic import BaseModel, Field
 
+from app.core import secrets, speech_server
 from app.core.voice_settings import TTS_SPEED_MAX, TTS_SPEED_MIN, setting_default
 
 from ..models import (
-    DEFAULT_TTS_MODEL,
+    DEFAULT_TTS_MODELS,
     DEFAULT_TTS_PROVIDER,
-    DEFAULT_TTS_VOICE,
+    DEFAULT_TTS_VOICES,
     TTS_KEYS,
     TTSProvider,
+    not_installed,
+    unserved,
 )
 
 
@@ -35,24 +38,12 @@ class TTSConfig(BaseModel):
         default=setting_default("TTS_SPEED"), ge=TTS_SPEED_MIN, le=TTS_SPEED_MAX
     )
     instructions: str | None = None  # how to say it; gpt-4o models only
-
-    # Provider-specific defaults
-    DEFAULT_MODELS: dict[TTSProvider, str] = Field(
-        default={
-            TTSProvider.OPENAI: DEFAULT_TTS_MODEL,
-        },
-        exclude=True,
-    )
-
-    DEFAULT_VOICES: dict[TTSProvider, str] = Field(
-        default={
-            TTSProvider.OPENAI: DEFAULT_TTS_VOICE,
-        },
-        exclude=True,
-    )
+    # A speech server's address and which server it is (``local_server``).
+    server_url: str | None = None
+    server: str = setting_default("SPEECH_SERVER")
 
     @classmethod
-    def from_settings(cls, settings: Any) -> TTSConfig:
+    def from_settings(cls, settings: Any) -> Self:
         """Create configuration from main application settings."""
         provider_str = getattr(settings, "TTS_PROVIDER", DEFAULT_TTS_PROVIDER.value)
 
@@ -67,29 +58,28 @@ class TTSConfig(BaseModel):
             voice=getattr(settings, "TTS_VOICE", None),
             speed=getattr(settings, "TTS_SPEED", None) or setting_default("TTS_SPEED"),
             instructions=getattr(settings, "TTS_INSTRUCTIONS", None),
+            server_url=speech_server.reach(settings),
+            server=getattr(settings, "SPEECH_SERVER", setting_default("SPEECH_SERVER")),
         )
 
     def get_model(self) -> str:
         """Get the model to use, falling back to provider default."""
-        if self.model:
-            return self.model
-        return self.DEFAULT_MODELS.get(self.provider, DEFAULT_TTS_MODEL)
+        return self.model or DEFAULT_TTS_MODELS[self.provider]
 
     def get_voice(self) -> str:
         """Get the voice to use, falling back to provider default."""
-        if self.voice:
-            return self.voice
-        return self.DEFAULT_VOICES.get(self.provider, DEFAULT_TTS_VOICE)
+        return self.voice or DEFAULT_TTS_VOICES[self.provider]
 
-    def get_api_key(self, settings: Any) -> str | None:
-        """Get API key for the current provider."""
+    async def get_api_key(self, settings: Any) -> str | None:
+        """Get API key for the current provider, read now (``.env``, then the
+        secrets store)."""
         key_name = TTS_KEYS.get(self.provider)
         if key_name:
-            return getattr(settings, key_name, None)
+            return await secrets.get(key_name, source=settings)
 
         return None  # Local providers don't need API keys
 
-    def validation_errors(self, settings: Any) -> list[str]:
+    async def validation_errors(self, settings: Any) -> list[str]:
         """
         Validate TTS configuration and return list of issues.
 
@@ -100,25 +90,22 @@ class TTSConfig(BaseModel):
 
         # Check API key for cloud providers
         if key_name := TTS_KEYS.get(self.provider):
-            api_key = self.get_api_key(settings)
+            api_key = await self.get_api_key(settings)
             if not api_key:
                 errors.append(
                     f"Missing API key for {self.provider.value}. "
                     f"Set {key_name} environment variable."
                 )
-
-        # Validate speed range
-        if not TTS_SPEED_MIN <= self.speed <= TTS_SPEED_MAX:
-            errors.append(
-                f"Invalid speed '{self.speed}'. Must be between "
-                f"{TTS_SPEED_MIN} and {TTS_SPEED_MAX}."
-            )
+        if refused := not_installed(self.provider) or unserved(
+            self.provider, self.server_url
+        ):
+            errors.append(refused)
 
         return errors
 
-    def is_available(self, settings: Any) -> bool:
+    async def is_available(self, settings: Any) -> bool:
         """Check if the configured provider is available."""
-        return len(self.validation_errors(settings)) == 0
+        return not await self.validation_errors(settings)
 
 
 def get_tts_config(settings: Any) -> TTSConfig:

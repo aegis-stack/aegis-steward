@@ -27,7 +27,7 @@ from pydantic import (
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.schema import known, require_one_of
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.change_queue import ChangeDisplayRow
 from app.services.matters.facts import (
     ATTRIBUTE_KEYS,
     LABELS,

@@ -68,13 +68,14 @@ def _read(data: bytes) -> tuple[str, list[tuple[date, int, str | None, str | Non
     return profile.name, [(r.date, r.amount, r.name, r.account_key) for r in rows]
 
 
-@pytest.mark.parametrize("app", sorted(EXPORTS))
-def test_an_apps_export_is_known_and_read_its_way(app: str) -> None:
-    data, account = EXPORTS[app]
+# ``exporter``, not ``app``: that name is the session's FastAPI app fixture.
+@pytest.mark.parametrize("exporter", sorted(EXPORTS))
+def test_an_apps_export_is_known_and_read_its_way(exporter: str) -> None:
+    data, account = EXPORTS[exporter]
 
     name, rows = _read(data)
 
-    assert name == app
+    assert name == exporter
     assert rows == [
         (date(2026, 3, 2), -475, "Corner Cafe", account),
         (date(2026, 3, 3), 250000, "Employer", account),

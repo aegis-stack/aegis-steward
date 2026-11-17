@@ -77,7 +77,7 @@ async def main(queue: str) -> None:
 if __name__ == "__main__":
     try:
         asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else QueueName.SYSTEM))
-    except KeyboardInterrupt, asyncio.CancelledError:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         # Being stopped is not a crash. watchfiles signals this process
         # on every edit, and a page of traceback per save is how a log
         # nobody reads gets made.

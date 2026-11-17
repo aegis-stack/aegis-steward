@@ -17,13 +17,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.domains.writes.filing import (
     chat_entry,
     figure_rows,
     photo_key,
     place,
 )
-from app.services.finance.schemas import ChangeDisplayRow
 
 
 class CombinePayload(BaseModel):
@@ -123,7 +123,7 @@ async def _pages(
             raise ValueError(f"{paste_id!r} is not a photo attached in the chat.")
         pages.append(
             {
-                "title": str((entry or {}).get("title") or "photo"),
+                "title": (entry.title if entry else None) or "photo",
                 "key": key,
                 "document_id": None,
             }

@@ -1,18 +1,34 @@
-{# THE chat surface: thread, jump button, staged images, composer. The
-   Chat page includes it and the Illiana drawer loads it; there is one
-   instance on a page at a time (the drawer empties when the Chat page
-   shows), so the ids the script and the composer target stay unique.
-   Needs: assistant, stream_url, turn_defaults, messages,
-   conversation_id, path (the chat section's). #}
+{# THE chat surface: thread, jump button, staged images, composer. The AI
+   page's Chat section includes it and the drawer fetches it; there is one
+   instance on a page at a time (the drawer empties while the Chat section
+   shows), so the ids the scripts and the composer target stay unique.
+   Needs: assistant, chat_path, messages,
+   conversation_id, picker (the catalog is there to pick from), voice (how
+   a spoken turn is heard, or none), approvals (the change queue's
+   review list's URL, or none) and resolved_event (what a decision on a
+   card sends), voices (the voice chip: voice with a
+   database, for an operator), calls (live calls: ``offers_calls``),
+   operator (a call's engine and cost are shown: the operator's controls),
+   agent_url (the answering agent's editor, where the mount has one),
+   composer (what a turn may carry: ``attachments.composer``). #}
 {% from "components/macros/icons.html" import icon %}
-{% from "components/macros/form.html" import button_classes, control %}
-{% from "components/macros/chat.html" import assistant_row, conversation_field, voice_states %}
-{# The call's states as the phone and the call bar both draw them. #}
-{% macro phone_states() %}{% call voice_states(record=True, work=True) %}{{ icon("phone", "w-4 h-4") }}{% endcall %}{% endmacro %}
+{% from "components/macros/chat.html" import agent_chip, assistant_row, button_classes, conversation_field, turn_head, voice_states %}
+{% from "partials/chat/_call.html" import call_bar, mic_states, phone, phone_states with context %}
 <div id="chat" class="flex flex-col h-full"
-     data-chat='{{ {"stream": stream_url, "defaults": turn_defaults, "urls": chat_urls, "composer": chat_composer}|tojson }}'>
+     data-chat='{{ {"path": chat_path, "composer": composer}|tojson }}'>
+  {% if approvals %}
+  {# Every card still waiting for the user, beside the thread, so a proposal
+     is never lost with the conversation it was made in. #}
+  <details class="mb-3 text-xs" data-approvals>
+    <summary class="cursor-pointer text-aegis-muted hover:text-aegis-text">Waiting for your approval</summary>
+    {# Fetched each time it is opened: most visits never open it. Fetched
+       again, while open, when a card is decided anywhere on the page, so it
+       never offers one already settled in the thread. #}
+    <div hx-get="{{ approvals }}" hx-trigger="toggle[target.open] from:closest details, {{ resolved_event }}[this.closest('details').open] from:body" hx-swap="innerHTML"></div>
+  </details>
+  {% endif %}
   <div class="relative flex-1 min-h-0">
-    <div id="chat-scroll" class="h-full overflow-y-auto overscroll-contain pr-2">
+    <div id="chat-scroll" class="h-full overflow-y-auto pr-2">
       <ol id="chat-thread" class="space-y-6 pb-6">
         {% include "partials/chat/transcript.html" %}
       </ol>
@@ -23,16 +39,11 @@
     </button>
   </div>
 
-  {# Composer: the post appends the turn's bubbles; the script takes it
-     from there. Enter sends, Shift+Enter inserts a newline. #}
   {# Staged images live in the script (they ride the stream request, one
      turn only); the chips are drawn from that list. #}
   <div id="chat-attachments" class="shrink-0 [&:not([hidden])]:flex flex-wrap gap-2 pt-3" hidden></div>
   {# The markup the script clones: a staged image's chip, and the image
-     viewer's body for the one modal. Styling lives here, not in JS. #}
-  {# A card she draws mid-call, which the relay announces: held at the
-     foot of the thread until the saved turn redraws the thread. #}
-  <template id="chat-live-card"><li {{ assistant_row() }} data-live-card></li></template>
+     viewer's body for the modal. Styling lives here, not in JS. #}
   <template id="chat-chip">
     <span class="inline-flex items-center gap-2 rounded border border-aegis-border bg-aegis-card pl-1 pr-2 py-1 text-xs text-aegis-text" data-chip>
       <img src="" alt="" width="28" height="28" title="View full size" class="w-7 h-7 rounded object-cover cursor-pointer" data-view-image>
@@ -40,35 +51,30 @@
       <button type="button" title="Remove" aria-label="Remove" class="text-aegis-muted hover:text-aegis-text" data-remove>×</button>
     </span>
   </template>
-  {# What the microphone is doing, read out as well as shown. The server's
-     own refusals (nothing heard, transcription down) arrive as text. #}
-  <template id="chat-mic-states">
-    <span>
-      <span data-state="recording">Listening - press the microphone again when you're done.</span>
-      <span data-state="transcribing">Working out what you said...</span>
-      <span data-state="thinking">She's working on it...</span>
-      <span data-state="speaking">Speaking - press the microphone to interrupt.</span>
-      <span data-state="denied">The microphone is blocked. Allow it for this site, or type instead.</span>
-      <span data-state="unsupported">This browser can't record here. You can type instead.</span>
-      <span data-state="working">She's pulling that up...</span>
-      <span data-state="live">Talking live - just speak.</span>
-      <span data-state="muted">Muted - she can't hear you. Press the mic to talk again.</span>
-      <span data-state="hanging-up">Hanging up in <span data-countdown></span>s - say anything to stay on.</span>
-      <span data-state="offline">Couldn't reach the app. You can type instead.</span>
-    </span>
-  </template>
   <template id="chat-image"><img src="" alt="" width="800" height="600" class="max-h-[75vh] h-auto w-auto max-w-full mx-auto rounded"></template>
+  {% if calls %}
+  {# A card drawn mid-call, which the call announces: held at the foot of
+     the thread until the saved turn redraws the thread. #}
+  <template id="chat-live-card"><li {{ assistant_row() }} data-live-card></li></template>
+  {# Her turn on a call as it runs: each step she takes, under her name, as
+     a typed turn shows them, until the saved turn redraws the thread. #}
+  <template id="chat-live-turn"><li {{ assistant_row() }} data-live-turn>{{ turn_head(assistant) }}</li></template>
+  {% endif %}
+  {% if voice %}{{ mic_states() }}{% endif %}
   <p id="chat-mic-status" class="shrink-0 pt-2 text-xs text-aegis-muted empty:hidden" aria-live="polite"></p>
+  {# Composer: the post appends the turn's bubbles; the script takes it from
+     there. Enter sends, Shift+Enter inserts a newline. #}
   <form id="chat-composer" class="shrink-0 border-t border-aegis-border pt-3 flex flex-wrap items-end gap-2"
-        hx-post="{{ chat_urls.turns }}" hx-target="#chat-thread" hx-swap="beforeend"
+        hx-post="{{ chat_path }}/turns" hx-target="#chat-thread" hx-swap="beforeend"
         x-data="{ text: '', staged: 0 }" @chat-staged.window="staged = $event.detail"
-        @htmx:after-request="if ($event.detail.successful) { text = ''; $refs.input.style.height = 'auto' }">
+        @htmx:after-request="if ($event.detail.successful && $event.detail.elt === $el) { text = ''; $refs.input.style.height = 'auto' }">
     {{ conversation_field(conversation_id) }}
     {# The chips are a row of their own above the box: beside it, in the
        drawer, they took the width the message needs. #}
     <div class="w-full flex flex-wrap items-center gap-x-4 gap-y-1" data-composer-chips>
-      <span id="chat-model" {{ hx_load(chat_urls.model_chip) }}></span>
-      <span id="chat-voice" {{ hx_load(chat_urls.voice_chip) }}></span>
+      {% if agent_url %}{{ agent_chip(assistant, agent_url) }}{% endif %}
+      {% if picker %}<span id="chat-model" hx-get="{{ chat_path }}/models/chip" hx-trigger="load" hx-target="this" hx-swap="outerHTML"></span>{% endif %}
+      {% if voices %}<span id="chat-voice" hx-get="{{ chat_path }}/voices/chip" hx-trigger="load" hx-target="this" hx-swap="outerHTML"></span>{% endif %}
     </div>
     {# Not ``required``: a message may be images alone (the route sends the
        house line); Send stays disabled until there is text or an image. #}
@@ -76,68 +82,36 @@
               placeholder="Message {{ assistant }}"
               @keydown.enter="if (!$event.shiftKey) { $event.preventDefault(); if (text.trim() || staged) $el.form.requestSubmit() }"
               @input="$el.style.height = 'auto'; $el.style.height = $el.scrollHeight + 'px'"
-              class="{{ control('textarea') }} flex-1 basis-full sm:basis-auto resize-none max-h-40 leading-relaxed min-h-0 py-3"></textarea>
-    <label class="{{ button_classes('default') }} cursor-pointer" title="Attach images">
-      <input type="file" id="chat-attach" accept="{{ (chat_composer.images + chat_composer.documents)|join(',') }}" multiple class="sr-only" aria-label="Attach images or PDFs">
-      {{ icon("paper-clip", "w-4 h-4") }}
+              class="textarea textarea-bordered textarea-sm bg-aegis-bg flex-1 resize-none max-h-40 leading-relaxed min-h-0 py-3"></textarea>
+    <label class="{{ button_classes('default') }} cursor-pointer" title="Attach {{ composer.kinds }}">
+      <input type="file" id="chat-attach" accept="{{ composer.types|join(',') }}" multiple class="sr-only" aria-label="Attach {{ composer.kinds }}">
+      {{ icon("paperclip", "w-4 h-4") }}
     </label>
-    {# The microphone: records while pressed on, then sends what it heard
-       as the message (static/js/voice.js). Disabled while a live engine
-       is set (issue 414): click-to-speak beside a realtime call is wrong,
-       the call is the phone, and a call's Mute is on its call bar. It
-       stays on the page because Listen reads her voice off it. #}
-    {# data-state (voice.js) is what she is doing; voice_states draws it. #}
-    {% set heard = voice() %}
+    {% if voice %}
+    {# The microphone: records while pressed on, then sends what it heard as
+       the message (static/js/voice.js). data-state is what the assistant is
+       doing; voice_states draws it. #}
     <button type="button" id="chat-mic" data-state="idle"
-            class="group relative {{ button_classes('default') }} disabled:opacity-40 disabled:cursor-not-allowed data-[state=recording]:text-error data-[state=recording]:border-error data-[state=speaking]:text-aegis-teal data-[state=speaking]:border-aegis-teal"
-            aria-pressed="false" aria-label="Speak a question"
-            {% if heard.live %}disabled title="Talk with the phone: she hears you live"{% else %}title="Speak a question"{% endif %}
-            data-transcripts="{{ chat_urls.transcripts }}" data-say="{{ chat_urls.say }}"
-            data-voice='{{ heard|tojson }}'>
+            class="group relative {{ button_classes('default') }} data-[state=recording]:text-error data-[state=recording]:border-error data-[state=speaking]:text-aegis-teal data-[state=speaking]:border-aegis-teal"
+            aria-pressed="false" aria-label="Speak a question" title="Speak a question"
+            data-transcripts="{{ chat_path }}/speech/transcripts" data-say="{{ chat_path }}/speech/say"
+            data-voice='{{ voice|tojson }}'>
       {% call voice_states(record=True) %}{{ icon("mic", "w-4 h-4") }}{% endcall %}
     </button>
-    {# Talking live (issue 252): GPT-Live hears and speaks, her agent answers
-       (routes/chat_live.py, static/js/voice.js). #}
-    <button type="button" id="chat-live" data-state="idle"
-            class="group relative {{ button_classes('default') }} data-[state=recording]:text-aegis-teal data-[state=recording]:border-aegis-teal data-[state=speaking]:text-aegis-teal data-[state=speaking]:border-aegis-teal data-[state=working]:text-aegis-teal data-[state=working]:border-aegis-teal"
-            aria-pressed="false" aria-label="Talk live" title="Talk live"
-            data-engine="{{ chat_urls.engine }}" data-relay="{{ chat_urls.relay }}" data-worklet="{{ static('js/mic-worklet.js') }}"
-            data-sessions="{{ chat_urls.sessions }}" data-delegations="{{ chat_urls.delegations }}" data-looks="{{ chat_urls.looks }}" data-usage="{{ chat_urls.usage }}"
-            data-thread="{{ chat_urls.conversations }}/" data-sign-off="{{ live_lines.sign_off }}" data-end-call="{{ live_lines.end_call }}" data-sorry="{{ live_lines.sorry }}" data-not-heard="{{ live_lines.not_heard }}" data-greeting="{{ live_lines.greeting }}" data-cues='{{ live_lines.cues|tojson }}'>
-      {{ phone_states() }}
-    </button>
+    {% endif %}
+    {% if calls %}
+    {# A live call (routes/partials/chat_live.py): the server holds the
+       engine's session and carries the audio over this mount's socket. #}
+    {% call phone(button_classes('default') ~ " data-[state=recording]:text-aegis-teal data-[state=recording]:border-aegis-teal data-[state=speaking]:text-aegis-teal data-[state=speaking]:border-aegis-teal data-[state=working]:text-aegis-teal data-[state=working]:border-aegis-teal") %}{{ phone_states() }}{% endcall %}
+    {# The same call, full screen (stage.html), on the conversation open
+       here (chat.js's ``conversationId``). #}
+    <a href="{{ chat_path }}/stage" data-stage-link class="{{ button_classes('default') }}" title="Talk on the stage" aria-label="Talk on the stage">
+      {{ icon("zoom-in", "w-4 h-4") }}
+    </a>
+    {% endif %}
     <button type="button" id="chat-stop" hidden class="{{ button_classes('default') }}" aria-label="Stop">Stop</button>
-    {#- On a phone the box takes its own row (issue 471) and the buttons wrap
-        under it; Send keeps the right edge. -#}
-    <button type="submit" id="chat-send" class="ml-auto {{ button_classes() }}" aria-label="Send" :disabled="!text.trim() && !staged">Send</button>
+    <button type="submit" id="chat-send" class="{{ button_classes('primary') }}" aria-label="Send" :disabled="!text.trim() && !staged">Send</button>
   </form>
-  {# In a call (issue 273) the composer row gives way to this: what she is
-     doing (voice_states), the engine, a timer and the running cost, mute
-     on the same mic, and hang up. voice.js swaps the two and fills the
-     figures; everything drawn is here. #}
-  <div id="chat-call" hidden data-state="idle"
-       class="group shrink-0 border-t border-aegis-border pt-3 flex items-center gap-3">
-    <span class="relative w-9 h-9 rounded-full bg-aegis-teal/10 text-aegis-teal flex items-center justify-center">
-      {{ phone_states() }}
-    </span>
-    <span class="min-w-0 flex-1 truncate text-sm text-aegis-text tabular-nums">
-      Live · <span data-call-engine></span> · <span data-call-timer>0:00</span>
-      <span class="text-aegis-muted"> · <span data-call-cost></span><span data-call-cost-later hidden>priced after the call</span></span>
-    </span>
-    {# Show her a picture without leaving the call: the composer's own
-       picker (chat.js hands a picture to the call while it is up, as it
-       does a paste or a drop). #}
-    <label for="chat-attach" class="{{ button_classes('default') }} cursor-pointer" title="Show {{ assistant }} a picture">
-      {{ icon("paper-clip", "w-4 h-4") }}
-    </label>
-    <button type="button" id="chat-mute" aria-pressed="false" aria-label="Mute" title="Mute"
-            class="group/mute {{ button_classes('default') }} aria-pressed:text-error aria-pressed:border-error">
-      <span class="group-aria-pressed/mute:hidden">{{ icon("mic", "w-4 h-4") }}</span>
-      {{ icon("mic-off", "hidden group-aria-pressed/mute:block w-4 h-4") }}
-    </button>
-    <button type="button" id="chat-hang-up" aria-label="Hang up" title="Hang up"
-            class="{{ button_classes('default') }} text-error border-error hover:bg-error/10">
-      {{ icon("phone", "w-4 h-4 rotate-[135deg]") }}
-    </button>
-  </div>
+  {# In a call the composer row gives way to the call bar. #}
+  {% if calls %}{{ call_bar() }}{% endif %}
 </div>

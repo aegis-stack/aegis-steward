@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from app.services.ai.domains.voice.models import TTSProvider
 from app.services.ai.domains.voice.tts import TTSConfig, get_tts_config
+from tests._voice_settings import voice_settings
 
 
 class TestTTSConfigDefaults:
@@ -35,12 +36,7 @@ class TestTTSConfigFromSettings:
 
     def test_from_settings_with_all_values(self) -> None:
         """Test creating config from settings with all values set."""
-        settings = MagicMock()
-        settings.TTS_PROVIDER = "openai"
-        settings.TTS_MODEL = "tts-1-hd"
-        settings.TTS_VOICE = "nova"
-        settings.TTS_SPEED = 1.5
-        settings.TTS_INSTRUCTIONS = None
+        settings = voice_settings(TTS_MODEL="tts-1-hd", TTS_VOICE="nova", TTS_SPEED=1.5)
 
         config = TTSConfig.from_settings(settings)
 
@@ -62,12 +58,7 @@ class TestTTSConfigFromSettings:
 
     def test_from_settings_invalid_provider_falls_back(self) -> None:
         """Test invalid provider string falls back to OpenAI."""
-        settings = MagicMock()
-        settings.TTS_PROVIDER = "invalid_provider"
-        settings.TTS_MODEL = None
-        settings.TTS_VOICE = None
-        settings.TTS_SPEED = 1.0
-        settings.TTS_INSTRUCTIONS = None
+        settings = voice_settings(TTS_PROVIDER="invalid_provider")
 
         config = TTSConfig.from_settings(settings)
 
@@ -80,12 +71,7 @@ class TestTTSConfigFromSettings:
         ]
 
         for provider_str, expected_enum in providers:
-            settings = MagicMock()
-            settings.TTS_PROVIDER = provider_str
-            settings.TTS_MODEL = None
-            settings.TTS_VOICE = None
-            settings.TTS_SPEED = 1.0
-            settings.TTS_INSTRUCTIONS = None
+            settings = voice_settings(TTS_PROVIDER=provider_str)
 
             config = TTSConfig.from_settings(settings)
             assert config.provider == expected_enum, f"Failed for {provider_str}"
@@ -104,7 +90,14 @@ class TestTTSConfigGetModel:
         """Test get_model returns OpenAI default when model not set."""
         config = TTSConfig(provider=TTSProvider.OPENAI)
 
-        assert config.get_model() == "tts-1"
+        # OpenAI's replacement for its retiring speech models.
+        assert config.get_model() == "gpt-realtime-2.1-mini"
+
+    def test_each_provider_speaks_on_its_own_model_and_voice(self) -> None:
+        config = TTSConfig(provider=TTSProvider.GEMINI)
+
+        assert config.get_model() == "gemini-3.8-flash-tts"
+        assert config.get_voice() == "Kore"
 
 
 class TestTTSConfigGetVoice:
@@ -126,43 +119,43 @@ class TestTTSConfigGetVoice:
 class TestTTSConfigGetApiKey:
     """Test TTSConfig.get_api_key() method."""
 
-    def test_get_api_key_openai(self) -> None:
+    async def test_get_api_key_openai(self) -> None:
         """Test get_api_key returns OpenAI key for OpenAI provider."""
         settings = MagicMock()
         settings.OPENAI_API_KEY = "sk-test-openai-key"
 
         config = TTSConfig(provider=TTSProvider.OPENAI)
 
-        assert config.get_api_key(settings) == "sk-test-openai-key"
+        assert await config.get_api_key(settings) == "sk-test-openai-key"
 
-    def test_get_api_key_missing_returns_none(self) -> None:
+    async def test_get_api_key_missing_returns_none(self) -> None:
         """Test get_api_key returns None when key not set."""
         settings = MagicMock(spec=[])  # No attributes
 
         config = TTSConfig(provider=TTSProvider.OPENAI)
 
-        assert config.get_api_key(settings) is None
+        assert await config.get_api_key(settings) is None
 
 
 class TestTTSConfigValidation:
     """Test TTSConfig.validation_errors() method."""
 
-    def test_validate_openai_with_key_passes(self) -> None:
+    async def test_validate_openai_with_key_passes(self) -> None:
         """Test validation passes when OpenAI key is set."""
         settings = MagicMock()
         settings.OPENAI_API_KEY = "sk-test-key"
 
         config = TTSConfig(provider=TTSProvider.OPENAI)
-        errors = config.validation_errors(settings)
+        errors = await config.validation_errors(settings)
 
         assert len(errors) == 0
 
-    def test_validate_openai_missing_key_fails(self) -> None:
+    async def test_validate_openai_missing_key_fails(self) -> None:
         """Test validation fails when OpenAI key is missing."""
         settings = MagicMock(spec=[])
 
         config = TTSConfig(provider=TTSProvider.OPENAI)
-        errors = config.validation_errors(settings)
+        errors = await config.validation_errors(settings)
 
         assert len(errors) == 1
         assert "OPENAI_API_KEY" in errors[0]
@@ -171,22 +164,22 @@ class TestTTSConfigValidation:
 class TestTTSConfigIsAvailable:
     """Test TTSConfig.is_available() method."""
 
-    def test_is_available_true_when_valid(self) -> None:
+    async def test_is_available_true_when_valid(self) -> None:
         """Test is_available returns True when validation passes."""
         settings = MagicMock()
         settings.OPENAI_API_KEY = "sk-test-key"
 
         config = TTSConfig(provider=TTSProvider.OPENAI)
 
-        assert config.is_available(settings) is True
+        assert await config.is_available(settings) is True
 
-    def test_is_available_false_when_invalid(self) -> None:
+    async def test_is_available_false_when_invalid(self) -> None:
         """Test is_available returns False when validation fails."""
         settings = MagicMock(spec=[])
 
         config = TTSConfig(provider=TTSProvider.OPENAI)
 
-        assert config.is_available(settings) is False
+        assert await config.is_available(settings) is False
 
 
 class TestGetTTSConfigFunction:
@@ -194,12 +187,7 @@ class TestGetTTSConfigFunction:
 
     def test_get_tts_config_returns_tts_config(self) -> None:
         """Test get_tts_config returns TTSConfig instance."""
-        settings = MagicMock()
-        settings.TTS_PROVIDER = "openai"
-        settings.TTS_MODEL = None
-        settings.TTS_VOICE = None
-        settings.TTS_SPEED = 1.0
-        settings.TTS_INSTRUCTIONS = None
+        settings = voice_settings()
 
         config = get_tts_config(settings)
 

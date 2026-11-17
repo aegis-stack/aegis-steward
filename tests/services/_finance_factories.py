@@ -184,9 +184,13 @@ async def pending_cards(
     db: AsyncSession, change_type: str, status: str | None = "pending"
 ) -> list[Any]:
     """The queue's cards of one type, oldest first."""
-    from app.services.finance.domains.writes.queue import list_changes
+    from app.services.change_queue import list_changes
 
-    return list(await list_changes(db, status=status, change_type=change_type))
+    rows = await list_changes(db, status=status, owner_user_id=None)
+    return sorted(
+        (row for row in rows if row.change_type == change_type),
+        key=lambda row: row.id or 0,
+    )
 
 
 async def category_id(svc: FinanceService, hint: str) -> int:

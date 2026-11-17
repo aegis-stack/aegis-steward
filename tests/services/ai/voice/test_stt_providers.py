@@ -1,5 +1,7 @@
 """Tests for STT providers."""
 
+import pytest
+
 from app.services.ai.domains.voice.models import STTProvider
 from app.services.ai.domains.voice.stt import (
     BaseSTTProvider,
@@ -9,6 +11,7 @@ from app.services.ai.domains.voice.stt import (
     WhisperLocalProvider,
     get_stt_provider,
 )
+from tests._voice_packages import packages_installed
 
 
 class TestGetSTTProvider:
@@ -21,15 +24,17 @@ class TestGetSTTProvider:
         assert isinstance(provider, OpenAIWhisperProvider)
         assert provider.provider_type == STTProvider.OPENAI_WHISPER
 
-    def test_get_whisper_local_provider(self) -> None:
+    def test_get_whisper_local_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test factory returns WhisperLocalProvider."""
+        packages_installed(monkeypatch, True)
         provider = get_stt_provider(STTProvider.WHISPER_LOCAL)
 
         assert isinstance(provider, WhisperLocalProvider)
         assert provider.provider_type == STTProvider.WHISPER_LOCAL
 
-    def test_get_faster_whisper_provider(self) -> None:
+    def test_get_faster_whisper_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test factory returns FasterWhisperProvider."""
+        packages_installed(monkeypatch, True)
         provider = get_stt_provider(STTProvider.FASTER_WHISPER)
 
         assert isinstance(provider, FasterWhisperProvider)
@@ -273,50 +278,43 @@ class TestBaseSTTProviderInterface:
 
 
 class TestOpenAIResponseFormat:
-    """Only whisper-1 answers ``verbose_json``; the gpt-4o transcribe
-    models reject it and answer ``json``, without segments."""
+    """Only Whisper answers ``verbose_json``; the gpt-4o transcription
+    models accept ``json``/``text`` and reject every call otherwise."""
 
-    @staticmethod
-    async def _sent_format(model: str) -> str:
-        from types import SimpleNamespace
-        from unittest.mock import AsyncMock
+    async def _format_sent(self, model: str) -> str:
+        from unittest.mock import AsyncMock, MagicMock
 
-        from app.services.ai.domains.voice.models import AudioFormat, AudioInput
+        from app.services.ai.domains.voice.models import AudioInput
 
-        create = AsyncMock(return_value=SimpleNamespace(text="hello"))
-        provider = OpenAIWhisperProvider(model=model, api_key="sk-test")
-        provider._client = SimpleNamespace(
-            audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create))
-        )
-        result = await provider.transcribe(
-            AudioInput(content=b"x", format=AudioFormat("wav"))
-        )
-        assert result.text == "hello"
+        provider = OpenAIWhisperProvider(model=model)
+        reply = MagicMock(text="hi", segments=None, language=None, duration=None)
+        create = AsyncMock(return_value=reply)
+        provider._client = MagicMock()
+        provider._client.audio.transcriptions.create = create
+        await provider.transcribe(AudioInput(content=b"x"))
         return create.call_args.kwargs["response_format"]
 
-    async def test_whisper_asks_for_segments(self) -> None:
-        assert await self._sent_format("whisper-1") == "verbose_json"
+    async def test_whisper_gets_verbose_json(self) -> None:
+        assert await self._format_sent("whisper-1") == "verbose_json"
 
-    async def test_gpt_4o_transcribe_asks_for_json(self) -> None:
-        assert await self._sent_format("gpt-4o-mini-transcribe") == "json"
-        assert await self._sent_format("gpt-4o-transcribe") == "json"
+    async def test_gpt_4o_models_get_json(self) -> None:
+        assert await self._format_sent("gpt-4o-mini-transcribe") == "json"
+        assert await self._format_sent("gpt-4o-transcribe") == "json"
 
     async def test_a_hint_rides_as_the_prompt(self) -> None:
-        """Names the model cannot guess ("Illiana" came back "Ilyana")."""
-        from types import SimpleNamespace
-        from unittest.mock import AsyncMock
+        """Names the model cannot guess go to it as the API's ``prompt``."""
+        from unittest.mock import AsyncMock, MagicMock
 
-        from app.services.ai.domains.voice.models import AudioFormat, AudioInput
+        from app.services.ai.domains.voice.models import AudioInput
 
-        create = AsyncMock(return_value=SimpleNamespace(text="hi"))
-        provider = OpenAIWhisperProvider(model="gpt-4o-mini-transcribe", api_key="k")
-        provider._client = SimpleNamespace(
-            audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create))
-        )
-        await provider.transcribe(
-            AudioInput(content=b"x", format=AudioFormat.WAV, prompt="Illiana")
-        )
+        provider = OpenAIWhisperProvider(model="gpt-4o-mini-transcribe")
+        reply = MagicMock(text="hi", segments=None, language=None, duration=None)
+        create = AsyncMock(return_value=reply)
+        provider._client = MagicMock()
+        provider._client.audio.transcriptions.create = create
+
+        await provider.transcribe(AudioInput(content=b"x", prompt="Illiana"))
         assert create.call_args.kwargs["prompt"] == "Illiana"
 
-        await provider.transcribe(AudioInput(content=b"x", format=AudioFormat.WAV))
+        await provider.transcribe(AudioInput(content=b"x"))
         assert "prompt" not in create.call_args.kwargs

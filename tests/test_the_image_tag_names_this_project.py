@@ -18,7 +18,7 @@ carries the old form, so it is pinned here instead.
 
 from pathlib import Path
 
-import yaml
+from tests._compose import load_compose
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED = "aegis-stack:latest"
@@ -31,7 +31,7 @@ def _tag_default(raw: str) -> str:
 
 
 def test_compose_defaults_to_this_projects_tag() -> None:
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text()) or {}
+    compose = load_compose("docker-compose.yml")
     # The anchor every app service merges from carries the image.
     images = {
         spec["image"]

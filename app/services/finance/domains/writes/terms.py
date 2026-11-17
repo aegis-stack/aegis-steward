@@ -35,12 +35,12 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import before_and_after, format_date
 from app.core.schema import known
+from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.domains.detection.insights.formatting import (
     format_apr,
     format_usd,
 )
 from app.services.finance.models.accounts import FinanceLiabilityDetail
-from app.services.finance.schemas import ChangeDisplayRow
 from app.services.finance.utils import money_to_cents
 
 # The fields this change may set, in the order the card lists them:
@@ -227,7 +227,10 @@ async def valuation_describe(
             value += " (estimate)"
         rows.append(
             ChangeDisplayRow(
-                label=label, value=value, amount=point.value, note=point.note or None
+                label=label,
+                value=value,
+                amount_cents=point.value,
+                note=point.note or None,
             )
         )
     return rows

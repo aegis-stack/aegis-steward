@@ -6,11 +6,11 @@ under test is the plumbing and the refusals, not the prose.
 """
 
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import date
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from pydantic_ai.messages import ModelResponse, ToolCallPart
-from pydantic_ai.models import Model
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 import pytest
@@ -18,32 +18,46 @@ from sqlmodel import Session, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.ai.domains.chat import module_context
+from app.services.ai.domains.chat.agent_loader import invalidate_agent_cache
 from app.services.ai.domains.llm.config import AIServiceConfig
 from app.services.ai.domains.llm.providers import ProviderError, model_for
 from app.services.ai.models import AIProvider
 from app.services.finance.domains.detection import analyst
+from app.services.finance.domains.detection.analyst.deep_dive import run_deep_dive
+from app.services.finance.domains.detection.analyst.seeds import (
+    deep_dive_agent_definition,
+)
 from app.services.finance.models import FinanceInsight
 from app.services.finance.seeds import demo_seed
-from app.services.finance.utils import current_date
 
 OWNER = 1
 NOTE_TEXT = "Your spending is up in one category this month. Nothing else moved."
-# The demo seed dates everything from the real clock, so the report reads
-# as of that same day. A pinned 2026-07-20 held only while real time was
-# close to July: the seeded bills drifted out of its projection window and
-# the cash block vanished (2026-09-27).
-TODAY = current_date()
-YESTERDAY = TODAY - timedelta(days=1)
 
 
-pytestmark = pytest.mark.usefixtures("clean_agent_cache")
+@pytest.fixture(autouse=True)
+def _seed_on_the_notes_day(monkeypatch):
+    """The demo seed anchors on the real clock; every note here is written
+    for 2026-07-20. Once the calendar drifted far enough, the seeded bills
+    fell outside the note's window and its cash section vanished."""
+    monkeypatch.setattr(
+        "app.services.finance.seeds.demo_seed.seed.current_date",
+        lambda: date(2026, 7, 20),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clean_agent_cache():
+    """``resolve_agent`` memoizes per process; tests must not inherit rows."""
+    invalidate_agent_cache()
+    yield
+    invalidate_agent_cache()
 
 
 @pytest.fixture
 def use_test_session(monkeypatch):
-    """Point the memory-module renderer at the test's own session.
+    """Point the context-module renderer at the test's own session.
 
-    ``render_memory_modules`` opens its own session when the caller does not
+    ``render_context_modules`` opens its own session when the caller does not
     supply one, which in a test would reach the real database.
     """
 
@@ -55,19 +69,6 @@ def use_test_session(monkeypatch):
         monkeypatch.setattr(module_context, "get_async_session", _session)
 
     return _install
-
-
-def _one_session(session: AsyncSession):
-    """``run_analyst_note`` takes a way to OPEN a database, not an open one,
-    so it can let go of the write lock around the model call. These tests
-    want everything on the single per-test session, so the factory hands
-    back the same one and never commits it."""
-
-    @asynccontextmanager
-    async def _open():
-        yield session
-
-    return _open
 
 
 def _fake_model(monkeypatch, headline: str = NOTE_TEXT) -> list[str]:
@@ -86,9 +87,18 @@ def _fake_model(monkeypatch, headline: str = NOTE_TEXT) -> list[str]:
     return calls
 
 
+def _returns(value: Any) -> Any:
+    """An async ``model_for`` stand-in that hands back ``value``."""
+
+    async def model_for_stub(config: Any, settings: Any) -> Any:
+        return value
+
+    return model_for_stub
+
+
 async def _seed_agent(session: AsyncSession) -> None:
     """Insert the analyst rows on the async session the run will use."""
-    session.add(analyst.MemoryModule(**analyst.snapshot_module_definition()))
+    session.add(analyst.ContextModule(**analyst.snapshot_module_definition()))
     session.add(analyst.Agent(**analyst.analyst_agent_definition()))
     await session.flush()
 
@@ -117,21 +127,21 @@ class TestModelFor:
 
         with (
             patch("app.services.ai.domains.llm.model_factory.AsyncOpenAI") as client,
+            # A real model: the wrapper ``model_for`` adds takes no mock.
             patch(
-                "app.services.ai.domains.llm.model_factory.OpenAIChatModel"
+                "app.services.ai.domains.llm.model_factory.OpenAIChatModel",
+                return_value=TestModel(),
             ) as chat_model,
             patch("app.services.ai.domains.llm.model_factory.OpenAIProvider"),
         ):
-            # a stand-in that passes as a model, since model_for wraps it
-            chat_model.return_value = MagicMock(spec=Model)
             model, model_name = await model_for(config, settings)
 
         assert model_name == "qwen2.5:7b"
-        # wrapped so a refused temperature is retried (model_factory.tolerant)
+        # wrapped so a refused temperature is retried (TemperatureTolerant)
         assert model.wrapped is chat_model.return_value
         # Ollama speaks OpenAI at /v1 and wants no real key.
         assert client.call_args.kwargs["base_url"] == "http://localhost:11434/v1"
-        assert client.call_args.kwargs["api_key"] == "ollama"
+        assert client.call_args.kwargs["api_key"] == "local"
         assert chat_model.call_args.kwargs["model_name"] == "qwen2.5:7b"
 
     async def test_keyless_public_provider_is_refused_with_a_pointer(self) -> None:
@@ -155,6 +165,39 @@ class TestModelFor:
         assert "No API key configured" in str(excinfo.value)
 
 
+def _model_sees_no_transaction(monkeypatch, session: AsyncSession) -> list[bool]:
+    """A TestModel, recording whether ``session`` holds a transaction when
+    the model is handed out: on SQLite one holds the database's only write
+    lock, and a model can take minutes."""
+    open_at_model: list[bool] = []
+
+    async def _model_for(config, settings):
+        open_at_model.append(session.in_transaction())
+        return TestModel(custom_output_args={"headline": NOTE_TEXT}), "test-model"
+
+    monkeypatch.setattr("app.services.ai.domains.llm.providers.model_for", _model_for)
+    return open_at_model
+
+
+class TestNoLockWhileTheModelThinks:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("deep", [False, True])
+    async def test_a_runner_ends_its_reads_before_the_model(
+        self, async_db_session: AsyncSession, monkeypatch, use_test_session, deep: bool
+    ) -> None:
+        """The nightly note and the deep dive alike."""
+        use_test_session(async_db_session)
+        open_at_model = _model_sees_no_transaction(monkeypatch, async_db_session)
+        await demo_seed.seed_demo(async_db_session, owner_user_id=OWNER)
+        await _seed_agent(async_db_session)
+        if deep:
+            async_db_session.add(analyst.Agent(**deep_dive_agent_definition()))
+            await async_db_session.flush()
+        run = run_deep_dive if deep else analyst.run_analyst_note
+        await run(async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20))
+        assert open_at_model == [False]
+
+
 class TestRunAnalystNote:
     @pytest.mark.asyncio
     async def test_writes_one_note_from_the_snapshot(
@@ -166,7 +209,7 @@ class TestRunAnalystNote:
         await _seed_agent(async_db_session)
 
         note = await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=TODAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20)
         )
 
         assert note is not None
@@ -177,7 +220,7 @@ class TestRunAnalystNote:
         assert note.body.startswith(NOTE_TEXT)
         assert "**Cash and bills**" in note.body
         assert "Open findings:" in note.body
-        assert note.dedup_key == f"note:{TODAY:%Y%m%d}"
+        assert note.dedup_key == "note:20260720"
         assert note.metadata_["model_name"] == "test-model"
         assert note.metadata_["commentary"]["headline"] == NOTE_TEXT
         assert len(await _notes(async_db_session)) == 1
@@ -187,7 +230,7 @@ class TestRunAnalystNote:
         self, async_db_session: AsyncSession, monkeypatch, use_test_session
     ) -> None:
         """The whole design rests on this: the model is handed the deterministic
-        figures. If the memory module does not make it into the turn, the agent
+        figures. If the context module does not make it into the turn, the agent
         is writing from nothing and every number it produces is invented."""
         use_test_session(async_db_session)
         seen: dict[str, str] = {}
@@ -199,17 +242,15 @@ class TestRunAnalystNote:
                 parts=[ToolCallPart(tool.name, {"headline": NOTE_TEXT})]
             )
 
-        async def _model_for(config, settings):
-            return FunctionModel(_respond), "function-model"
-
         monkeypatch.setattr(
-            "app.services.ai.domains.llm.providers.model_for", _model_for
+            "app.services.ai.domains.llm.providers.model_for",
+            _returns((FunctionModel(_respond), "function-model")),
         )
         await demo_seed.seed_demo(async_db_session, owner_user_id=OWNER)
         await _seed_agent(async_db_session)
 
         note = await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=TODAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20)
         )
 
         assert note is not None
@@ -228,13 +269,13 @@ class TestRunAnalystNote:
         calls = _fake_model(monkeypatch)
         await demo_seed.seed_demo(async_db_session, owner_user_id=OWNER)
         await _seed_agent(async_db_session)
-        today = TODAY
+        today = date(2026, 7, 20)
 
         first = await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=today
+            async_db_session, owner_user_id=OWNER, today=today
         )
         second = await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=today
+            async_db_session, owner_user_id=OWNER, today=today
         )
 
         assert first is not None
@@ -252,7 +293,7 @@ class TestRunAnalystNote:
         await _seed_agent(async_db_session)
 
         note = await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=TODAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20)
         )
 
         assert note is None
@@ -271,7 +312,7 @@ class TestRunAnalystNote:
         await demo_seed.seed_demo(async_db_session, owner_user_id=OWNER)
 
         note = await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=TODAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20)
         )
 
         assert note is None
@@ -294,7 +335,7 @@ class TestRunAnalystNote:
         await _seed_agent(async_db_session)
 
         note = await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=TODAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20)
         )
 
         assert note is None
@@ -310,7 +351,7 @@ class TestRunAnalystNote:
         await _seed_agent(async_db_session)
 
         note = await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=TODAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20)
         )
 
         assert note is None
@@ -333,11 +374,11 @@ class TestRunAnalystNote:
         await demo_seed.seed_demo(async_db_session, owner_user_id=OWNER)
         await _seed_agent(async_db_session)
         await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=YESTERDAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 19)
         )
 
         snapshot = await analyst.build_finance_snapshot(
-            async_db_session, owner_user_id=OWNER, today=TODAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20)
         )
 
         assert snapshot is not None
@@ -356,11 +397,11 @@ class TestRunAnalystNote:
         await demo_seed.seed_demo(async_db_session, owner_user_id=OWNER)
         await _seed_agent(async_db_session)
         await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=YESTERDAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 19)
         )
 
         snapshot = await analyst.build_finance_snapshot(
-            async_db_session, owner_user_id=OWNER, today=TODAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 20)
         )
 
         assert "YOUR PREVIOUS NOTE" in snapshot
@@ -376,14 +417,14 @@ class TestRunAnalystNote:
         await _seed_agent(async_db_session)
 
         await analyst.run_analyst_note(
-            _one_session(async_db_session), owner_user_id=OWNER, today=YESTERDAY
+            async_db_session, owner_user_id=OWNER, today=date(2026, 7, 19)
         )
 
         baseline = await analyst.snapshot_before(
-            async_db_session, owner_user_id=OWNER, day=TODAY
+            async_db_session, owner_user_id=OWNER, day=date(2026, 7, 20)
         )
         assert baseline is not None
-        assert baseline[0] == YESTERDAY
+        assert baseline[0] == date(2026, 7, 19)
 
     @pytest.mark.asyncio
     async def test_a_failed_run_leaves_no_baseline(
@@ -397,15 +438,13 @@ class TestRunAnalystNote:
 
         assert (
             await analyst.run_analyst_note(
-                _one_session(async_db_session),
-                owner_user_id=OWNER,
-                today=YESTERDAY,
+                async_db_session, owner_user_id=OWNER, today=date(2026, 7, 19)
             )
             is None
         )
         assert (
             await analyst.snapshot_before(
-                async_db_session, owner_user_id=OWNER, day=TODAY
+                async_db_session, owner_user_id=OWNER, day=date(2026, 7, 20)
             )
             is None
         )
@@ -417,9 +456,9 @@ class TestSchedulerRegistration:
     still written on request; nothing writes one on a schedule."""
 
     def test_the_nightly_note_is_not_scheduled(self) -> None:
-        from app.services.finance.scheduled_jobs import JOBS
+        from app.core.schedule import service_jobs
 
-        assert "finance_analyst_note" not in {job.id for job in JOBS}
+        assert "finance_analyst_note" not in {job.id for job in service_jobs()}
 
 
 class TestFixturesReachTheRegistry:

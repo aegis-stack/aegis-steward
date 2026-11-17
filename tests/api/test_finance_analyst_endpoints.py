@@ -44,7 +44,7 @@ def analyst_ready(monkeypatch):
             analyst as finance_analyst_module,
         )
 
-        monkeypatch.setattr(finance_analyst_module, "get_async_session", _session)
+        monkeypatch.setattr(finance_analyst_module, "_job_session", _session)
 
         calls: list[str] = []
 
@@ -60,7 +60,7 @@ def analyst_ready(monkeypatch):
             "app.services.ai.domains.llm.providers.model_for", _model_for
         )
 
-        session.add(analyst.MemoryModule(**analyst.snapshot_module_definition()))
+        session.add(analyst.ContextModule(**analyst.snapshot_module_definition()))
         session.add(analyst.Agent(**analyst.analyst_agent_definition()))
         service = FinanceService(session)
         await service.create_manual_account(
@@ -110,7 +110,7 @@ async def test_running_again_returns_the_same_note_without_a_model_call(
     assert len(calls) == 1, "the second request must not spin up a model"
 
 
-@pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version (#355)
+@pytest.mark.queryspy(threshold=4)  # each resolve reads the prompt version
 @pytest.mark.asyncio
 async def test_force_regenerates_todays_note(
     authenticated_client: TestClient,
@@ -260,7 +260,7 @@ async def test_background_run_writes_the_note_as_a_job(
     # The alias is gone: both the background job and the direct path now
     # take ``get_async_session`` itself, because each opens and closes its
     # own short transactions around the model call.
-    monkeypatch.setattr(finance_analyst_module, "get_async_session", _session)
+    monkeypatch.setattr(finance_analyst_module, "_job_session", _session)
 
     response = authenticated_client.post(RUN_URL, params={"background": "true"})
     assert response.status_code == 202

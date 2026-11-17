@@ -138,12 +138,14 @@ def _pieces(subject: str, ids: set[str]) -> tuple[list[Piece], Lines]:
     return found, service_pieces.links(folder, found, ids)
 
 
-def openable(stack: list[dict[str, Any]], model: SystemModel) -> set[str]:
-    """The services in ``stack`` that open up, by map key."""
+def openable(stack: list[dict[str, Any]]) -> set[str]:
+    """The services in ``stack`` that open up, by map key: their pieces
+    alone, not the lines out of each (``pieces_of``), which read every
+    import from source and wait for one to be opened."""
     return {
         key
         for item in stack
-        if is_service(key := item["registry"]) and pieces_of(subject_of(key), model)[0]
+        if is_service(key := item["registry"]) and service_pieces.held(subject_of(key))
     }
 
 
@@ -192,16 +194,18 @@ def service_opened(
     railed = [
         others[key] | {"key": key, "place": "rail"} for key in rail if key not in lane
     ]
-    return pieces + docked + railed, links, _tones(links, lane, titles)
+    skips = {(piece.key, b) for piece in found for b in piece.skips}
+    return pieces + docked + railed, links, _tones(links, lane, titles, skips)
 
 
 def _tones(
-    links: list[Pair], lane: dict[str, str], titles: dict[str, str]
+    links: list[Pair], lane: dict[str, str], titles: dict[str, str], skips: set[Pair]
 ) -> dict[Pair, dict[str, str]]:
     """The lines worth a look, each with why (its tone's meaning:
-    ``LINE_KEY``): a way in straight to data past the facade, and two pieces
-    of a lane using each other (the only lines kept within one), red; a line
-    back a lane, amber. The rest go the way a call does."""
+    ``LINE_KEY``): a way in past the facade (the parts rule's ``own-facade``
+    finding, ``skips``), and two pieces of a lane using each other (the only
+    lines kept within one), red; a line back a lane, amber. The rest go the
+    way a call does."""
     order = [key for key, _ in overseer_map.LANES]
     found: dict[Pair, dict[str, str]] = {}
     for a, b in links:
@@ -209,7 +213,7 @@ def _tones(
         if here == there:
             why = f"{titles[a]} and {titles[b]} use each other (a loop)"
             found[(a, b)] = {"tone": "error", "why": why}
-        elif (here, there) == ("entry", "data"):
+        elif (a, b) in skips:
             why = f"{titles[a]} skips the facade into {titles[b]}"
             found[(a, b)] = {"tone": "error", "why": why}
         elif {here, there} <= set(order) and order.index(there) < order.index(here):

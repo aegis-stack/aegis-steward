@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import re
 from typing import TYPE_CHECKING, Any
 import uuid
 
@@ -35,6 +36,9 @@ if TYPE_CHECKING:
 _DEFAULT_MAX_FINISHED = 200
 
 JobWork = Callable[["JobHandle"], Awaitable[dict[str, Any] | None]]
+
+# How far a job has got, where its label says so: "Indexing 3 of 12 files".
+PROGRESS = re.compile(r"(\d+) of (\d+)")
 
 
 @dataclass
@@ -70,6 +74,12 @@ class JobSnapshot:
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def progress_of(label: str) -> tuple[int, int] | None:
+    """How many of how many a job's label says are done, if it does."""
+    found = PROGRESS.search(label)
+    return (int(found[1]), int(found[2])) if found else None
 
 
 class _Job:
@@ -115,6 +125,10 @@ class _Job:
 # so a job that takes one of these needs no frame, field or route of its
 # own to show progress.
 SetLabel = Callable[[str], Awaitable[None]]
+# The same, sync: work that reports from inside a loop it cannot await in
+# (extraction, between pages) calls it. ``JobHandle.set_label`` is one; on
+# a worker, ``job_store.narrate`` schedules the write.
+Report = Callable[[str], None]
 
 
 async def unwatched(label: str) -> None:
@@ -234,6 +248,23 @@ class JobRunner:
     def get(self, job_id: str) -> JobSnapshot | None:
         job = self._jobs.get(job_id)
         return job.snapshot() if job else None
+
+    def latest(self, name: str) -> JobSnapshot | None:
+        """This process's newest job named ``name``, running or ended: no
+        await, so a caller can check it and ``start`` as one step."""
+        job = next((j for j in reversed(self._jobs.values()) if j.name == name), None)
+        return job.snapshot() if job else None
+
+    async def follow(
+        self, job_id: str, queue: asyncio.Queue[dict[str, Any] | None]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Each state of a job subscribed to (``subscribe_any``) until it
+        ends; unsubscribed however the reader stops."""
+        try:
+            while (snapshot := await queue.get()) is not None:
+                yield snapshot
+        finally:
+            self.unsubscribe(job_id, queue)
 
     def subscribe(self, job_id: str) -> asyncio.Queue[dict[str, Any] | None] | None:
         """Queue of snapshot dicts, primed with the current state.

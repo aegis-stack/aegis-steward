@@ -2,16 +2,11 @@
 
    Import what you need:
 
-       {% from "components/macros/layout.html" import card, stat_tile, dropdown %}
+       {% from "components/macros/layout.html" import card, stat_tile, dialog, dropdown %}
 #}
-{% from "components/macros/icons.html" import icon %}
-{% from "components/macros/feedback.html" import empty_state %}
-{% from "components/macros/form.html" import action, button_classes %}
-
-
-{# The kit's tone vocabulary: one word to one text colour, wherever a
-   value, a dot or a cell is coloured by what it means. #}
-{% set TONE_TEXT = {"ok": "text-aegis-teal", "warn": "text-aegis-amber", "error": "text-error", "muted": "text-aegis-muted", "accent": "text-aegis-accent"} %}
+{% from "components/macros/feedback.html" import empty_state, toast_region %}
+{% from "components/macros/form.html" import action, button_classes, cancel_button, filter_input %}
+{% from "components/macros/icons.html" import icon, sprite %}
 
 {# What a link to somewhere else in the app LOOKS like. Teal, because
    that is what every other door in this app is, and a door drawn in the
@@ -20,42 +15,9 @@
    next door cannot be drawn slightly differently. #}
 {% set LINK = "text-aegis-teal hover:underline transition-colors" %}
 
-{# The app's mark and its name, the lockup Pulse carries in the same
-   place: the shield over an open book (a picture, its own colours, on
-   any theme), the name in the text colour so it holds in both modes. #}
-{% macro brand(name) %}
-<a href="/" class="rail-row flex items-center gap-2.5 min-w-0">
-  <img src="{{ static('brand-mark.png') }}" alt="" width="32" height="32"
-       class="w-8 h-8 shrink-0">
-  <span class="rail-hide text-base font-semibold text-aegis-text truncate">{{ name }}</span>
-</a>
-{% endmacro %}
-
-{# One sidebar link. ``href`` and ``hx-get`` are the same URL: a cold load
-   gets the shell, the htmx swap gets the fragment, one route decides
-   (see ``render()``). ``aria-current`` is set server-side from
-   ``current_path`` and moved client-side by app.js as htmx pushes URLs.
-   Clicking closes the mobile drawer (``mobileOpen`` from the shell). #}
-{% macro nav_item(section, current_path) %}
-<a href="{{ section.path }}" {{ hx_page(section.path) }}
-   @click="mobileOpen = false"
-   {%- set here = current_path|default("", true) -%}
-   {% if here == section.path or here.startswith(section.path ~ "/") %}aria-current="page"{% endif %}
-   class="rail-row group flex items-center gap-3 px-3 py-2 text-sm rounded transition-colors whitespace-nowrap
-          text-aegis-muted hover:text-aegis-text hover:bg-aegis-border/20
-          aria-[current=page]:text-aegis-text aria-[current=page]:bg-aegis-teal/10">
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-       stroke-width="1.5" stroke="currentColor" class="w-5 h-5 shrink-0" aria-hidden="true">
-    <path stroke-linecap="round" stroke-linejoin="round" d="{{ section.icon }}"/>
-  </svg>
-  <span class="rail-hide">{{ section.label }}</span>
-  {#- The mark sits inside a boosted link and htmx attributes INHERIT:
-      without its own target and push-url the dot would be swapped into
-      the page and the fetch written into the address bar. -#}
-  {% if section.attention %}<span data-attention hx-get="{{ section.attention }}" hx-trigger="load, every 5m"
-        hx-target="this" hx-swap="innerHTML" hx-push-url="false" class="inline-flex"></span>{% endif %}
-</a>
-{% endmacro %}
+{# Rendered markdown's typography (``|markdown``): an answer in the chat or
+   from a meeting's agent, styled once. #}
+{% set prose = "text-sm leading-relaxed text-aegis-text [&_p]:my-2 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:mt-5 [&_h1]:mb-2 [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:font-semibold [&_h3]:mt-4 [&_h3]:mb-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2 [&_li]:my-0.5 [&_strong]:font-semibold [&_code]:font-mono [&_code]:text-xs [&_code]:text-aegis-teal [&_pre]:rounded [&_pre]:bg-aegis-bg [&_pre]:border [&_pre]:border-aegis-border [&_pre]:p-3 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:text-aegis-text [&_table]:my-2 [&_th]:text-left [&_th]:font-medium [&_th]:pr-4 [&_td]:pr-4 [&_td]:py-0.5 [&_a]:text-aegis-teal [&_blockquote]:border-l-2 [&_blockquote]:border-aegis-border [&_blockquote]:pl-3 [&_blockquote]:text-aegis-muted" %}
 
 {# Navigation icons share one outline style. Unknown plugin entries use the
    four-square icon, so every installed item has an icon. #}
@@ -101,6 +63,8 @@
 {% endmacro %}
 
 
+
+
 {# A titled surface. The body comes via {% call %}; the heading id ties the
    section to its title for assistive tech. ``id`` lets a page target the
    card with htmx; it defaults to a slug of the title. #}
@@ -113,7 +77,7 @@
   {% if title %}
   <header class="flex items-baseline justify-between gap-3">
     <h2 id="{{ card_id }}-title" class="text-sm font-semibold text-aegis-text">{{ title }}</h2>
-    {% if subtitle %}<p class="text-aegis-muted micro-label">{{ subtitle }}</p>{% endif %}
+    {% if subtitle %}<p class="text-xxs text-aegis-muted caps">{{ subtitle }}</p>{% endif %}
   </header>
   {% endif %}
   {{ caller() }}
@@ -125,8 +89,8 @@
    Red once a figure goes negative and nothing otherwise: when every
    healthy number is coloured, colour stops meaning anything. #}
 {% macro stat_tile(label, value, negative=False, caption=None, attrs="") %}
-<div {{ attrs|safe }} class="raised px-5 py-4{% if attrs %} cursor-pointer hover:border-aegis-muted transition-colors{% endif %}">
-  <dt class="text-aegis-muted micro-label">{{ label }}</dt>
+<div {{ attrs|safe }} class="{{ 'hover-card cursor-pointer ' if attrs }}raised px-5 py-4">
+  <dt class="text-xxs text-aegis-muted caps">{{ label }}</dt>
   <dd class="mt-1 text-2xl font-semibold tabular-nums {{ 'text-error' if negative else 'text-aegis-text' }}">{{ value }}</dd>
   {% if caption %}<dd class="mt-1 text-xxs text-aegis-muted">{{ caption }}</dd>{% endif %}
 </div>
@@ -135,12 +99,8 @@
 
 {# A thin native progress bar; ``tone`` colours it (see badge). No
    ``ratio`` is work under way for as long as it takes: a band sweeps it. #}
-{# The tone travels as TEXT colour: the bar's fill is painted from
-   ``currentColor`` (see input.css), because Chrome renders a
-   ``<progress>`` its own green whatever ``accent-color`` says - which is
-   how every budget limit came out the same shade, the 84% one included. #}
 {% macro progress(ratio, tone="ok", label=None, size="h-1") %}
-<progress {% if ratio is not none %}value="{{ [1, [0, ratio]|max]|min }}" {% endif %}max="1" {% if label %}aria-label="{{ label }}"{% endif %} data-tone="{{ tone }}" class="w-full {{ size }} {{ TONE_TEXT.get(tone, TONE_TEXT["ok"]) }}"></progress>
+<progress {% if ratio is not none %}value="{{ [1, [0, ratio]|max]|min }}" {% endif %}max="1" {% if label %}aria-label="{{ label }}"{% endif %} data-tone="{{ tone }}" class="aegis-progress toned w-full {{ size }}"></progress>
 {% endmacro %}
 
 
@@ -168,8 +128,8 @@
    ``canvas[data-chart]`` on load and after each htmx settle. Data shape:
    ``{"labels": [...], "series": [{"label": ..., "values": [...]}],
    "slices": [{"categories": [...]}], "format": ...}`` (``slices`` only
-   for drilldowns; ``format`` as charts.js formatOf reads it). A live time
-   chart's data is ``series.chart``'s, which documents its keys.
+   for drilldowns; ``format`` as charts.js formatValue reads it). A live
+   time chart's data is ``series.chart``'s, which documents its keys.
    ``drilldown`` is the URL a slice click loads into the dialog; the
    slice's categories are appended as ``category=`` params. #}
 {% macro chart_panel(id, title, kind, data, drilldown=None, subtitle=None, live=None, empty=None) %}
@@ -183,10 +143,8 @@
 {% endcall %}
 {% endmacro %}
 
-{# The canvas charts.js draws, and the data beside it: the one recipe,
-   used by a page's panel and by a card she draws in chat (issue 266). ``data``
-   is ``{labels, series: [{label, values}]}``; ``format: "count"`` draws
-   plain numbers instead of dollars. #}
+{# The canvas charts.js draws, and the data beside it: the one recipe, for
+   a page's panel and for a card the assistant draws in chat alike. #}
 {% macro chart(id, kind, data, height="h-64", label=None, drilldown=None, live=None, empty=None) %}
 <div class="relative {{ height }}">
   <canvas data-chart="{{ kind }}"
@@ -210,32 +168,32 @@
 {# The one modal. Native <dialog>: focus trap, Escape and backdrop come
    free. Content is loaded by htmx into ``#dialog-body`` (pattern 4);
    app.js opens the dialog when a swap lands there, and closing clears it
-   so a stale body never flashes on the next open. Mounted once by the
-   app shell, outside ``#app-content``. #}
-{# The one modal. Its width is the BODY's call, not the opener's: a
-   rename form wants a column and a lender's amortization schedule wants
-   a page, and the thing that knows which is the thing being shown. A
-   body marks itself ``data-wide`` and the dialog grows around it -
-   ``has-[]`` rather than a class the opener has to remember to pass,
-   because an opener that forgets it renders a table into a slot. #}
+   so a stale body never flashes on the next open. Its width is the BODY's
+   call, not the opener's: a body marks itself and the dialog grows around
+   it (``has-[]``). A chat card opened larger sits on the page's own black,
+   as it does in the thread; a form or table with much to show
+   (``data-wide``) gets the page, a short form (``data-narrow``) a column,
+   and a picture or a video (``data-snug``) is as wide as itself. Mounted
+   once by the app shell, outside ``#app-content``. #}
 {% macro dialog() %}
-{#- Closing it clears its body, and its X (``data-dialog-close``), a click
-    on the backdrop and Escape close it: app.js, so it works on any page,
-    inside an Alpine component or not (the Overseer's is not). -#}
+{#- Its X (``data-dialog-close``), a click on the backdrop and Escape close
+    it: app.js, so it works on any page, inside an Alpine component or not
+    (the Overseer's is not). -#}
 <dialog id="dialog"
         class="floating text-aegis-text p-0 w-full max-w-4xl
-               max-h-[90dvh] overflow-hidden
+               has-[[data-card]]:bg-aegis-bg
+               has-[[data-card=path]]:max-w-[min(90rem,calc(100vw-2rem))]
                has-[[data-wide]]:max-w-[92rem] has-[[data-narrow]]:max-w-md
+               has-[[data-snug]]:w-fit has-[[data-snug]]:max-w-[calc(100vw-2rem)]
+               max-h-[90dvh] overflow-hidden
                backdrop:bg-aegis-scrim/60 backdrop:backdrop-blur-sm">
   {# The BODY scrolls, never the dialog. A dialog that scrolls as a whole
      takes its own close button off the top of the screen, and the way
      out of a document dialog is then a keystroke the embedded PDF viewer
-     has already swallowed - which is a trap, not a dialog.
-
-     ``flex`` lives on this wrapper rather than on the dialog element: an
-     author ``display: flex`` beats the UA sheet's rule hiding a dialog
-     that is not ``[open]``, whatever the specificity says, and the
-     dialog would render on the page while closed. #}
+     has already swallowed - which is a trap, not a dialog. ``flex`` lives
+     on this wrapper rather than on the dialog element: an author
+     ``display: flex`` beats the UA sheet's rule hiding a dialog that is
+     not ``[open]``. #}
   <div class="flex flex-col max-h-[90dvh]">
     <div class="shrink-0 flex justify-end px-3 pt-3">
       <button type="button" aria-label="Close" data-dialog-close
@@ -249,219 +207,12 @@
 {% endmacro %}
 
 
-{# The one drawer: one item of a list, sliding in from the right over the
-   page. Non-modal, so the list stays clickable and rows can be walked
-   without closing it. A list says which item is open with
-   ``drawer_sync`` and app.js does the rest; mounted once by the app shell,
-   beside the modal. #}
-{# The side drawer. Opened non-modally (it sits beside the page), so it
-   stacks by z-index: above the chat drawer's overlay (z-50), which a
-   reply's agent settings open from. #}
-{% macro drawer() %}
-<dialog id="drawer" aria-label="Details"
-        class="aegis-drawer floating fixed z-[60] inset-y-0 right-0 left-auto m-0 h-dvh max-h-dvh w-full sm:w-[40rem] max-w-full p-0 overflow-y-auto
-               text-aegis-text rounded-none border-y-0 border-r-0">
-  <div class="sticky top-0 z-10 flex justify-end px-3 pt-3 bg-aegis-card">
-    <button type="button" aria-label="Close" data-dialog-close
-            class="flex items-center justify-center w-8 h-8 rounded text-aegis-muted hover:text-aegis-text hover:bg-aegis-border/40 transition-colors">
-      {{ icon("x-mark", "w-4 h-4") }}
-    </button>
-  </div>
-  <div id="drawer-body" class="px-6 pb-6"></div>
-</dialog>
-{% endmacro %}
-
-{# Which drawer a list has open: ``url`` loads into it, or none closes it.
-   ``param`` is the query parameter that holds the open item, dropped from
-   the address when the drawer is closed. #}
-{% macro drawer_sync(url, param) %}<div hidden data-drawer-sync data-drawer-url="{{ url or '' }}" data-drawer-param="{{ param }}"></div>{% endmacro %}
-
-
-{# The appearance choices, one fieldset each: those with a legend in
-   ``appearance`` (rendering.py, the one list), then ``more`` -
-   ``MenuChoice``s the server draws the page by, kept in a cookie and the
-   page reloaded. Alpine holds the choice (``appearance()``, theme.js);
-   each row is the ``chip`` class, marked by aria-pressed. The sidebar's
-   picker and ``theme_toggle`` draw these. #}
-{% macro appearance_fields(more=()) %}
-{% set rows = [] %}{% for key, (legend, choices) in appearance.items() if legend %}{% set _ = rows.append((key, legend, choices, none, none)) %}{% endfor %}
-{% for key, legend, choices, cookie, chosen in rows + more|list %}
-<fieldset>
-  <legend class="micro-label text-aegis-muted mb-1">{{ legend }}</legend>
-  <div class="flex gap-1">
-    {% for value, label in choices %}
-    <button type="button" data-set-{{ key }}="{{ value }}"
-            {% if cookie %}aria-pressed="{{ (value == chosen)|lower }}" @click="setAppearance('{{ key }}', '{{ value }}', '{{ cookie }}')"
-            {% else %}:aria-pressed="{{ key }} === '{{ value }}'" @click="{{ key }} = '{{ value }}'; setAppearance('{{ key }}', '{{ value }}')"{% endif %}
-            class="chip flex-1">{{ label }}</button>
-    {% endfor %}
-  </div>
-</fieldset>
-{% endfor %}
-{% endmacro %}
-
-{# The appearance menu as a dropdown (Overseer's viewer menu):
-   ``appearance_fields`` with ``more``, and a ``{% call %}`` adds rows
-   under them. ``label`` names the menu. #}
-{% macro theme_toggle(placement="down", rail=False, label="Appearance", more=()) %}
-<details class="relative" x-data="{ ...appearance() }" @click.outside="$el.removeAttribute('open')">
-  <summary data-theme-toggle aria-label="{{ label }}" class="list-none cursor-pointer select-none inline-flex items-center h-8 px-3 rounded border border-aegis-border text-xs text-aegis-muted hover:text-aegis-text hover:border-aegis-muted transition-colors {{ 'overseer-rail-row gap-2 w-full min-w-0' if rail else 'justify-center' }}">
-    {% if rail %}<svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v2 M12 19v2 M3 12h2 M19 12h2 M5.6 5.6 7 7 M17 17l1.4 1.4 M18.4 5.6 17 7 M7 17l-1.4 1.4 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"/></svg><span class="overseer-rail-hide truncate">{{ label }}</span>{% else %}{{ label }}{% endif %}
-  </summary>
-  <div class="floating absolute {{ 'left-0 bottom-full mb-1' if placement == 'up' else 'right-0 top-full mt-1 w-64' }} z-50 p-3 space-y-3" {% if placement == "up" %}style="width: min(16rem, calc(100vw - 2rem));"{% endif %}>
-    {{ appearance_fields(more) }}
-    {% if caller is defined %}{{ caller() }}{% endif %}
-  </div>
-</details>
-{% endmacro %}
-
-
-{# The page header, dashboard shape: title and subtitle on the left, and
-   whatever the caller puts on the right (headline ``figures``, chips,
-   actions) in the same row. Every section opens with one. #}
-{% macro page_header(title, subtitle=None) %}
-<header class="flex flex-wrap items-end justify-between gap-x-8 gap-y-3 sm:gap-y-4 pb-3 mb-4 sm:pb-4 sm:mb-6 border-b border-aegis-border">
-  <div class="min-w-0">
-    <h1 class="text-2xl font-semibold text-aegis-text">{{ title }}</h1>
-    {% if subtitle %}<p class="mt-1 text-sm text-aegis-muted">{{ subtitle }}</p>{% endif %}
-  </div>
-  <div class="flex flex-wrap items-end gap-x-8 gap-y-3 min-w-0">{{ caller() if caller is defined }}</div>
-</header>
-{% endmacro %}
-
-
-{# Headline figures for a header: label over a large number, right-aligned.
-   ``items`` are ``{"label", "value", "negative"}``; ``negative`` colours
-   the number, nothing else does. #}
-{% macro figures(items) %}
-<dl class="flex flex-wrap items-end gap-x-8 gap-y-3">
-  {% for item in items %}
-  {#- Left on a phone, where each figure wraps to its own line and a
-      right-aligned label stood off its number (issue 474). -#}
-  <div class="text-left sm:text-right">
-    <dt class="text-sm text-aegis-muted">{{ item.label }}</dt>
-    <dd class="text-2xl font-semibold tabular-nums {{ 'text-error' if item.negative else 'text-aegis-text' }}">{{ item.value }}</dd>
-  </div>
-  {% endfor %}
-</dl>
-{% endmacro %}
-
-
-{# One bordered strip of N cells (the Budget's month equation). Each cell
-   is ``{"label", "value", "caption", "tone", "attrs"}``; ``attrs`` makes
-   it a door (hx-get) and ``tone`` colours the value. #}
-{% macro stats_strip(cells, id=None, attrs="") %}
-<dl {% if id %}id="{{ id }}"{% endif %} {{ attrs|safe }} class="grid grid-cols-2 {{ {1: "lg:grid-cols-1", 2: "lg:grid-cols-2", 3: "lg:grid-cols-3", 4: "lg:grid-cols-4", 5: "lg:grid-cols-5"}.get(cells|length, "lg:grid-cols-4") }} divide-x divide-aegis-border/60 raised">
-  {% for cell in cells %}
-  <div {{ cell.attrs|safe if cell.attrs else "" }} class="group px-5 py-4 min-w-0{% if cell.attrs %} cursor-pointer hover:bg-aegis-border/20 transition-colors{% endif %}">
-    {# A figure that can explain itself has to LOOK like it does: the
-       hover fill is only found by the mouse already on it. The mark is
-       for ``explain`` alone, not for any clickable cell - a cell that
-       filters a list is not offering to define a word. #}
-    <dt class="text-aegis-muted micro-label flex items-center gap-1.5"><span class="truncate">{{ cell.label }}</span>
-      {% if cell.explain %}<span aria-hidden="true" class="inline-flex shrink-0 w-3.5 h-3.5 rounded-full border border-current items-center justify-center text-xxs leading-none opacity-50 group-hover:opacity-100 transition-opacity">?</span>{% endif %}
-    </dt>
-    <dd data-tone="{{ cell.tone or '' }}" class="mt-1 text-2xl font-semibold tabular-nums {{ TONE_TEXT.get(cell.tone, 'text-aegis-text') }}">{{ cell.value }}</dd>
-    {% if cell.caption %}<dd class="mt-1 text-xxs text-aegis-muted truncate">{{ cell.caption }}</dd>{% endif %}
-  </div>
-  {% endfor %}
-</dl>
-{% endmacro %}
-
-
-{# Ranked rows: name, a small count, the amount, and a thin bar scaled to
-   the largest row (the Overview's payees, bills and what moved). ``rows``
-   are ``{"label", "count", "value", "ratio", "tone"}``, and ``attrs``
-   when the name opens something (``hx_dialog(...)``); a ``dot`` (a
-   chart-ramp color, ``chart_dot``) marks whose a row is; ``tone`` is
-   "accent" or "muted" (a row standing apart), else teal; ``columns`` sets a
-   long list in columns, read down each, so it does not run the page long. #}
-{% macro ranked_rows(rows, columns=False) %}
-<ol class="ranked {{ 'sm:columns-2 xl:columns-3 gap-x-8' if columns else 'space-y-3' }}"{% if columns %} data-columns{% endif %}>
-  {% for row in rows %}
-  <li{% if columns %} class="break-inside-avoid pb-3"{% endif %}>
-    <div class="flex items-baseline justify-between gap-3 text-sm">
-      <span class="inline-flex items-center gap-2 min-w-0"><span class="shrink-0">{{ mark(row, row.label) }}</span>{% if row.attrs %}<button type="button" {{ row.attrs }} class="text-aegis-text truncate text-left hover:underline">{{ row.label }}</button>{% else %}<span class="{{ 'text-aegis-muted' if row.tone == 'muted' else 'text-aegis-text' }} truncate">{% if row.dot %}{{ chart_dot(row.dot) }}{% endif %}{{ row.label }}</span>{% endif %}</span>
-      <span class="shrink-0 tabular-nums">{% if row.count %}<span class="text-aegis-muted mr-2">{{ row.count }}</span>{% endif %}<span class="text-aegis-text font-medium">{{ row.value }}</span></span>
-    </div>
-    <div class="mt-1 h-1 rounded bg-aegis-border/60"><div class="h-1 rounded {{ {'accent': 'bg-aegis-accent', 'muted': 'bg-aegis-muted'}.get(row.tone, 'bg-aegis-teal') }}" style="width: {{ (row.ratio * 100)|round|int }}%"></div></div>
-  </li>
-  {% endfor %}
-</ol>
-{% endmacro %}
-
-
-{# Tabs: sibling views of one page, Pulse's underline recipe (the same
-   look Flet's tabs had). ``tab_bar`` is the row (``role="tablist"``); each
-   ``tab_item`` is a link: ``href`` for a cold load, ``hx`` the htmx
-   attributes (``hx_replace(...)`` or a plain string). #}
-{% macro tab_bar(label, id=None, attrs="") %}
-<nav role="tablist" aria-label="{{ label }}" {% if id %}id="{{ id }}"{% endif %} {{ attrs|safe }}
-     class="flex flex-wrap items-center gap-6 border-b border-aegis-border mb-6">{{ caller() }}</nav>
-{% endmacro %}
-
-{% macro tab_item(label, active=False, href="", hx="") %}
-<a href="{{ href }}" {{ hx|safe }} {% if active %}aria-current="page"{% endif %}
-   class="tab">{{ label }}</a>
-{% endmacro %}
-
-{% macro tab_panel(key, open) %}
-<div role="tabpanel" data-tab-panel="{{ key }}" class="space-y-6"{% if key != open %} hidden{% endif %}>{{ caller() }}</div>
-{% endmacro %}
-
-{# Tabs within one view, switched in the browser (app.js's ``data-tabs``):
-   ``tabs`` is each (key, label), ``open`` the key shown first (the first
-   when none), and each panel a ``tab_panel(key, open)`` in the caller. The
-   tab picked stays picked when the view re-reads itself, and a link to
-   something in a hidden panel (a note's line) shows that panel first. #}
-{% macro tabbed(name, tabs, open=None) %}
-{% set open = open or tabs[0][0] %}
-<div data-tabs="{{ name }}">
-  {% call tab_bar(name) %}
-  {% for key, label in tabs %}
-  <button type="button" role="tab" data-tab="{{ key }}" aria-selected="{{ 'true' if key == open else 'false' }}" class="tab">{{ label }}</button>
-  {% endfor %}
-  {% endcall %}
-  {{ caller() }}
-</div>
-{% endmacro %}
-
-{# A fold's mark, in its ``<summary>``: turned while the fold is open
-   (``.fold-mark``). ``classes`` place it (``mt-0.5`` beside a heading). #}
-{% macro fold_mark(classes="") -%}
-<span aria-hidden="true" class="fold-mark {{ classes }}">›</span>
-{%- endmacro %}
-
-
-{# A chip as a link: one of a row of exclusive choices (a month, a view).
-   The ``chip`` class (input.css) marks the current one by aria-current. #}
-{% macro chip(label, active=False, href="", hx="", extra="") %}
-<a href="{{ href }}" {{ hx|safe }} {{ extra|safe }} {% if active %}aria-current="page"{% endif %} class="chip">{{ label }}</a>
-{% endmacro %}
-
-
-{# A row of choices for one card (a window, a comparison, a view): each a
-   link chip that re-requests the page and swaps ``target`` in place
-   (pattern 3). ``items`` are ``(label, active, url)``. #}
-{% macro chip_nav(id, label, items, target) %}
-<nav id="{{ id }}" aria-label="{{ label }}" class="flex flex-wrap items-center gap-1.5 mb-3">
-  {% for text, active, url in items %}{{ chip(text, active, url, hx_replace(url, target)) }}{% endfor %}
-</nav>
-{% endmacro %}
-
-
-{# A payee's brand mark, three deep: the resolved icon (served by
-   /icons, so the browser caches it once across pages) on a light tile;
-   else the category's glyph (glyphs.py); else the initial letter. The
-   letter is drawn from a data attribute, not text, so a cell's text is
-   still just the name. The tile is light in every theme on purpose:
-   favicons are drawn for their owner's background and plenty are
-   near-black on transparency, invisible on a dark surface. #}
-{# A row's mark: every row (a dict or a response object) carries
-   ``icon_url``, ``category`` and, for a transaction, the payee's usual
-   ``payee_category`` to borrow when it has no category of its own. #}
-{% macro mark(row, name) %}{{ avatar(name, row.icon_url, category=row.category or row.payee_category) }}{% endmacro %}
-
+{# A brand mark before a name: the icon on a light tile when there is one
+   (served from a cached URL, not inlined, so the browser fetches it once),
+   else the initial letter. The letter rides a data attribute, not text, so
+   the cell's text stays just the name. The tile is light in every theme:
+   plenty of logos are drawn dark on transparency, invisible on a dark
+   surface. #}
 {# ``size``: ``xs`` a footer's tiny tile, ``sm`` a table row's, ``lg`` a
    group heading's. Each is (tile, mark, letter, mark px), spelled out so
    Tailwind sees every class. #}
@@ -486,92 +237,95 @@
 {% endmacro %}
 
 
-{# A file's type, wearing the mark people already know from every file
-   manager they have used. The same circular tile every other row wears
-   - a payee, an account, a model - so a list of paper reads like the
-   rest of the app rather than like a second design. The label rides in
-   ``title``: a mark answers the glance, the word answers the doubt.
+{# The one drawer: one item of a list, sliding in from the right over the
+   page. Non-modal, so the list stays clickable and rows can be walked
+   without closing it. A list says which item is open with
+   ``drawer_sync`` and app.js does the rest; mounted once by the app shell,
+   beside the modal. #}
+{# The side drawer. Opened non-modally (it sits beside the page), so it
+   stacks by z-index: above the chat drawer's overlay (z-50), which a
+   reply's agent settings open from. Wider for a drawer with a table of
+   several columns (``data-wide``). #}
+{% macro drawer() %}
+<dialog id="drawer" aria-label="Details"
+        class="aegis-drawer fixed z-[60] inset-y-0 right-0 left-auto m-0 h-dvh max-h-dvh w-full sm:w-[40rem] sm:has-[[data-wide]]:w-[64rem] max-w-full p-0 overflow-y-auto
+               floating text-aegis-text rounded-none border-y-0 border-r-0">
+  <div class="sticky top-0 z-10 flex justify-end px-3 pt-3 bg-aegis-card">
+    <button type="button" aria-label="Close" data-drawer-close
+            class="text-aegis-muted/70 hover:text-aegis-text transition-colors">
+      {{ icon("x-mark", "w-4 h-4", 2) }}
+    </button>
+  </div>
+  <div id="drawer-body" class="px-6 pb-6"></div>
+</dialog>
+{% endmacro %}
 
-   Bigger than the 20px a payee or an account wears, on purpose: those
-   sit in dense money rows where the NAME is the thing being scanned,
-   and a shelf of paper is scanned by its marks. Tailwind's steps go 20,
-   24, 28, 32 - 32 is the nearest to half again as big, and keeping to
-   the scale is what stops a one-off size becoming a second scale. #}
-{% macro file_mark(badge) %}
-<span data-file="{{ badge.label }}" title="{{ badge.label }}" class="inline-flex shrink-0 w-8 h-8 rounded-full bg-aegis-border/60 items-center justify-center overflow-hidden align-middle"><img src="{{ badge.icon }}" alt="" width="20" height="20" loading="lazy" class="w-5 h-5 object-contain"></span>
+{# Which drawer a list has open: ``url`` loads into it, or none closes it.
+   ``param`` is the query parameter that holds the open item, dropped from
+   the address when the drawer is closed. #}
+{% macro drawer_sync(url, param) %}<div hidden data-drawer-sync data-drawer-url="{{ url or '' }}" data-drawer-param="{{ param }}"></div>{% endmacro %}
+
+
+{# What every layout's <head> needs to wear a theme: the theme script,
+   told which themes exist and which this page opens with (fixed, when
+   the layout owns its theme and only the mode is the viewer's), then the
+   theme's type and the stylesheet. The script comes first on purpose: a
+   stored choice is applied before the stylesheet paints. #}
+{% macro appearance_head(theme, fixed=false) %}
+<script src="{{ static('js/theme.js') }}" data-themes="{{ theme_choices|map('first')|join(' ') }}" data-theme="{{ theme.name }}"{% if fixed %} data-fixed{% endif %}></script>
+{% if theme.type.fonts %}
+{% if theme.type.fonts.startswith("https://fonts.googleapis.com") %}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+{% endif %}
+<link rel="stylesheet" href="{{ theme.type.fonts }}" data-theme-fonts>
+{% endif %}
+<link rel="stylesheet" href="{{ static('dist/app.css') }}">
+{% endmacro %}
+
+{# Steward's theme and mode chooser, shared by navbars and auth pages. #}
+{# ``label`` names the menu (the viewer's email in Overseer's); ``more``
+   adds choices the server draws the page by (``MenuChoice``: kept in a
+   cookie, the page reloaded), and a ``{% call %}`` adds rows under them. #}
+{% macro theme_toggle(placement="down", rail=False, label="Appearance", more=()) %}
+<details class="relative" x-data="{ ...appearance() }" @click.outside="$el.removeAttribute('open')">
+  <summary data-theme-toggle aria-label="{{ label }}" class="list-none cursor-pointer select-none inline-flex items-center h-8 px-3 rounded border border-aegis-border text-xs text-aegis-muted hover:text-aegis-text hover:border-aegis-muted transition-colors {{ 'overseer-rail-row gap-2 w-full min-w-0' if rail else 'justify-center' }}">
+    {% if rail %}<svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v2 M12 19v2 M3 12h2 M19 12h2 M5.6 5.6 7 7 M17 17l1.4 1.4 M18.4 5.6 17 7 M7 17l-1.4 1.4 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"/></svg><span class="overseer-rail-hide truncate">{{ label }}</span>{% else %}{{ label }}{% endif %}
+  </summary>
+  <div class="floating absolute {{ 'left-0 bottom-full mb-1' if placement == 'up' else 'right-0 top-full mt-1 w-64' }} z-50 p-3 space-y-3" {% if placement == "up" %}style="width: min(16rem, calc(100vw - 2rem));"{% endif %}>
+    {{ appearance_fields(more) }}
+    {% if caller is defined %}{{ caller() }}{% endif %}
+  </div>
+</details>
 {% endmacro %}
 
 
-{# A contact's name, as the door to their page. Every place a party is
-   named draws it through this, so a name is never plain text in one
-   card and a dialog in another. #}
-{# A moment the server keeps in UTC, read in the viewer's clock by app.js
-   (``localTime``); the date stands until it does. #}
-{% macro local_time(when, cls="") -%}
-{% set iso = when.isoformat() if when.isoformat is defined else when %}
-<time data-local datetime="{{ iso }}Z" class="tabular-nums {{ cls }}">{{ when|short_date }}</time>
-{%- endmacro %}
+{# Full-bleed dismiss layer behind a modal. Pair it with the modal panel:
 
-{% macro contact_link(party_id, name) -%}
-{{ page_link("/contacts/" ~ party_id, name, attrs='data-contact="' ~ party_id ~ '"') }}
-{%- endmacro %}
-
-{# A door to another page of the app, opened in place: every in-app link
-   is drawn through this, so the next one cannot look or load slightly
-   differently. ``cls`` adds layout (``truncate``), never a new look. #}
-{% macro page_link(url, label, cls="", attrs="") -%}
-<a href="{{ url }}" {{ hx_page(url) }} class="{{ LINK }}{{ ' ' ~ cls if cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</a>
-{%- endmacro %}
-
-{# Several places, each a door, read as a list: "Filed under NYSLRS, Renewal".
-   With ``show`` the list stops there and the rest sits behind "+N more"
-   until asked: a cell is a glance, and a document filed in six places
-   must not push the table off the page. #}
-{% macro doors(places, show=None) -%}
-{% set folded = show is not none and places|length > show %}
-<span {% if folded %}x-data="{ all: false }"{% endif %} class="inline-flex flex-wrap items-baseline gap-x-1">
-{%- for place in places -%}
-<span {% if folded and loop.index > show %}x-show="all" x-cloak{% endif %}><a href="{{ place.url }}" {{ hx_page(place.url) }} class="{{ LINK }}">{{ place.label }}</a>{% if not loop.last %}, {% endif %}</span>
-{%- endfor -%}
-{%- if folded %}<button type="button" x-show="!all" @click="all = true" class="text-xs text-aegis-muted hover:text-aegis-text whitespace-nowrap" data-more>+{{ places|length - show }} more</button>{% endif -%}
-</span>
-{%- endmacro %}
-
-{# A small status word with a dot: ``tone`` is ok, warn, error, muted or
-   accent; no tone renders the label plain. One shape for every "state"
-   cell and chip, so tests find them by role. #}
-{% macro badge(label, tone=None) %}
-<span data-tone="{{ tone or '' }}" class="inline-flex items-center gap-1.5 whitespace-nowrap {{ TONE_TEXT.get(tone, 'text-aegis-text') }}">
-  {% if tone %}{{ dot(tone) }}{% endif %}{{ label }}
-</span>
+     <div x-show="open" x-cloak
+          class="fixed inset-0 z-50 flex items-center justify-center px-4">
+       {{ modal_scrim("close()") }}
+       <div class="relative ...">...</div>
+     </div>
+#}
+{% macro modal_scrim(dismiss_handler="open = false") %}
+<div class="absolute inset-0 bg-aegis-scrim/40 backdrop-blur"
+     @click="{{ dismiss_handler }}"></div>
 {% endmacro %}
 
 
-{# A state with no room for its words: the dot alone, and the words on
-   hover. For a fact worth a glance and not a sentence - how current a
-   figure is, beside the figure - where spelling it out would make the
-   line longer than the thing it describes.
-
-   The title is not decoration. A colour alone is unreadable to anyone
-   who cannot see it and unexplainable to anyone who can, so the words
-   ride along for the pointer AND for a screen reader. #}
-{% macro dot(tone, title=None) %}
-{#- ``data-dot``, never ``data-tone``: a badge carries the tone and this
-    sits inside one, so sharing the marker would make every badge two
-    things to anything selecting on it. -#}
-<span data-dot="{{ tone or '' }}" {% if title %}title="{{ title }}" {% endif %}
-      class="inline-flex items-center {{ TONE_TEXT.get(tone, 'text-aegis-muted') }}">
-  <span class="w-1.5 h-1.5 rounded-full bg-current" aria-hidden="true"></span>
-  {%- if title %}<span class="sr-only">{{ title }}</span>{% endif -%}
-</span>
+{# THE tooltip panel — the one popover shell every hover/help hint uses.
+   Callers provide the open/show()/hide() Alpine state on a ``relative``
+   wrapper and pass the body via {% call %}. Its look is ``.tooltip-panel``
+   (input.css), which the map's CSS-only hints share. #}
+{% macro popover_panel(align='left') %}
+<div x-show="open" x-cloak x-transition.opacity role="tooltip"
+     @mouseenter="show()" @mouseleave="hide()"
+     class="tooltip-panel absolute {{ 'right-0' if align == 'right' else 'left-0' }} top-full mt-1 z-50 w-64 p-3 space-y-2">
+  {{ caller() }}
+</div>
 {% endmacro %}
 
-{# A chart-ramp color as a small dot (--aegis-chart-``n``, 1 to 11): how a
-   list marks whose a row is (a service's log lines, a meeting's speaker),
-   leaving the text itself plain. #}
-{% macro chart_dot(n) -%}
-<span data-dot class="mr-1.5 inline-block h-2 w-2 rounded-full align-middle" style="background: var(--aegis-chart-{{ n }})" aria-hidden="true"></span>
-{%- endmacro %}
 
 {# The map's hover hint: the tooltip panel, CSS-only (the caller's hover
    rule shows it, so a live frame cannot close it), placed by the caller's
@@ -584,14 +338,76 @@
 </span>
 {% endmacro %}
 
-{# A part read when it first comes on screen (a detail row's load), from
-   ``url`` into this element; ``attrs`` is markup that marks it. #}
-{% macro lazy(url, attrs="", placeholder="") %}
-<div hx-get="{{ url }}" hx-trigger="intersect once" hx-swap="innerHTML" {{ attrs|safe }}>{{ placeholder }}</div>
+
+{# Inline definition hint — wrap a term via {% call %}; hovering (or tapping)
+   opens the shared popover panel. Dotted underline signals the affordance
+   without a "?" button. ``align='right'`` for terms near the right edge. #}
+{% macro hover_hint(title, text, align='left') %}
+<span class="relative inline-flex"
+      x-data="{ open: false, _t: null,
+                show() { clearTimeout(this._t); this.open = true; },
+                hide() { this._t = setTimeout(() => this.open = false, 120); } }"
+      @mouseenter="show()" @mouseleave="hide()">
+  <span class="cursor-help underline decoration-dotted decoration-aegis-muted/50 underline-offset-4"
+        @click.stop="open = !open"
+        @keydown.escape.window="open = false"
+        @click.outside="open = false">{{ caller() }}</span>
+  {% call popover_panel(align) %}
+    <div class="text-aegis-text font-medium">{{ title }}</div>
+    <div>{{ text }}</div>
+  {% endcall %}
+</span>
+{% endmacro %}
+
+
+{# Small ? info icon with a click-triggered popover. Body can be arbitrary
+   HTML (caller passes it as the macro body via {% call %}). #}
+{% macro info_tooltip(width="w-64") %}
+<div class="relative" x-data="{ open: false }">
+  <button type="button" @click="open = !open" @click.outside="open = false"
+    class="w-3.5 h-3.5 rounded-full border border-aegis-border text-aegis-muted text-xxs flex items-center justify-center hover:text-aegis-text hover:border-aegis-muted transition-colors"
+    aria-label="More info">?</button>
+  <div x-show="open" x-cloak x-transition.opacity
+    class="floating absolute left-0 top-5 z-20 {{ width }} p-3 text-xxs normal-case tracking-normal text-aegis-muted space-y-2">
+    {{ caller() }}
+  </div>
+</div>
+{% endmacro %}
+
+
+{# A small status word with a dot: ``tone`` is ok, warn, error, muted or
+   accent; no tone renders the label plain. One shape for every "state"
+   cell and chip, so tests find them by role. #}
+{% macro badge(label, tone=None) %}
+<span data-tone="{{ tone or '' }}" class="toned inline-flex items-center gap-1.5 whitespace-nowrap">
+  {% if tone %}<span class="w-1.5 h-1.5 rounded-full bg-current" aria-hidden="true"></span>{% endif %}{{ label }}
+</span>
 {% endmacro %}
 
 {# A health status as a dot in its tone, its word for a reader: the
    sidebar's, the sub-menu's, a map chip's, and a healthy badge. #}
+{# A chart-ramp color as a small dot (--aegis-chart-``n``, 1 to 11): how a
+   list marks whose a row is (a service's log lines, a meeting's speaker),
+   leaving the text itself plain. #}
+{# A fold's mark, in its ``<summary>``: turned while the fold is open
+   (``.fold-mark``). ``classes`` place it (``mt-0.5`` beside a heading). #}
+{% macro fold_mark(classes="") -%}
+<span aria-hidden="true" class="fold-mark {{ classes }}">›</span>
+{%- endmacro %}
+{# What most can leave folded: ``label`` the line that opens it, the
+   caller's body under it, ``attrs`` on its ``<details>`` and ``classes``
+   its type and place. #}
+{% macro fold(label, attrs="", classes="text-sm") %}
+<details {{ attrs }} class="{{ classes }}">
+  <summary class="cursor-pointer text-aegis-muted hover:text-aegis-text transition-colors">{{ label }}</summary>
+  <div class="mt-3">{{ caller() }}</div>
+</details>
+{% endmacro %}
+
+{% macro chart_dot(n) -%}
+<span data-dot class="mr-1.5 inline-block h-2 w-2 rounded-full align-middle" style="background: var(--aegis-chart-{{ n }})" aria-hidden="true"></span>
+{%- endmacro %}
+
 {% macro status_dot(status) -%}
 {% set tone = status|health_tone %}<span data-tone="{{ tone }}" class="status-dot w-2 h-2 shrink-0 rounded-full {{ {"ok": "bg-aegis-teal", "warn": "bg-aegis-amber", "error": "bg-aegis-error"}.get(tone, "bg-aegis-muted") }}" aria-hidden="true"></span><span class="sr-only">{{ status }}</span>
 {%- endmacro %}
@@ -607,33 +423,67 @@
 {# A dropdown() menu's group heading (Download, Copy; a schema), its
    ``glyph`` before it; a ``tag`` other than ``li`` where it heads rows
    inside one item (a filtered list). #}
-{% macro menu_heading(label, glyph=None, tag="li", attrs="") %}
-<{{ tag }} {{ attrs|safe }} class="flex items-center gap-1.5 px-3 pt-2 pb-1 text-xxs caps text-aegis-muted">{% if glyph %}{{ icon(glyph, "w-3 h-3") }}{% endif %}{{ label }}</{{ tag }}>
+{% macro menu_heading(label, glyph=None, tag="li", attrs="", count=None) %}
+<{{ tag }} {{ attrs|safe }} class="flex items-center gap-1.5 px-3 pt-2 pb-1 text-xxs caps text-aegis-muted">{% if glyph %}{{ icon(glyph, "w-3 h-3") }}{% endif %}{{ label }}{% if count is not none %} · {{ count }}{% endif %}</{{ tag }}>
 {%- endmacro %}
 
-{# One entry in a dropdown() menu. ``attrs`` carries the htmx verb
-   (``hx-get``/``hx-post``/``hx-delete`` plus target and swap); app.js
-   closes the menu on the click, so a dialog never opens over it.
-   ``hint``: a muted line under the label, what choosing it costs. #}
-{% macro menu_item(label, attrs, danger=False, hint=None) %}
-<li><button type="button" {{ attrs|safe }}
-            class="w-full text-left px-3 py-1.5 text-sm {{ 'text-error' if danger else 'text-aegis-text' }} hover:bg-aegis-border/30 rounded transition-colors">{{ label }}{% if hint %}<span data-hint class="block text-xs text-aegis-muted">{{ hint }}</span>{% endif %}</button></li>
+{# A dropdown() to pick one of a list too long to scan: a box that finds
+   by name (``filter_input``, its text kept in the URL as ``name``) over
+   the list ``list_id``, whose ``pick_item`` entries and ``menu_heading``
+   groups come via {% call %}. #}
+{% macro pick_menu(label, list_id, placeholder, name="q", attrs="") %}
+{%- set entries = caller() %}
+{% call dropdown(label, align="left") %}
+<li class="p-2">{{ filter_input("#" ~ list_id, name, placeholder=placeholder) }}</li>
+<li id="{{ list_id }}" {{ attrs|safe }} class="max-h-[70vh] min-w-[20rem] overflow-auto">{{ entries }}</li>
+{% endcall %}
+{%- endmacro %}
+
+{# One entry in a pick_menu(): its ``label``, then what the {% call %}
+   gives, set right and muted; a link to ``url``, or a button whose
+   ``attrs`` pick it. The one picked carries ``aria-current`` (``page`` or
+   ``true``) and shows in teal. #}
+{% macro pick_item(label, url=None, attrs="", mono=False) %}
+{%- set tag = "a" if url else "button" %}
+<{{ tag }} {% if url %}href="{{ url }}" {{ attrs|safe }}{% else %}type="button" {{ attrs|button_attrs|safe }}{% endif %}
+   class="flex w-full justify-between gap-6 px-3 py-1 text-xs text-left rounded text-aegis-text hover:bg-aegis-border/30 aria-[current=page]:text-aegis-teal aria-[current=true]:text-aegis-teal{{ ' font-mono' if mono }}"><span class="truncate">{{ label }}</span>{% if caller is defined %}{{ caller() }}{% endif %}</{{ tag }}>
+{%- endmacro %}
+
+{# One entry in a dropdown() menu: a button, its htmx verb in ``attrs``
+   (``hx-get``/``hx-post``/``hx-delete`` plus target and swap), or a link
+   to ``url`` (``attrs`` adding ``download``, say). The menu closes on the
+   click (app.js), so a dialog never opens under it. ``hint``: a muted line
+   under the label, what choosing it costs. #}
+{% macro menu_item(label, attrs="", danger=False, hint=None, url=None) %}
+{%- set tag = "a" if url else "button" %}
+<li><{{ tag }} {% if url %}href="{{ url }}" {{ attrs|safe }}{% else %}type="button" {{ attrs|button_attrs|safe }}{% endif %}
+            class="block w-full text-left px-3 py-1.5 text-sm {{ 'text-error' if danger else 'text-aegis-text' }} hover:bg-aegis-border/30 rounded transition-colors">{{ label }}{% if hint %}<span data-hint class="block text-xs text-aegis-muted">{{ hint }}</span>{% endif %}</{{ tag }}></li>
 {% endmacro %}
 
-{# A menu on a <details>: the caller supplies ``menu_item`` rows.
-   ``tone``/``size`` are the summary's button - a row's menu is a small
-   default one, a page's main action (Settings' Connect) a primary one.
-   ``align`` is the side it prefers; app.js moves it if that would open
-   off the screen, and never wider than the screen less its 1rem gutters
-   (a menu of long names, issue 469) - the gutter app.js keeps. ``panel`` makes it a panel of controls
-   instead of a list of actions (the account filter's checkboxes), sized
-   by those classes. #}
-{% macro dropdown(label, align="right", tone="default", size="xs", panel=None) %}
-<details data-dropdown class="relative">
-  <summary class="list-none gap-1 {{ button_classes(tone, size) }}">
+{# A menu behind a button. It opens below on the ``align`` side; app.js
+   (``placeDropdown``, keyed on ``data-dropdown``) opens it above when it
+   would run off the bottom of the window, and keeps it on a phone's
+   screen, and closes it on a click off it. ``options`` is a row's or a
+   drawer's rarer actions behind a bare "..." (a data_table's
+   ``actions``), out of sight until wanted. ``tone``/``size`` make the
+   summary a ``button_classes`` button (a page's main action: Settings'
+   Connect); ``panel`` makes it a panel of controls instead of a list of
+   actions (the account filter's checkboxes), sized by those classes. #}
+{% macro dropdown(label="…", align="right", options=False, tone=None, size=None, panel=None) %}
+<details data-dropdown class="relative{{ ' inline-block text-left' if options }}">
+  {% if options %}
+  <summary aria-label="Options" class="list-none cursor-pointer select-none px-2 py-0.5 rounded text-aegis-muted hover:text-aegis-text hover:bg-aegis-border/30">{{ label }}</summary>
+  {% elif tone or size %}
+  <summary class="list-none gap-1 {{ button_classes(tone or "default", size or "xs") }}">
     {{ label }}
     {{ icon("chevron-narrow", "w-3 h-3") }}
   </summary>
+  {% else %}
+  <summary class="list-none cursor-pointer select-none inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded border border-aegis-border text-aegis-muted hover:text-aegis-text hover:border-aegis-muted transition-colors">
+    {{ label }}
+    {{ icon("chevron-narrow", "w-3 h-3", 2) }}
+  </summary>
+  {% endif %}
   {%- set tag = "div" if panel else "ul" %}
   <{{ tag }}{% if not panel %} role="menu"{% endif %} class="absolute {{ 'right-0' if align == 'right' else 'left-0' }} top-full mt-1 z-30 max-w-[calc(100vw-2rem)] floating {{ panel or 'min-w-[11rem] p-1' }}">
     {{ caller() }}
@@ -642,6 +492,12 @@
 {% endmacro %}
 
 
+{# A confirmation as dialog body: what will happen, one destructive
+   action (``method`` is the htmx verb for ``url``: delete, post, patch;
+   ``attrs`` rides on its button; ``tone`` is the ``action`` tone, danger
+   unless the action is not destructive), and a way out. The
+   action's response closes the dialog and navigates or swaps as it sees
+   fit; nothing swaps here (hx-swap="none"). #}
 {# A dialog's heading: what this is, and the one line under it.
 
    ``subtitle`` is a sentence - what the dialog is for, or what it will
@@ -651,36 +507,19 @@
 
    The margin belongs here because it depends on whether anything
    follows: a title with a line under it sits close to it, a title alone
-   stands off from the form below. Written out at each dialog it was
-   four different answers across thirty-five of them. #}
+   stands off from the form below. Written out at each dialog it drifts -
+   downstream it had reached four different answers across thirty-five. #}
 {% macro dialog_title(title, subtitle=None, facts=None) %}
 {%- set under = subtitle or facts or caller is defined %}
 <h2 class="text-lg font-semibold text-aegis-text {{ "mb-1" if under else "mb-4" }}">{{ title }}</h2>
 {%- if facts %}
-<p class="text-aegis-muted micro-label mb-4">{{ facts }}</p>
+<p class="text-aegis-muted text-xxs caps mb-4">{{ facts }}</p>
 {%- elif subtitle %}
 <p class="text-xs text-aegis-muted mb-4">{{ subtitle }}</p>
 {%- elif caller is defined %}
 {{ caller() }}
 {%- endif %}
 {% endmacro %}
-
-
-{# The x on a row or a card. It asks first, in the ``confirm`` dialog,
-   and the answer takes the thing off the page out of band. #}
-{% macro remove_button(url, label, place="ml-auto") %}
-<button type="button" {{ hx_dialog(url) }} class="{{ place }} text-aegis-muted hover:text-error" aria-label="{{ label }}">×</button>
-{%- endmacro %}
-
-{# A grid of cards (goals, envelopes), and one card in it; ``oob``
-   re-sends the card in place after a write. #}
-{% macro item_grid(id) %}
-<ul id="{{ id }}" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{{ caller() }}</ul>
-{%- endmacro %}
-
-{% macro item_card(id, oob=False) %}
-<li id="{{ id }}" {% if oob %}hx-swap-oob="outerHTML"{% endif %} class="raised p-4 flex flex-col gap-2">{{ caller() }}</li>
-{%- endmacro %}
 
 {# A confirmation as dialog body: what will happen, one destructive
    action (``method`` is the htmx verb for ``url``: delete, post, patch;
@@ -695,12 +534,139 @@
     has to travel to read "Remove this?". -#}
 <div data-narrow>
 {{ dialog_title(title, body) }}
-<div class="flex items-center gap-3">
+<div class="flex items-center justify-end gap-3">
   {% set verb %}hx-{{ method }}="{{ url }}" hx-swap="none" {{ attrs|safe }}{% endset %}
+  {{ cancel_button() }}
   {{ action(label, verb, tone) }}
-  <button type="button" data-dialog-close class="text-xs text-aegis-muted hover:text-aegis-text">Cancel</button>
 </div>
 </div>
+{% endmacro %}
+
+
+{# The page header, dashboard shape: title and subtitle on the left, and
+   whatever the caller puts on the right (headline ``figures``, chips,
+   actions) in the same row. Every section opens with one. #}
+{% macro page_header(title, subtitle=None) %}
+<header class="flex flex-wrap items-end justify-between gap-x-8 gap-y-3 sm:gap-y-4 pb-3 mb-4 sm:pb-4 sm:mb-6 border-b border-aegis-border">
+  <div class="min-w-0">
+    <h1 class="text-2xl font-semibold text-aegis-text">{{ title }}</h1>
+    {% if subtitle %}<p class="mt-1 text-sm text-aegis-muted">{{ subtitle }}</p>{% endif %}
+  </div>
+  <div class="flex flex-wrap items-end gap-x-8 gap-y-3 min-w-0">{{ caller() if caller is defined }}</div>
+</header>
+{% endmacro %}
+
+{# Headline figures for a header: label over a large number, right-aligned.
+   ``items`` are ``{"label", "value", "negative"}``; ``negative`` colours
+   the number, nothing else does. #}
+{% macro figures(items) %}
+<dl class="flex flex-wrap items-end gap-x-8 gap-y-3">
+  {% for item in items %}
+  {#- Left on a phone, where each figure wraps to its own line and a
+      right-aligned label stood off its number (issue 474). -#}
+  <div class="text-left sm:text-right">
+    <dt class="text-sm text-aegis-muted">{{ item.label }}</dt>
+    <dd class="text-2xl font-semibold tabular-nums {{ 'text-error' if item.negative else 'text-aegis-text' }}">{{ item.value }}</dd>
+  </div>
+  {% endfor %}
+</dl>
+{% endmacro %}
+
+{# One bordered strip of N cells (the Budget's month equation). Each cell
+   is ``{"label", "value", "caption", "tone", "attrs"}``; ``attrs`` makes
+   it a door (hx-get) and ``tone`` (ok, warn, error) colours the value. #}
+{% macro stats_strip(cells, id=None, attrs="") %}
+{# ``lg:grid-cols-N`` is looked up, never interpolated: Tailwind emits
+   the classes it can SEE in the markup, and a class built at render time
+   is not one of them - ``lg:grid-cols-{{ cells|length }}`` compiled to
+   nothing and every strip stayed two columns at every width. #}
+<dl {% if id %}id="{{ id }}"{% endif %} {{ attrs|safe }} class="grid grid-cols-2 {{ {1: "lg:grid-cols-1", 2: "lg:grid-cols-2", 3: "lg:grid-cols-3", 4: "lg:grid-cols-4", 5: "lg:grid-cols-5"}.get(cells|length, "lg:grid-cols-4") }} divide-x divide-aegis-border/60 raised">
+  {% for cell in cells %}
+  <div {{ cell.attrs|safe if cell.attrs else "" }} class="group px-5 py-4 min-w-0{% if cell.attrs %} cursor-pointer hover:bg-aegis-border/20 transition-colors{% endif %}">
+    {# A figure that can explain itself has to LOOK like it does: the
+       hover fill is only found by the mouse already on it. The mark is
+       for ``explain`` alone, not for any clickable cell - a cell that
+       filters a list is not offering to define a word. #}
+    <dt class="text-xxs text-aegis-muted caps flex items-center gap-1.5"><span class="truncate">{{ cell.label }}</span>
+      {% if cell.explain %}<span aria-hidden="true" class="inline-flex shrink-0 w-3.5 h-3.5 rounded-full border border-current items-center justify-center text-xxs leading-none opacity-50 group-hover:opacity-100 transition-opacity">?</span>{% endif %}
+    </dt>
+    <dd data-tone="{{ cell.tone or '' }}" class="toned mt-1 text-2xl font-semibold tabular-nums">{{ cell.value }}</dd>
+    {% if cell.caption %}<dd class="mt-1 text-xxs text-aegis-muted truncate">{{ cell.caption }}</dd>{% endif %}
+  </div>
+  {% endfor %}
+</dl>
+{% endmacro %}
+
+{# Ranked rows: name, a small count, the amount, and a thin bar scaled to
+   the largest row (the Overview's payees and bills, a meeting's speakers).
+   ``rows`` are ``{"label", "count", "value", "ratio", "tone"}``, and a
+   ``dot`` (a chart-ramp color, ``chart_dot``) marks whose a row is;
+   ``tone`` is "accent" or "muted" (a row standing apart), else teal;
+   ``columns`` sets a long list in columns, read down each, so it does not
+   run the page long. A row with ``icon_url`` or ``category`` leads with
+   its ``mark``; ``attrs`` makes its name open something
+   (``hx_dialog(...)``). #}
+{% macro ranked_rows(rows, columns=False) %}
+<ol class="ranked {{ 'sm:columns-2 xl:columns-3 gap-x-8' if columns else 'space-y-3' }}"{% if columns %} data-columns{% endif %}>
+  {% for row in rows %}
+  <li{% if columns %} class="break-inside-avoid pb-3"{% endif %}>
+    <div class="flex items-baseline justify-between gap-3 text-sm">
+      <span class="inline-flex items-center gap-2 min-w-0">{% if row.icon_url is defined or row.category is defined %}<span class="shrink-0">{{ mark(row, row.label) }}</span>{% endif %}{% if row.attrs %}<button type="button" {{ row.attrs }} class="text-aegis-text truncate text-left hover:underline">{{ row.label }}</button>{% else %}<span class="{{ 'text-aegis-muted' if row.tone == 'muted' else 'text-aegis-text' }} truncate">{% if row.dot %}{{ chart_dot(row.dot) }}{% endif %}{{ row.label }}</span>{% endif %}</span>
+      <span class="shrink-0 tabular-nums">{% if row.count %}<span class="text-aegis-muted mr-2">{{ row.count }}</span>{% endif %}<span class="text-aegis-text font-medium">{{ row.value }}</span></span>
+    </div>
+    <div class="mt-1 h-1 rounded bg-aegis-border/60"><div class="h-1 rounded {{ {'accent': 'bg-aegis-accent', 'muted': 'bg-aegis-muted'}.get(row.tone, 'bg-aegis-teal') }}" style="width: {{ (row.ratio * 100)|round|int }}%"></div></div>
+  </li>
+  {% endfor %}
+</ol>
+{% endmacro %}
+
+{# Tabs: sibling views of one page, Pulse's underline recipe (the same
+   look Flet's tabs had). ``tab_bar`` is the row (``role="tablist"``); each
+   ``tab_item`` is a link: ``href`` for a cold load, ``hx`` the htmx
+   attributes (``hx_replace(...)`` or a plain string). #}
+{% macro tab_bar(label, id=None, attrs="") %}
+<nav role="tablist" aria-label="{{ label }}" {% if id %}id="{{ id }}"{% endif %} {{ attrs|safe }}
+     class="flex flex-wrap items-center gap-6 border-b border-aegis-border mb-6">{{ caller() }}</nav>
+{% endmacro %}
+
+{% macro tab_item(label, active=False, href="", hx="") %}
+<a href="{{ href }}" {{ hx|safe }} {% if active %}aria-current="page"{% endif %}
+   class="tab">{{ label }}</a>
+{% endmacro %}
+
+{# A section's tab row, each tab its own address (``tabs``: each
+   ``{label, url, active}``, ``overseer_ai_common.tab_links``), a tab
+   swapping the section's view (``#overseer-main``). #}
+{% macro section_tabs(tabs, label, id=None) %}
+{% call tab_bar(label, id=id) %}{% for t in tabs %}{{ tab_item(t.label, t.active, t.url, hx_replace(t.url, "#overseer-main")) }}{% endfor %}{% endcall %}
+{% endmacro %}
+
+{# Tabs within one view, switched in the browser (app.js's ``data-tabs``):
+   ``tabs`` is each (key, label), ``open`` the key shown first (the first
+   when none), and each panel a ``tab_panel(key, open)`` in the caller. The
+   tab picked stays picked when the view re-reads itself, and a link to
+   something in a hidden panel (a note's line) shows that panel first. #}
+{% macro tabbed(name, tabs, open=None) %}
+{% set open = open or tabs[0][0] %}
+<div data-tabs="{{ name }}">
+  {% call tab_bar(name) %}
+  {% for key, label in tabs %}
+  <button type="button" role="tab" data-tab="{{ key }}" aria-selected="{{ 'true' if key == open else 'false' }}" class="tab">{{ label }}</button>
+  {% endfor %}
+  {% endcall %}
+  {{ caller() }}
+</div>
+{% endmacro %}
+
+{% macro tab_panel(key, open) %}
+<div role="tabpanel" data-tab-panel="{{ key }}" class="space-y-6"{% if key != open %} hidden{% endif %}>{{ caller() }}</div>
+{% endmacro %}
+
+{# A chip: one of a row of exclusive choices (a time window, a month, a
+   view). Pulse's date-range recipe, which the Flet range chips copied:
+   small, outlined, a light teal fill when chosen. #}
+{% macro chip(label, active=False, href="", hx="", extra="") %}
+<a href="{{ href }}" {{ hx|safe }} {{ extra|safe }} {% if active %}aria-current="page"{% endif %} class="chip">{{ label }}</a>
 {% endmacro %}
 
 {# A line drawn small (``series.sparkline``'s points, in its box): a
@@ -717,6 +683,15 @@
 <button type="button" data-copy="{{ value }}"
         class="shrink-0 text-xxs caps px-2 py-0.5 rounded border border-aegis-border text-aegis-muted hover:text-aegis-text hover:border-aegis-muted transition-colors">{{ label }}</button>
 {% endmacro %}
+
+{# A part read when it first comes on screen (a detail row's load), from
+   ``url`` into this element; ``attrs`` is markup that marks it. #}
+{% macro lazy(url, attrs="", placeholder="") %}
+<div hx-get="{{ url }}" hx-trigger="intersect once" hx-swap="innerHTML" {{ attrs|safe }}>{{ placeholder }}</div>
+{% endmacro %}
+
+{# A link to another part of Overseer, swapped into its main area. #}
+{% macro goto(url, label, attrs="") %}<a {{ attrs|safe }} href="{{ url }}" {{ hx_replace(url, "#overseer-main") }} class="text-aegis-teal hover:underline">{{ label }}</a>{% endmacro %}
 
 {# A command to run, in monospace, with its copy button. #}
 {% macro command(value) %}<code class="font-mono text-aegis-text">{{ value }}</code>{{ copy_button(value) }}{% endmacro %}
@@ -775,3 +750,224 @@
   {% endfor %}
 </dl>
 {% endmacro %}
+
+
+{# What an interactive page loads in its head: htmx (and its SSE
+   extension), Alpine and the app's styles. base.html and any other layout
+   that needs htmx share this one copy; ``interactive_body`` is its other
+   half. #}
+{% macro interactive_head() %}
+{# htmx. History snapshots are disabled deliberately: htmx's default
+   back-button behavior saves the live DOM to localStorage and re-injects
+   it on history navigation. This DOM is full of Alpine-expanded
+   templates (x-if/x-for clones, x-teleport copies) and script tags —
+   restoring a snapshot re-runs scripts ("identifier already declared")
+   and makes Alpine re-expand already-expanded templates, duplicating the
+   whole page once per back/forward press. historyCacheSize 0 makes every
+   restore a cache miss; refreshOnHistoryMiss turns a miss into a clean
+   full-page load instead of an AJAX restore. #}
+{# responseHandling (first matching rule wins, RegExp.test semantics):
+   a 422 carries a re-rendered form and must swap (app.js toasts one that
+   is JSON instead); other 4xx/5xx never
+   swap and raise htmx:responseError, which app.js turns into a toast. #}
+<meta name="htmx-config" content='{"historyCacheSize": 0, "refreshOnHistoryMiss": true, "attributesToSettle": [], "responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "422", "swap": true}, {"code": "[45]..", "swap": false, "error": true}, {"code": "...", "swap": true}]}'>
+{# Third-party scripts are vendored under static/vendor (the version in
+   each name), never a CDN: the script policy allows this origin only. #}
+<script src="{{ static('vendor/htmx-2.0.4.min.js') }}"></script>
+{# SSE extension (hx-ext="sse") for job progress streams; registers
+   against the global htmx, so it must follow core. #}
+<script src="{{ static('vendor/htmx-ext-sse-2.2.3.js') }}"></script>
+
+{# Alpine.js — the collapse plugin MUST load before core so its directive
+   is registered when Alpine inits. Both deferred, plugin first. #}
+<script src="{{ static('vendor/alpinejs-collapse-3.14.8.min.js') }}" defer></script>
+<script src="{{ static('vendor/alpinejs-3.14.8.min.js') }}" defer></script>
+
+<link rel="stylesheet" href="{{ static('css/app.css') }}">
+{% endmacro %}
+
+
+{# ``interactive_head``'s other half, at the end of the body: the loading
+   bar along the top (app.js) and the icons ``icon()`` draws, once a page,
+   then where toasts, dialogs and drawers arrive. #}
+{% macro interactive_body() %}
+<div id="page-progress" class="aegis-page-progress" aria-hidden="true"></div>
+{{ sprite() }}
+{{ toast_region() }}
+{{ dialog() }}
+{{ drawer() }}
+<script src="{{ static('js/app.js') }}"></script>
+{% endmacro %}
+
+
+{# The chat surface's scripts, after app.js: wherever a chat mount shows. #}
+{% macro chat_scripts() %}<script src="{{ static('js/chat.js') }}"></script><script src="{{ static('js/call-state.js') }}"></script><script src="{{ static('js/mentions.js') }}"></script><script src="{{ static('js/taps.js') }}"></script><script src="{{ static('js/voice.js') }}"></script>{% endmacro %}
+
+
+{# Steward's own layout parts: the app shell's brand and navigation, the
+   appearance fields, and the finance rows' marks, links and grids. #}
+{# The app's mark and its name, the lockup Pulse carries in the same
+   place: the shield over an open book (a picture, its own colours, on
+   any theme), the name in the text colour so it holds in both modes. #}
+{% macro brand(name) %}
+<a href="/" class="rail-row flex items-center gap-2.5 min-w-0">
+  <img src="{{ static('brand-mark.png') }}" alt="" width="32" height="32"
+       class="w-8 h-8 shrink-0">
+  <span class="rail-hide text-base font-semibold text-aegis-text truncate">{{ name }}</span>
+</a>
+{% endmacro %}
+
+{# One sidebar link. ``href`` and ``hx-get`` are the same URL: a cold load
+   gets the shell, the htmx swap gets the fragment, one route decides
+   (see ``render()``). ``aria-current`` is set server-side from
+   ``current_path`` and moved client-side by app.js as htmx pushes URLs.
+   Clicking closes the mobile drawer (``mobileOpen`` from the shell). #}
+{% macro nav_item(section, current_path) %}
+<a href="{{ section.path }}" {{ hx_page(section.path) }}
+   @click="mobileOpen = false"
+   {%- set here = current_path|default("", true) -%}
+   {% if here == section.path or here.startswith(section.path ~ "/") %}aria-current="page"{% endif %}
+   class="rail-row group flex items-center gap-3 px-3 py-2 text-sm rounded transition-colors whitespace-nowrap
+          text-aegis-muted hover:text-aegis-text hover:bg-aegis-border/20
+          aria-[current=page]:text-aegis-text aria-[current=page]:bg-aegis-teal/10">
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+       stroke-width="1.5" stroke="currentColor" class="w-5 h-5 shrink-0" aria-hidden="true">
+    <path stroke-linecap="round" stroke-linejoin="round" d="{{ section.icon }}"/>
+  </svg>
+  <span class="rail-hide">{{ section.label }}</span>
+  {#- The mark sits inside a boosted link and htmx attributes INHERIT:
+      without its own target and push-url the dot would be swapped into
+      the page and the fetch written into the address bar. -#}
+  {% if section.attention %}<span data-attention hx-get="{{ section.attention }}" hx-trigger="load, every 5m"
+        hx-target="this" hx-swap="innerHTML" hx-push-url="false" class="inline-flex"></span>{% endif %}
+</a>
+{% endmacro %}
+
+{# The appearance choices, one fieldset each: those with a legend in
+   ``appearance`` (rendering.py, the one list), then ``more`` -
+   ``MenuChoice``s the server draws the page by, kept in a cookie and the
+   page reloaded. Alpine holds the choice (``appearance()``, theme.js);
+   each row is the ``chip`` class, marked by aria-pressed. The sidebar's
+   picker and ``theme_toggle`` draw these. #}
+{% macro appearance_fields(more=()) %}
+{% set rows = [] %}{% for key, (legend, choices) in appearance.items() if legend %}{% set _ = rows.append((key, legend, choices, none, none)) %}{% endfor %}
+{% for key, legend, choices, cookie, chosen in rows + more|list %}
+<fieldset>
+  <legend class="micro-label text-aegis-muted mb-1">{{ legend }}</legend>
+  <div class="flex gap-1">
+    {% for value, label in choices %}
+    <button type="button" data-set-{{ key }}="{{ value }}"
+            {% if cookie %}aria-pressed="{{ (value == chosen)|lower }}" @click="setAppearance('{{ key }}', '{{ value }}', '{{ cookie }}')"
+            {% else %}:aria-pressed="{{ key }} === '{{ value }}'" @click="{{ key }} = '{{ value }}'; setAppearance('{{ key }}', '{{ value }}')"{% endif %}
+            class="chip flex-1">{{ label }}</button>
+    {% endfor %}
+  </div>
+</fieldset>
+{% endfor %}
+{% endmacro %}
+
+{# A row of choices for one card (a window, a comparison, a view): each a
+   link chip that re-requests the page and swaps ``target`` in place
+   (pattern 3). ``items`` are ``(label, active, url)``. #}
+{% macro chip_nav(id, label, items, target) %}
+<nav id="{{ id }}" aria-label="{{ label }}" class="flex flex-wrap items-center gap-1.5 mb-3">
+  {% for text, active, url in items %}{{ chip(text, active, url, hx_replace(url, target)) }}{% endfor %}
+</nav>
+{% endmacro %}
+
+{# A payee's brand mark, three deep: the resolved icon (served by
+   /icons, so the browser caches it once across pages) on a light tile;
+   else the category's glyph (glyphs.py); else the initial letter. The
+   letter is drawn from a data attribute, not text, so a cell's text is
+   still just the name. The tile is light in every theme on purpose:
+   favicons are drawn for their owner's background and plenty are
+   near-black on transparency, invisible on a dark surface. #}
+{# A row's mark: every row (a dict or a response object) carries
+   ``icon_url``, ``category`` and, for a transaction, the payee's usual
+   ``payee_category`` to borrow when it has no category of its own. #}
+{% macro mark(row, name) %}{{ avatar(name, row.icon_url, category=row.category or row.payee_category) }}{% endmacro %}
+
+{# A file's type, wearing the mark people already know from every file
+   manager they have used. The same circular tile every other row wears
+   - a payee, an account, a model - so a list of paper reads like the
+   rest of the app rather than like a second design. The label rides in
+   ``title``: a mark answers the glance, the word answers the doubt.
+
+   Bigger than the 20px a payee or an account wears, on purpose: those
+   sit in dense money rows where the NAME is the thing being scanned,
+   and a shelf of paper is scanned by its marks. Tailwind's steps go 20,
+   24, 28, 32 - 32 is the nearest to half again as big, and keeping to
+   the scale is what stops a one-off size becoming a second scale. #}
+{% macro file_mark(badge) %}
+<span data-file="{{ badge.label }}" title="{{ badge.label }}" class="inline-flex shrink-0 w-8 h-8 rounded-full bg-aegis-border/60 items-center justify-center overflow-hidden align-middle"><img src="{{ badge.icon }}" alt="" width="20" height="20" loading="lazy" class="w-5 h-5 object-contain"></span>
+{% endmacro %}
+
+{# A contact's name, as the door to their page. Every place a party is
+   named draws it through this, so a name is never plain text in one
+   card and a dialog in another. #}
+{# A moment the server keeps in UTC, read in the viewer's clock by app.js
+   (``localTime``); the date stands until it does. #}
+{% macro local_time(when, cls="") -%}
+{% set iso = when.isoformat() if when.isoformat is defined else when %}
+<time data-local datetime="{{ iso }}Z" class="tabular-nums {{ cls }}">{{ when|short_date }}</time>
+{%- endmacro %}
+
+{% macro contact_link(party_id, name) -%}
+{{ page_link("/contacts/" ~ party_id, name, attrs='data-contact="' ~ party_id ~ '"') }}
+{%- endmacro %}
+
+{# A door to another page of the app, opened in place: every in-app link
+   is drawn through this, so the next one cannot look or load slightly
+   differently. ``cls`` adds layout (``truncate``), never a new look. #}
+{% macro page_link(url, label, cls="", attrs="") -%}
+<a href="{{ url }}" {{ hx_page(url) }} class="{{ LINK }}{{ ' ' ~ cls if cls }}"{% if attrs %} {{ attrs|safe }}{% endif %}>{{ label }}</a>
+{%- endmacro %}
+
+{# Several places, each a door, read as a list: "Filed under Pension, Renewal".
+   With ``show`` the list stops there and the rest sits behind "+N more"
+   until asked: a cell is a glance, and a document filed in six places
+   must not push the table off the page. #}
+{% macro doors(places, show=None) -%}
+{% set folded = show is not none and places|length > show %}
+<span {% if folded %}x-data="{ all: false }"{% endif %} class="inline-flex flex-wrap items-baseline gap-x-1">
+{%- for place in places -%}
+<span {% if folded and loop.index > show %}x-show="all" x-cloak{% endif %}><a href="{{ place.url }}" {{ hx_page(place.url) }} class="{{ LINK }}">{{ place.label }}</a>{% if not loop.last %}, {% endif %}</span>
+{%- endfor -%}
+{%- if folded %}<button type="button" x-show="!all" @click="all = true" class="text-xs text-aegis-muted hover:text-aegis-text whitespace-nowrap" data-more>+{{ places|length - show }} more</button>{% endif -%}
+</span>
+{%- endmacro %}
+
+{# A state with no room for its words: the dot alone, and the words on
+   hover. For a fact worth a glance and not a sentence - how current a
+   figure is, beside the figure - where spelling it out would make the
+   line longer than the thing it describes.
+
+   The title is not decoration. A colour alone is unreadable to anyone
+   who cannot see it and unexplainable to anyone who can, so the words
+   ride along for the pointer AND for a screen reader. #}
+{% macro dot(tone, title=None) %}
+{#- ``data-dot``, never ``data-tone``: a badge carries the tone and this
+    sits inside one, so sharing the marker would make every badge two
+    things to anything selecting on it. -#}
+<span data-dot="{{ tone or '' }}" {% if title %}title="{{ title }}" {% endif %}
+      class="inline-flex items-center">
+  <span class="w-1.5 h-1.5 rounded-full bg-current" aria-hidden="true"></span>
+  {%- if title %}<span class="sr-only">{{ title }}</span>{% endif -%}
+</span>
+{% endmacro %}
+
+{# The x on a row or a card. It asks first, in the ``confirm`` dialog,
+   and the answer takes the thing off the page out of band. #}
+{% macro remove_button(url, label, place="ml-auto") %}
+<button type="button" {{ hx_dialog(url) }} class="{{ place }} text-aegis-muted hover:text-error" aria-label="{{ label }}">×</button>
+{%- endmacro %}
+
+{# A grid of cards (goals, envelopes), and one card in it; ``oob``
+   re-sends the card in place after a write. #}
+{% macro item_grid(id) %}
+<ul id="{{ id }}" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{{ caller() }}</ul>
+{%- endmacro %}
+
+{% macro item_card(id, oob=False) %}
+<li id="{{ id }}" {% if oob %}hx-swap-oob="outerHTML"{% endif %} class="raised p-4 flex flex-col gap-2">{{ caller() }}</li>
+{%- endmacro %}

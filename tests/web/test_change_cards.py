@@ -1,0 +1,612 @@
+"""Approval cards in the htmx UI (#1368): the change queue's card, its
+batch card, the review list, and the card a chat reply carries.
+
+A card renders the stored queue row, so what the user approves is what
+runs; approving or rejecting swaps the card for its new state.
+"""
+
+from collections.abc import Iterator
+import json
+from types import SimpleNamespace
+from typing import Any
+
+from fastapi.testclient import TestClient
+import pytest
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.services import change_queue
+from app.services.change_queue import ChangeDisplayRow
+from tests._change_queue import (
+    KINDS,
+    LetterPayload,
+    _describe,
+    executed,
+    note_type,
+)
+from tests.web.dom import none, one, select, text
+
+# Every signed-in user is the household here (``get_owner_user_id`` scopes to
+# ``None``, every row): there is no other user's card to keep from them.
+ONE_HOUSEHOLD = pytest.mark.skip(reason="one household: no card is another user's")
+
+NOTE = "test.card_note"
+LETTER = "test.card_letter"
+
+
+@pytest.fixture(autouse=True)
+def _note() -> Iterator[None]:
+    with note_type(NOTE):
+        yield
+
+
+def _propose(client: TestClient, note: str) -> int:
+    return client.post(
+        "/api/v1/changes", json={"change_type": NOTE, "payload": {"text": note}}
+    ).json()["id"]
+
+
+async def _propose_batch(
+    db: AsyncSession, owner_user_id: int | None, *notes: str
+) -> list[change_queue.PendingChange]:
+    rows = await change_queue.propose_many(
+        db, NOTE, [{"text": n} for n in notes], owner_user_id=owner_user_id
+    )
+    await db.commit()
+    return rows
+
+
+# Each test makes the one request it is about: a test that shows a card and
+# then approves it reads the same row twice, which the N+1 gate counts.
+
+
+def test_a_card_shows_the_change_and_its_actions(hx_user: TestClient) -> None:
+    change_id = _propose(hx_user, "hi")
+
+    card = hx_user.get(f"/partials/changes/{change_id}")
+
+    assert card.status_code == 200
+    assert "Write a note" in card.text and "hi" in card.text
+    assert f'hx-post="/partials/changes/{change_id}/approve"' in card.text
+
+
+def test_a_card_names_who_proposed_it(hx_user: TestClient) -> None:
+    """A card filed by an outside assistant says which one, so it never
+    reads as the app's own assistant's."""
+    change_id = hx_user.post(
+        "/api/v1/changes",
+        json={
+            "change_type": NOTE,
+            "payload": {"text": "hi"},
+            "proposed_by_agent": "mcp:claude-code",
+        },
+    ).json()["id"]
+
+    card = hx_user.get(f"/partials/changes/{change_id}")
+
+    assert "mcp:claude-code" in text(one(card.text, "[data-change]"))
+
+
+@pytest.mark.parametrize(
+    ("where", "new_tab"), [("/app/orders/7", False), ("https://github.com/x", True)]
+)
+def test_a_row_that_names_a_place_links_to_it(
+    hx_user: TestClient, where: str, new_tab: bool
+) -> None:
+    """In the app it opens in place; anywhere else in a new tab."""
+    change_id = _propose(hx_user, where)
+
+    link = one(hx_user.get(f"/partials/changes/{change_id}").text, f'a[href="{where}"]')
+
+    assert text(link) == where
+    assert (link.get("target") == "_blank") is new_tab
+
+
+def test_approving_runs_the_change_and_swaps_the_card(hx_user: TestClient) -> None:
+    change_id = _propose(hx_user, "hi")
+
+    approved = hx_user.post(f"/partials/changes/{change_id}/approve")
+
+    assert approved.status_code == 200
+    assert "Approved" in text(one(approved.text, "[data-change]"))
+    assert "/approve" not in approved.text
+    assert executed == ["hi"]
+
+
+def test_rejecting_runs_nothing(hx_user: TestClient) -> None:
+    change_id = _propose(hx_user, "no")
+
+    rejected = hx_user.post(f"/partials/changes/{change_id}/reject")
+
+    assert "Rejected" in text(one(rejected.text, "[data-change]"))
+    assert executed == []
+
+
+@ONE_HOUSEHOLD
+async def test_another_users_card_cannot_be_approved(
+    hx_user: TestClient, async_db_session: AsyncSession, user_factory: Any
+) -> None:
+    other = await user_factory()
+    row = await change_queue.propose(
+        async_db_session, NOTE, {"text": "theirs"}, owner_user_id=other.id
+    )
+    await async_db_session.commit()
+
+    response = hx_user.post(f"/partials/changes/{row.id}/approve")
+
+    assert response.status_code == 404
+    assert executed == []
+
+
+@ONE_HOUSEHOLD
+async def test_another_users_card_reads_as_gone(
+    hx_user: TestClient, async_db_session: AsyncSession, user_factory: Any
+) -> None:
+    """Shown as a card no longer there, the answer a missing one gets: it
+    never confirms the other user's card exists."""
+    other = await user_factory()
+    row = await change_queue.propose(
+        async_db_session, NOTE, {"text": "theirs"}, owner_user_id=other.id
+    )
+    await async_db_session.commit()
+
+    response = hx_user.get(f"/partials/changes/{row.id}")
+
+    assert response.status_code == 200
+    one(response.text, "[data-card-missing]")
+    assert "theirs" not in response.text
+
+
+@pytest.mark.parametrize("path", ["/999999", "/batch/no-such-batch"])
+def test_a_card_no_longer_in_the_queue_says_so(hx_user: TestClient, path: str) -> None:
+    """A transcript is a record: a card whose row is gone loads as gone
+    (200), never an error toast on every visit."""
+    response = hx_user.get(f"/partials/changes{path}")
+
+    assert response.status_code == 200
+    one(response.text, "[data-card-missing]")
+
+
+def test_a_cards_actions_swap_the_card_they_are_on(hx_user: TestClient) -> None:
+    """The same card can be up twice (the thread and the waiting list): its
+    actions swap the copy they sit on, never the first one with its id."""
+    change_id = _propose(hx_user, "hi")
+
+    card = hx_user.get(f"/partials/changes/{change_id}").text
+
+    approve = one(card, f'[hx-post="/partials/changes/{change_id}/approve"]')
+    assert approve.get("hx-target") == "closest [data-change]"
+
+
+def test_a_decided_card_folds_to_its_line_and_says_why(hx_user: TestClient) -> None:
+    """History, not homework: a decided card is its title and outcome, the
+    rows and the note behind a fold."""
+    change_id = _propose(hx_user, "hi")
+    rejected = hx_user.post(f"/partials/changes/{change_id}/reject").text
+
+    fold = one(rejected, "[data-change] details")
+
+    assert "Rejected" in text(one(fold, "summary"))
+    assert "hi" in text(fold)
+
+
+async def test_a_batch_folds_rows_that_differ_only_in_their_first_line(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+) -> None:
+    """Identical changes read once, with a skip for all of them that ticks
+    each row's own (the form reads only those); the rows stay behind it."""
+    rows = await _propose_batch(
+        async_db_session,
+        acting_owner_user_id,
+        "first | same",
+        "second | same",
+        "third | other",
+    )
+
+    card = hx_user.get(f"/partials/changes/batch/{rows[0].batch_id}").text
+
+    (group,) = select(card, "[data-change-group]")
+    one(group, "input[data-skip-group]")
+    assert len(select(group, "input[name=exclude_ids]")) == 2
+    assert "first" in text(group) and "second" in text(group)
+    assert "third" not in text(group)
+    assert len(select(card, "input[name=exclude_ids]")) == 3
+
+
+async def test_a_batch_card_offers_a_skip_per_waiting_row(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+) -> None:
+    rows = await _propose_batch(async_db_session, acting_owner_user_id, "keep", "veto")
+
+    card = hx_user.get(f"/partials/changes/batch/{rows[0].batch_id}")
+
+    assert "keep" in card.text and "veto" in card.text
+    assert len(select(card.text, "input[name=exclude_ids]")) == 2
+
+
+async def test_a_batch_approves_all_but_the_vetoed_rows(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+) -> None:
+    rows = await _propose_batch(async_db_session, acting_owner_user_id, "keep", "veto")
+    batch = rows[0].batch_id
+
+    resolved = hx_user.post(
+        f"/partials/changes/batch/{batch}/approve",
+        data={"exclude_ids": [str(rows[1].id)]},
+    )
+
+    assert resolved.status_code == 200
+    assert executed == ["keep"]
+    card = text(one(resolved.text, "[data-change-batch]"))
+    assert "Approved" in card and "Rejected" in card
+
+
+def test_an_editable_card_opens_its_form_prefilled(hx_user: TestClient) -> None:
+    """A type that lets the reader put their own words on a card first
+    (``editable``) offers Edit: the one dialog, every field the reader may
+    change prefilled as proposed, a select where the type names choices."""
+    with note_type(
+        LETTER,
+        payload_model=LetterPayload,
+        editable=True,
+        edits=("text", "kind"),
+        choices={"kind": KINDS},
+    ):
+        change_id = hx_user.post(
+            "/api/v1/changes",
+            json={"change_type": LETTER, "payload": {"text": "hi", "to": "box"}},
+        ).json()["id"]
+        card = hx_user.get(f"/partials/changes/{change_id}").text
+        form = hx_user.get(f"/partials/changes/{change_id}/edit").text
+
+    edit = one(card, "[data-change] [data-edit]")
+    assert edit.get("hx-get") == f"/partials/changes/{change_id}/edit"
+    assert one(form, 'input[name="text"]').get("value") == "hi"
+    assert one(form, 'select[name="kind"] option[selected]').get("value") == "note"
+    none(form, 'input[name="to"]')
+
+
+def test_a_card_that_is_answered_not_edited_has_no_form(hx_user: TestClient) -> None:
+    change_id = _propose(hx_user, "hi")
+
+    card = hx_user.get(f"/partials/changes/{change_id}").text
+
+    none(card, "[data-edit]")
+    assert hx_user.get(f"/partials/changes/{change_id}/edit").status_code == 404
+
+
+def test_saving_the_form_redraws_every_copy_of_the_card(hx_user: TestClient) -> None:
+    """Saved, the dialog closes and every copy of the card on the page (the
+    thread's and the waiting list's) fetches itself again; a revision the
+    contract refuses comes back to the form with why, as typed."""
+    with note_type(LETTER, payload_model=LetterPayload, editable=True):
+        change_id = hx_user.post(
+            "/api/v1/changes", json={"change_type": LETTER, "payload": {"text": "hi"}}
+        ).json()["id"]
+        url = f"/partials/changes/{change_id}"
+        card = hx_user.get(url).text
+        refused = hx_user.post(f"{url}/edit", data={"text": "hi", "to": "x" * 21})
+        saved = hx_user.post(f"{url}/edit", data={"text": "bye", "to": ""})
+        redrawn = hx_user.get(url).text
+
+    revised = json.loads(saved.headers["HX-Trigger"])["change:revised"]
+    listens = one(card, "[data-change]")
+    assert listens.get("hx-get") == url
+    assert revised["card"] in listens.get("hx-trigger", "")
+    assert refused.status_code == 422
+    one(refused.text, "[role=alert]")
+    assert one(refused.text, 'input[name="to"]').get("value") == "x" * 21
+    assert saved.status_code == 200
+    assert "dialog:close" in saved.headers["HX-Trigger-After-Settle"]
+    assert "bye" in text(one(redrawn, "[data-change]"))
+
+
+async def test_a_card_shows_the_pictures_its_type_names(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+    files: Any,
+) -> None:
+    """``scan``: a card that carries pictures (a scanned page, a photo) draws
+    each one its rows mark, served from where its type says it is stored."""
+    keys = [
+        await files.put(b"\xff\xd8\xff first", content_type="image/jpeg"),
+        await files.put(b"\x89PNG\r\n\x1a\n second", content_type="image/png"),
+    ]
+
+    async def pictured(
+        db: AsyncSession, payloads: list[Any], owner: int | None
+    ) -> list[list[ChangeDisplayRow]]:
+        pages = [
+            ChangeDisplayRow(label="Page", value=str(n), scan=True) for n in (1, 2)
+        ]
+        return [[*rows, *pages] for rows in await _describe(db, payloads, owner)]
+
+    async def where(db: AsyncSession, payload: Any, owner: int | None) -> list[str]:
+        return keys
+
+    with note_type(LETTER, describe=pictured, scan=where):
+        row = await change_queue.propose(
+            async_db_session,
+            LETTER,
+            {"text": "two pages"},
+            owner_user_id=acting_owner_user_id,
+        )
+        await async_db_session.commit()
+        url = f"/partials/changes/{row.id}"
+        card = hx_user.get(url).text
+        second = hx_user.get(f"{url}/scan", params={"page": 1})
+        past = hx_user.get(f"{url}/scan", params={"page": 2})
+
+    srcs = [img.get("src") for img in select(card, "[data-change] img[data-scan]")]
+    assert srcs == [f"{url}/scan", f"{url}/scan?page=1"]
+    assert second.status_code == 200
+    assert second.headers["content-type"] == "image/png"
+    assert second.content == b"\x89PNG\r\n\x1a\n second"
+    assert past.status_code == 404
+
+
+async def _card_of(
+    client: TestClient,
+    db: AsyncSession,
+    owner: int | None,
+    rows: list[ChangeDisplayRow],
+) -> str:
+    """The card of a change whose type describes it as ``rows``."""
+
+    async def described(
+        db: AsyncSession, payloads: list[Any], owner: int | None
+    ) -> list[list[ChangeDisplayRow]]:
+        return [rows for _ in payloads]
+
+    with note_type(LETTER, describe=described):
+        row = await change_queue.propose(db, LETTER, {"text": "x"}, owner_user_id=owner)
+        await db.commit()
+        return client.get(f"/partials/changes/{row.id}").text
+
+
+async def test_a_card_reads_its_first_line_as_its_subject(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+) -> None:
+    """The first line is what the card is about; the lines after it are
+    what will change, the changing part marked (an arrow's target, what
+    leads a "head · rest" line), each with its note under it."""
+    card = await _card_of(
+        hx_user,
+        async_db_session,
+        acting_owner_user_id,
+        [
+            ChangeDisplayRow(label="Payment", value="$3.99 · Market"),
+            ChangeDisplayRow(label="Category", value="None → Groceries"),
+            ChangeDisplayRow(label="Amount", value="$5.00 · twice", note="why"),
+        ],
+    )
+
+    assert text(one(card, "[data-subject]")) == "$3.99 · Market"
+    none(card, "[data-subject] [data-will]")
+    assert [text(will) for will in select(card, "[data-will]")] == [
+        "Groceries",
+        "$5.00",
+    ]
+    assert text(one(card, "[data-fact-note]")) == "why"
+
+
+async def test_a_card_wears_the_face_its_provider_gives_it(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service that knows what a card is about gives it a face beside its
+    subject (``face_provider``), every card of a list in one call."""
+    from app.components.web_frontend.routes.partials import changes
+
+    asked: list[int] = []
+
+    async def faces(
+        db: AsyncSession, rows: list[change_queue.PendingChange]
+    ) -> dict[int, dict[str, Any]]:
+        asked.append(len(rows))
+        return {row.id: {"name": "Market"} for row in rows if row.id}
+
+    monkeypatch.setattr(changes, "FACES", [])
+    changes.face_provider(faces)
+    card = await _card_of(
+        hx_user,
+        async_db_session,
+        acting_owner_user_id,
+        [ChangeDisplayRow(label="Payment", value="lunch")],
+    )
+
+    assert one(card, "[data-subject]").getprevious().get("data-avatar") == "M"
+    assert asked == [1]
+
+
+@pytest.mark.parametrize("reader", [None, "/read/{}"])
+async def test_a_card_draws_the_page_its_claim_was_read_off(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+    reader: str | None,
+) -> None:
+    """A citation the reader can check where they decide: the page itself,
+    opening the app's document reader where it has one, else the page."""
+    from app.components.web_frontend.routes.partials import changes
+
+    monkeypatch.setattr(changes, "document_reader", reader.format if reader else None)
+    card = await _card_of(
+        hx_user,
+        async_db_session,
+        acting_owner_user_id,
+        [
+            ChangeDisplayRow(label="Letter", value="a bill"),
+            ChangeDisplayRow(label="Due", value="Jul 1", document_id=7, page=2),
+        ],
+    )
+
+    page = one(card, "[data-change] img[data-page]")
+    assert page.get("src") == "/api/v1/documents/7/pages/2/image"
+    opener = page.getparent()
+    if reader:
+        assert opener.get("hx-get") == "/read/7"
+    else:
+        assert opener.get("href") == page.get("src")
+
+
+async def test_a_folded_group_says_what_its_rows_come_to(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+) -> None:
+    """Seventy-one of the same change read once, with the total of their
+    amounts and the dates they span."""
+    lines = iter(
+        [
+            ChangeDisplayRow(
+                label="Payment", value="one", amount_cents=150, at="2026-07-01"
+            ),
+            ChangeDisplayRow(
+                label="Payment", value="two", amount_cents=250, at="2026-07-15"
+            ),
+        ]
+    )
+
+    async def described(
+        db: AsyncSession, payloads: list[Any], owner: int | None
+    ) -> list[list[ChangeDisplayRow]]:
+        return [
+            [next(lines), ChangeDisplayRow(label="Tag", value="Pool")] for _ in payloads
+        ]
+
+    with note_type(LETTER, describe=described):
+        rows = await change_queue.propose_many(
+            async_db_session,
+            LETTER,
+            [{"text": "a"}, {"text": "b"}],
+            owner_user_id=acting_owner_user_id,
+        )
+        await async_db_session.commit()
+        card = hx_user.get(f"/partials/changes/batch/{rows[0].batch_id}").text
+
+    group = one(card, "[data-change-group]")
+    assert text(one(group, "[data-total]")) == "$4.00"
+    assert text(one(group, "[data-span]")) == "Jul 1 - Jul 15"
+
+
+def test_a_card_without_pictures_has_none_to_serve(hx_user: TestClient) -> None:
+    change_id = _propose(hx_user, "hi")
+
+    assert hx_user.get(f"/partials/changes/{change_id}/scan").status_code == 404
+
+
+def test_approving_a_card_runs_its_follow_up(hx_user: TestClient) -> None:
+    followed: list[str] = []
+
+    async def follow(result: dict[str, Any]) -> None:
+        followed.append(result["noted"])
+
+    with note_type(LETTER, after_commit=follow):
+        change_id = hx_user.post(
+            "/api/v1/changes", json={"change_type": LETTER, "payload": {"text": "hi"}}
+        ).json()["id"]
+        hx_user.post(f"/partials/changes/{change_id}/approve")
+
+    assert followed == ["hi"]
+
+
+async def test_the_review_list_holds_only_what_waits(
+    hx_user: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+) -> None:
+    waiting = _propose(hx_user, "waiting")
+    done = _propose(hx_user, "done")
+    hx_user.post(f"/partials/changes/{done}/approve")
+    rows = await _propose_batch(
+        async_db_session, acting_owner_user_id, "first", "second"
+    )
+
+    review = hx_user.get("/partials/changes")
+
+    assert f"/partials/changes/{waiting}/approve" in review.text
+    assert f"/partials/changes/{done}/" not in review.text
+    (batch,) = select(review.text, "[data-change-batch]")
+    assert batch.get("id") == f"batch-{rows[0].batch_id}"
+    assert text(batch).index("first") < text(batch).index("second")
+
+
+# The chat surface ships with the AI service; the cards it draws are the
+# queue's, which finance has without it.
+def test_a_chat_reply_carries_the_cards_its_tools_proposed() -> None:
+    from app.components.web_frontend import chat_surface
+    from app.components.web_frontend.chat_surface import ChatSurface
+
+    trace = [
+        {
+            "tool": "propose",
+            "component": {"kind": "pending_change", "pending_change_id": 7},
+        },
+        {
+            "tool": "propose_many",
+            "component": {"kind": "pending_change_batch", "batch_id": "b1"},
+        },
+        {
+            "tool": "pending",
+            "component": [{"kind": "pending_change", "pending_change_id": 7}],
+        },
+        {"tool": "search", "result": "3 hits"},
+    ]
+    message = SimpleNamespace(
+        id="m1",
+        role=SimpleNamespace(value="assistant"),
+        content="Filed it.",
+        metadata={"tool_trace": trace},
+    )
+
+    mount = ChatSurface(path="/chat", user="0", surface="app")
+    shaped = chat_surface.settled(mount, message, "c1")
+
+    assert shaped["changes"] == [
+        "/partials/changes/7",
+        "/partials/changes/batch/b1",
+    ]
+
+
+def test_a_card_is_found_in_a_result_clipped_before_markers() -> None:
+    """A trace kept before results carried their card's identity (the
+    ``component`` marker) holds only the clipped result: the identity leads
+    it, so it survives the clip that cut the rest to invalid JSON."""
+    from app.components.web_frontend import chat_surface
+    from app.components.web_frontend.chat_surface import ChatSurface
+
+    trace = [
+        {
+            "tool": "propose",
+            "result": '{"pending_change_id": 12, "display": [{"label": "No',
+        },
+        {"tool": "propose_many", "result": '{"batch_id": "b9", "items": [{"id'},
+        {"tool": "save_memory", "result": '{"pending_change_id": 13}'},
+    ]
+    message = SimpleNamespace(
+        id="m1",
+        role=SimpleNamespace(value="assistant"),
+        content="Filed it.",
+        metadata={"tool_trace": trace},
+    )
+
+    mount = ChatSurface(path="/chat", user="0", surface="app")
+    shaped = chat_surface.settled(mount, message, "c1")
+
+    assert shaped["changes"] == [
+        "/partials/changes/12",
+        "/partials/changes/batch/b9",
+        "/partials/changes/13",
+    ]

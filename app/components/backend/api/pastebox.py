@@ -9,7 +9,7 @@ purpose - nothing here knows what a consumer does with the image.
 from fastapi import APIRouter, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-from app.core.chat_transcript import IMAGE_TYPES, MAX_IMAGE_BYTES
+from app.core.chat_transcript import IMAGE_TYPES, MAX_ATTACHMENT_BYTES
 from app.core.pastebox import pastebox
 from app.core.uploads import read_upload
 
@@ -34,7 +34,7 @@ async def stage_paste(file: UploadFile) -> PasteStageResponse:
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=f"Only images can be pasted, not {file.content_type!r}.",
         )
-    data = await read_upload(file, MAX_IMAGE_BYTES)
+    data = await read_upload(file, MAX_ATTACHMENT_BYTES)
     pastebox.stage(
         media_type=file.content_type or "image/png",
         data=data,

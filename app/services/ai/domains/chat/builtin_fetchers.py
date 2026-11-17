@@ -1,10 +1,11 @@
-"""Framework reference fetchers for memory modules.
+"""Framework reference fetchers for context modules.
 
-Two fetchers ship with the framework: ``recent_conversations`` (a real,
-useful example over the conversation tables) and ``user_profile`` (a
-shape example that returns nothing - replace it with your app's actual
-profile source). Importing this module registers both; app fetchers
-should follow the same pattern in their own modules.
+Three fetchers ship with the framework: ``recent_conversations`` (a real,
+useful example over the conversation tables), ``user_profile`` (a shape
+example that returns nothing - replace it with your app's actual profile
+source) and ``app_map`` (what the app is, read from its code: the default
+agent's). Importing this module registers them; app fetchers should
+follow the same pattern in their own modules.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -12,11 +13,17 @@ from datetime import UTC, datetime, timedelta
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.db import get_async_session
+from app.core.ontology.shared import twin
+from app.core.ontology.summary import summary, text
 from app.services.ai.domains.chat import queries
+from app.services.shared.deps import caller_is_admin
+from app.services.system.aggregate_reads import listed
 
 from .fetchers import FetchContext, register_fetcher
 
 RECENT_CONVERSATION_LIMIT = 5
+# The app map's fetcher, and the context module rendering it.
+APP_MAP = "app_map"
 
 
 async def _recent_conversations_for(
@@ -55,8 +62,24 @@ async def user_profile(ctx: FetchContext) -> str | None:
     return None
 
 
-# Built-in registration: importing this module makes both fetchers
-# referencable from memory_module.fetch_function. replace=True keeps
+async def app_map(ctx: FetchContext) -> str | None:
+    """What the app is, read from its code (``ontology.summary.text``): its
+    parts for an admin, its tables and the changes to them for anyone, as
+    the ``ontology`` tool answers each; for an admin, also the aggregates
+    the ``aggregate`` tool reads. The model is built once a process."""
+    if not await caller_is_admin():
+        return text(summary((await twin()).domain()))
+    return await whole_app()
+
+
+async def whole_app() -> str:
+    """The app as an admin's map has it: its parts, its tables and the
+    aggregates read from them."""
+    return "\n\n".join(part for part in (text(summary(await twin())), listed()) if part)
+
+
+# Built-in registration: importing this module makes these fetchers
+# referencable from context_module.fetch_function. replace=True keeps
 # re-imports idempotent.
 register_fetcher(
     "recent_conversations",
@@ -68,5 +91,11 @@ register_fetcher(
     "user_profile",
     user_profile,
     description="App-replaceable user profile stub",
+    replace=True,
+)
+register_fetcher(
+    APP_MAP,
+    app_map,
+    description="What the app is: its parts, tables and the changes to them",
     replace=True,
 )

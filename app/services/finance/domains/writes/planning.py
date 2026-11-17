@@ -20,11 +20,11 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import before_and_after
 from app.core.schema import known
+from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.constants import ENVELOPE_CADENCES
 from app.services.finance.domains.detection.insights.formatting import format_usd
 from app.services.finance.domains.planning.envelopes import envelope_metadata
 from app.services.finance.domains.planning.goals import DEFAULT_PRIORITY, goal_metadata
-from app.services.finance.schemas import ChangeDisplayRow
 
 GoalStatus = Literal["active", "paused", "reached"]
 # How an envelope's cadence reads as a rate period (``matters.facts``).

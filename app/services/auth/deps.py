@@ -3,6 +3,7 @@
 from fastapi import Cookie, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel.ext.asyncio.session import AsyncSession
+from starlette.requests import HTTPConnection
 
 from app.core.config import settings
 from app.core.db import get_async_db
@@ -12,7 +13,17 @@ from app.services.auth.domains.sessions.tokens import RefreshService
 from app.services.auth.domains.users.accounts import UserService
 from app.services.auth.service import get_current_user_from_token
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token", auto_error=False)
+
+class _Bearer(OAuth2PasswordBearer):
+    """The bearer header, on a page or a socket: FastAPI hands a WebSocket
+    only to an ``HTTPConnection`` parameter, never to ``Request``, so the
+    stock scheme fails every dependency a live call's socket runs."""
+
+    async def __call__(self, request: HTTPConnection) -> str | None:  # type: ignore[override]
+        return await super().__call__(request)  # type: ignore[arg-type]
+
+
+oauth2_scheme = _Bearer(tokenUrl="/api/v1/auth/token", auto_error=False)
 
 
 async def get_session_token(

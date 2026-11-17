@@ -12,19 +12,19 @@ from sqlmodel import Session
 
 from app.core.db import engine
 from app.core.log import logger
-from app.services.ai.service import ollama_models_present, sync_llm_catalog
+from app.services.ai.service import (
+    local_models_present,
+    sync_llm_catalog,
+)
 
 
 async def seed_llm_catalog() -> None:
     """Sync whatever the picker would otherwise be missing."""
     with Session(engine) as session:
-        # The remote catalog never carries a local tag, and the picker's
-        # ``usable`` filter shows only vendors the install can call - with
-        # no API keys, Ollama alone. Without this a fresh Ollama stack
-        # opened an empty picker until someone knew to run
-        # ``llm sync --source ollama``.
-        if ollama_models_present(session):
-            logger.info("Ollama tags already in the catalog")
+        # A fresh local stack's picker is empty without this (why:
+        # ``local_models_present``).
+        if local_models_present(session):
+            logger.info("Local models already in the catalog")
             return
-        result = await sync_llm_catalog(session, mode="chat", source="ollama")
-        logger.info(f"Ollama tags registered: {result.models_added} models")
+        result = await sync_llm_catalog(session, mode="chat", source="local")
+        logger.info(f"Local models registered: {result.models_added} models")

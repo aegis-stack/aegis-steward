@@ -268,6 +268,6 @@ class TestPointingAnAccountAtItsBank:
             )
 
     def test_it_is_in_the_one_queue(self) -> None:
-        from app.services.finance.domains.writes.registry import executor_for
+        from app.services.change_queue import executor_for
 
         assert executor_for("account.institution").title

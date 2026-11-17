@@ -8,13 +8,16 @@ asks for it.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.formatting import before_and_after
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.change_queue import ChangeDisplayRow
+
+if TYPE_CHECKING:
+    from app.services.ai.service import Paste
 
 # Where a receipt with no charge yet is filed, in the card's words.
 WAITS = "The shelf, waiting for its charge"
@@ -141,18 +144,16 @@ async def place(
 
 async def chat_entry(
     db: AsyncSession, paste_id: str, owner_user_id: int | None
-) -> dict[str, Any] | None:
+) -> Paste | None:
     """The user's index entry a paste id names: a read document, or a
     photo kept from a chat turn (#285); None for anything else."""
-    from app.services.ai.service import is_picture, load_user_pastes
+    from app.services.ai.service import pastes_of
     from app.services.finance.domains.detection.analyst.shared import user_id_for
 
     # The same mapping the agent's own deps use, not a second guess at
     # what a finance owner is called on the chat side.
-    for paste in await load_user_pastes(user_id_for(owner_user_id), db):
-        if paste.get("id") == paste_id and (
-            paste.get("document_id") or is_picture(paste)
-        ):
+    for paste in await pastes_of(db, user_id_for(owner_user_id)):
+        if paste.id == paste_id and (paste.document_id or paste.is_picture):
             return paste
     return None
 
@@ -162,34 +163,44 @@ async def filed_document(
 ) -> tuple[int, str] | None:
     """The read document a paste id names, as (id, title), or None."""
     entry = await chat_entry(db, paste_id, owner_user_id)
-    if entry is None or not entry.get("document_id"):
+    if entry is None or not entry.document_id:
         return None
-    return int(entry["document_id"]), str(entry.get("title") or "document")
+    return entry.document_id, entry.title or "document"
 
 
 async def _as_document(
-    db: AsyncSession, photo: dict[str, Any], owner_user_id: int | None
+    db: AsyncSession, photo: Paste, owner_user_id: int | None
 ) -> int:
     """The document a kept photo becomes: its bytes on the shelf, the
     index entry pointing at it so the next filing finds it."""
     from app.core.storage import get_storage
-    from app.services.ai.service import store_document
+    from app.services.ai.service import Paste, document_paste_id, keep_paste
     from app.services.documents.service import DocumentService
     from app.services.finance.domains.detection.analyst.shared import user_id_for
 
-    data = await get_storage().get(str(photo["key"]))
+    data = await get_storage().get(str(photo.key))
     if data is None:
         raise ValueError("The photo is no longer in storage; attach it again.")
     document = await DocumentService(db).ingest(
         data,
-        title=str(photo.get("title") or "photo"),
-        media_type=str(photo["media_type"]),
+        title=photo.title or "photo",
+        media_type=photo.media_type,
         source="chat",
     )
     await db.flush()
     document_id = int(document.id or 0)
-    title = str(photo.get("title") or "photo")
-    await store_document(user_id_for(owner_user_id), document_id, title, 0, db)
+    title = photo.title or "photo"
+    # Indexed the way a read document is (``pastes.read_documents``).
+    await keep_paste(
+        db,
+        user_id_for(owner_user_id),
+        Paste(
+            id=document_paste_id(document_id),
+            title=title,
+            media_type=photo.media_type,
+            document_id=document_id,
+        ),
+    )
     return document_id
 
 
@@ -214,10 +225,10 @@ async def file_document_execute(
             f"{payload.paste_id!r} is not an attached document or photo. Only a "
             "file or photo that was attached can be filed; pasted text cannot."
         )
-    made = not entry.get("document_id")
+    made = not entry.document_id
     document_id = (
-        int(entry["document_id"])
-        if not made
+        entry.document_id
+        if entry.document_id
         else await _as_document(db, entry, owner_user_id)
     )
     if payload.transaction_id is not None:
@@ -263,9 +274,7 @@ async def file_document_describe(
         except ValueError as exc:
             name = str(exc)
     found = await chat_entry(db, payload.paste_id, owner_user_id)
-    said = (
-        str(found.get("title") or "document") if found else f"paste {payload.paste_id}"
-    )
+    said = (found.title or "document") if found else f"paste {payload.paste_id}"
     rows = [
         ChangeDisplayRow(
             label="Document",
@@ -287,12 +296,10 @@ def figure_rows(figures: dict[str, str]) -> list[ChangeDisplayRow]:
     ]
 
 
-def photo_key(entry: dict[str, Any] | None) -> str | None:
+def photo_key(entry: Paste | None) -> str | None:
     """A photo kept from chat, not yet a document: its bytes in the store."""
-    from app.services.ai.service import is_picture
-
-    if entry and not entry.get("document_id") and is_picture(entry):
-        return str(entry["key"])
+    if entry and not entry.document_id and entry.is_picture and entry.key:
+        return entry.key
     return None
 
 

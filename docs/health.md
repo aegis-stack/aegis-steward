@@ -14,6 +14,7 @@ aegis-steward includes comprehensive health monitoring capabilities through both
 ### Detailed Health Check  
 - **URL**: `GET /health/detailed`
 - **Purpose**: Comprehensive system health with metrics
+- **Access**: gated like `/docs`: open in dev, then HTTP Basic (`DOCS_USERNAME`/`DOCS_PASSWORD`), 404 outside dev until those are set, and behind Traefik admin IPs only (`ADMIN_IP_ALLOWLIST`). The CLI's `health` and the dashboard ask from inside the webserver container, which needs neither
 - **Response Time**: < 500ms
 
 ## CLI Health Commands
@@ -92,7 +93,8 @@ Returns structured JSON for integration with monitoring systems:
 aegis-steward health probe
 ```
 
-Returns simple healthy/unhealthy status for use in scripts and monitoring.
+Exits 1 when the API does not answer or a component is unhealthy; a warning
+still passes. For scripts and monitoring.
 
 ## Using Health Checks in Development
 
@@ -211,32 +213,27 @@ aegis-steward health check --debug
 
 ## Customizing Health Checks
 
-To add custom health checks, extend the system service:
+A service's check is an async function returning a `ComponentStatus`, kept in
+its `health.py` and declared as `HEALTH`:
 
 ```python
-# app/services/system_service.py
-async def check_database_health() -> ComponentHealth:
-    """Check database connectivity."""
-    try:
-        # Perform database ping
-        start_time = datetime.now(UTC)
-        # ... database check logic ...
-        end_time = datetime.now(UTC)
-        
-        return ComponentHealth(
-            status="healthy",
-            details={
-                "connection_pool": "active",
-                "query_response_ms": (end_time - start_time).total_seconds() * 1000
-            },
-            response_time_ms=(end_time - start_time).total_seconds() * 1000
-        )
-    except Exception as e:
-        return ComponentHealth(
-            status="unhealthy", 
-            details={"error": str(e)},
-            response_time_ms=0
-        )
+# app/services/orders/health.py
+from app.services.system.models import ComponentStatus, ComponentStatusType
+
+
+async def check_orders_service_health() -> ComponentStatus:
+    pending = await count_pending_orders()
+    return ComponentStatus(
+        name="orders",
+        status=ComponentStatusType.WARNING if pending > 100 else ComponentStatusType.HEALTHY,
+        message=f"{pending} pending",
+        metadata={"pending": pending},
+    )
+
+
+HEALTH = check_orders_service_health
 ```
 
-Then register it in the health check system to have it included in all health reports.
+At startup every service's `HEALTH` is found on disk and registered under the
+service's folder name, so it is included in all health reports with no other
+edit.

@@ -2,13 +2,15 @@
 catalog's org marks, a catalog model in the drawer, making a model the
 active one, an agent's definition in the drawer and saved, a memory
 module's editor and preview, correcting or forgetting a saved fact, and
-the RAG index: a collection's files, deleting it, and a search; and an
-audio file transcribed. Mounted by ``routes/pages.py``."""
+the RAG index: a collection's files, a new one, a source added or
+removed, all re-indexed, deleting it, and a search; and an audio file
+transcribed. Mounted by ``routes/pages.py``."""
 
+from pathlib import PurePosixPath
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from app.components.web_frontend import (
     overseer_ai_agents,
@@ -16,24 +18,28 @@ from app.components.web_frontend import (
     overseer_ai_rag,
     overseer_ai_voice,
 )
+from app.components.web_frontend.chat_surface import HAS_VOICE, PERSISTED
 from app.components.web_frontend.overseer_access import Db, overseer_db
 from app.components.web_frontend.overseer_ai_common import (
+    HAS_EVALS,
     HAS_RAG,
-    HAS_VOICE,
     PARTIALS,
-    PERSISTED,
+    section_url,
 )
+from app.components.web_frontend.overseer_live import event_stream, heartbeat
 from app.components.web_frontend.rendering import (
     dialog,
     form_fields,
     go_to,
     image_response,
     toast_response,
+    with_query,
 )
+from app.core.log import logger
 
 router = APIRouter(prefix=PARTIALS)
 # What the stack has decides what is mounted (at the end): a database for
-# the catalog, agents, memory modules and saved facts; RAG for its
+# the catalog, agents, context modules and saved facts; RAG for its
 # collections and search; voice for transcription. A route for something
 # the stack lacks is not there (a 404), never a crash.
 stored = APIRouter()
@@ -121,6 +127,8 @@ async def save_agent(
         agent = await update_agent(db, slug, changes)
     except ValueError as exc:  # the registry's errors are ValueErrors too
         return toast_response(str(exc), "error")
+    if form.get("stay"):  # opened from a chat reply: stay in the thread
+        return toast_response(f"Saved {agent.name}")
     return go_to(
         overseer_ai_agents.agents_url(agent=slug),
         f"Saved {agent.name}",
@@ -136,15 +144,15 @@ async def module_drawer(
 ) -> Response:
     context = await overseer_ai_agents.module_context(db, slug)
     if context is None:
-        raise HTTPException(status_code=404, detail="No such memory module.")
+        raise HTTPException(status_code=404, detail="No such context module.")
     return dialog(request, "pages/overseer/ai/_module_drawer.html", **context)
 
 
 async def update_module(db: Db, slug: str, changes: dict[str, Any]) -> Any:
     """The module registry's update (keeps the content invariant)."""
-    from app.services.ai.service import update_memory_module
+    from app.services.ai.service import update_context_module
 
-    return await update_memory_module(slug, session=db, **changes)
+    return await update_context_module(slug, session=db, **changes)
 
 
 @stored.post("/modules/{slug}")
@@ -155,7 +163,7 @@ async def save_module(
 ) -> Response:
     module = await overseer_ai_agents.module_row(db, slug)
     if module is None:
-        raise HTTPException(status_code=404, detail="No such memory module.")
+        raise HTTPException(status_code=404, detail="No such context module.")
     form = await form_fields(request)
     try:
         changes = overseer_ai_agents.parse_module_form(
@@ -171,9 +179,9 @@ async def save_module(
     )
 
 
-async def _fact(db: Db, index: int) -> dict[str, Any]:
+async def _fact(db: Db, index: int) -> Any:
     facts = await overseer_ai_agents.fact_rows(db)
-    fact = next((f for f in facts if f["index"] == index), None)
+    fact = next((f for f in facts if f.index == index), None)
     if fact is None:
         raise HTTPException(status_code=404, detail="That fact is gone.")
     return fact
@@ -194,7 +202,10 @@ async def fact_form(
 
 
 async def correct_fact(db: Db, index: int, fact: str, category: str) -> Any:
-    from app.services.ai.service import DEFAULT_MEMORY_USER_ID, update_user_fact
+    from app.services.ai.service import (
+        DEFAULT_MEMORY_USER_ID,
+        update_user_fact,
+    )
 
     return await update_user_fact(
         DEFAULT_MEMORY_USER_ID, index, fact=fact, category=category, session=db
@@ -230,7 +241,7 @@ async def confirm_forget(
         request,
         "pages/overseer/_confirm.html",
         title="Forget this fact?",
-        body=fact["fact"],
+        body=fact.fact,
         url=f"{PARTIALS}/facts/{index}",
         label="Forget",
         method="delete",
@@ -239,7 +250,10 @@ async def confirm_forget(
 
 
 async def forget_fact(db: Db, index: int) -> Any:
-    from app.services.ai.service import DEFAULT_MEMORY_USER_ID, delete_user_fact
+    from app.services.ai.service import (
+        DEFAULT_MEMORY_USER_ID,
+        delete_user_fact,
+    )
 
     return await delete_user_fact(DEFAULT_MEMORY_USER_ID, index, session=db)
 
@@ -280,9 +294,105 @@ async def confirm_delete_collection(request: Request, name: str) -> Response:
 
 @with_rag.delete("/collections/{name}", status_code=204)
 async def delete_collection(name: str) -> Response:
+    try:
+        overseer_ai_rag.idle(name)
+    except ValueError as exc:  # being indexed: its next batch would remake it
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     if not await overseer_ai_rag.delete_collection(name):
         raise HTTPException(status_code=404, detail="No such collection.")
     return Response(status_code=204)
+
+
+@with_rag.get("/collections/new", response_class=HTMLResponse)
+async def new_collection(request: Request) -> Response:
+    return await _sources_dialog(request, None)
+
+
+@with_rag.get("/collections/{name}/add", response_class=HTMLResponse)
+async def add_to_collection(request: Request, name: str) -> Response:
+    return await _sources_dialog(request, name)
+
+
+async def _sources_dialog(request: Request, name: str | None) -> Response:
+    """The steps to fill a collection: a new one (``name`` None) or ``name``."""
+    return dialog(
+        request,
+        "pages/overseer/ai/_sources_dialog.html",
+        **await overseer_ai_rag.sources_context(name),
+    )
+
+
+@with_rag.post("/sources")
+async def add_sources(request: Request) -> Response:
+    """Files uploaded and parts of the app picked (their code, by the twin)
+    into a collection, made if new, indexed as a background job: the dialog
+    closes at once and the collection opens, its drawer following the job.
+    Read by hand: a picker left empty sends its field as a string, which a
+    typed ``list[UploadFile]`` refuses."""
+    form = await request.form()
+    uploads = [
+        (f.filename or "", await f.read())
+        for f in form.getlist("file")
+        if not isinstance(f, str)
+    ]
+    picked = [p for p in form.getlist("part") if isinstance(p, str)]
+    extensions = [e for e in form.getlist("extension") if isinstance(e, str)]
+    name = str(form.get("collection") or "").strip()
+    try:
+        await overseer_ai_rag.start_adding(name, uploads, picked, extensions)
+    except ValueError as exc:  # LoaderError, nothing readable, is one too
+        return toast_response(str(exc), "error")
+    except Exception as exc:  # the index failing: said, and logged in full
+        logger.exception("overseer.ai.sources.failed", collection=name)
+        return toast_response(f"Could not add sources: {exc}", "error")
+    return go_to(
+        overseer_ai_rag.collection_url(name),
+        f"Indexing {name}...",
+        target="#overseer-main",
+    )
+
+
+@with_rag.get("/collections/{name}/sources/remove", response_class=HTMLResponse)
+async def confirm_remove_source(request: Request, name: str, source: str) -> Response:
+    return dialog(
+        request,
+        "pages/overseer/_confirm.html",
+        title="Remove this source?",
+        body=f"{source} leaves {name}; agents stop finding it. An uploaded copy "
+        "goes with it, a file the server holds stays.",
+        url=with_query(f"{PARTIALS}/collections/{name}/sources", source=source),
+        label="Remove",
+        method="delete",
+        done="Source removed",
+    )
+
+
+@with_rag.delete("/collections/{name}/sources", status_code=204)
+async def remove_source(name: str, source: str) -> Response:
+    if not (await overseer_ai_rag.remove_source(name, source)).chunk_count:
+        raise HTTPException(status_code=404, detail="No such source.")
+    return Response(status_code=204)
+
+
+@with_rag.post("/collections/{name}/reindex")
+async def reindex(name: str, source: str | None = None) -> Response:
+    """Every source of ``name`` re-indexed (or ``source`` alone), as a
+    background job its drawer follows."""
+    try:
+        await overseer_ai_rag.start_reindex(name, source)
+    except ValueError as exc:  # already being indexed
+        return toast_response(str(exc), "error")
+    return go_to(
+        overseer_ai_rag.collection_url(name),
+        f"Re-indexing {PurePosixPath(source).name if source else name}...",
+        target="#overseer-main",
+    )
+
+
+@with_rag.get("/collections/{name}/jobs/{job_id}/events")
+async def collection_job_events(name: str, job_id: str) -> StreamingResponse:
+    """A collection's indexing job, pushed to its drawer as it changes."""
+    return event_stream(heartbeat(overseer_ai_rag.job_events(name, job_id)))
 
 
 @with_rag.post("/rag/search", response_class=HTMLResponse)
@@ -302,7 +412,49 @@ async def rag_search(
         request,
         "pages/overseer/ai/_search_results.html",
         query=query.strip(),
-        rows=overseer_ai_rag.result_rows(results),
+        rows=await overseer_ai_rag.result_rows(results),
+    )
+
+
+@with_voice.post("/voice/use")
+async def use_voice(request: Request, db: Db = Depends(overseer_db)) -> Response:
+    """A row's model, voice or engine on the active voice profile; one the
+    catalog does not have is said so (``use_voice``'s ValueError)."""
+    try:
+        said = await overseer_ai_voice.use(db, await form_fields(request))
+    except ValueError as exc:
+        return toast_response(str(exc), "error")
+    return go_to(section_url("voice"), f"Now using {said}.", target="#overseer-main")
+
+
+@with_voice.post("/voice/design")
+async def save_design(request: Request, db: Db = Depends(overseer_db)) -> Response:
+    """The voice designer's choices saved onto its profile."""
+    said, saved = await overseer_ai_voice.save(db, await form_fields(request))
+    if saved is None:
+        return toast_response(said, "error")
+    return go_to(section_url("voice"), said, target="#overseer-main")
+
+
+@with_voice.post("/voice/profiles")
+async def make_profile(
+    name: Annotated[str, Form()] = "", db: Db = Depends(overseer_db)
+) -> Response:
+    """A new voice profile, opened in its editor."""
+    said, made = await overseer_ai_voice.make(db, name)
+    if made is None:
+        return toast_response(said, "error")
+    return go_to(section_url("voice", profile=str(made)), said, target="#overseer-main")
+
+
+@with_voice.post("/voice/profile")
+async def switch_voice(
+    profile_id: Annotated[int, Form()], db: Db = Depends(overseer_db)
+) -> Response:
+    """Another voice profile made the active one."""
+    name = await overseer_ai_voice.switch(db, profile_id)
+    return go_to(
+        section_url("voice"), f"Now speaking as {name}.", target="#overseer-main"
     )
 
 
@@ -326,3 +478,7 @@ for part, present in (
 ):
     if present:
         router.include_router(part)
+if HAS_EVALS:
+    from app.components.web_frontend.routes.partials import overseer_ai_evals
+
+    router.include_router(overseer_ai_evals.router)

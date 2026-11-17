@@ -304,7 +304,7 @@ class TestEnvelopes:
 
 
 def test_every_planning_card_is_registered_and_advertised() -> None:
-    from app.services.finance.domains import writes
+    from app.services import change_queue
     from app.services.finance.domains.detection.analyst.prompt_changes import (
         PROPOSING_CHANGES,
     )
@@ -316,7 +316,7 @@ def test_every_planning_card_is_registered_and_advertised() -> None:
         "envelope.update",
         "plan.save",
     ):
-        assert change_type in writes.registered_change_types()
+        assert change_type in change_queue.registered_change_types()
         assert f"`{change_type}`" in PROPOSING_CHANGES
 
 

@@ -1,51 +1,10 @@
-"""The propose/approve write queue (FW-05).
+"""Steward's change types (FW-05), on the template's queue (``change_queue``).
 
-Importing this package registers the built-in change types - an
-executor that is never imported does not exist to the queue, the same
-rule the tool registry lives by.
+Importing this package registers them (``executors``) and the announcement
+of every approval that lands (``announce``): an executor that is never
+imported does not exist to the queue, the same rule the tool registry lives
+by. ``finance/change_types.py`` is what imports it.
 """
 
+from app.services.finance.domains.writes import announce as announce
 from app.services.finance.domains.writes import executors as executors
-from app.services.finance.domains.writes.queries import (
-    batch_rows,
-    get_change,
-    list_changes,
-)
-from app.services.finance.domains.writes.queue import (
-    approve,
-    approve_batch,
-    describe_change,
-    outcome_of,
-    propose,
-    propose_many,
-    reject,
-    reject_batch,
-    withdraw,
-    withdraw_batch,
-)
-from app.services.finance.domains.writes.registry import (
-    ChangeExecutor,
-    executor_for,
-    register,
-    registered_change_types,
-)
-
-__all__ = [
-    "ChangeExecutor",
-    "approve",
-    "reject_batch",
-    "propose_many",
-    "batch_rows",
-    "approve_batch",
-    "describe_change",
-    "executor_for",
-    "get_change",
-    "list_changes",
-    "outcome_of",
-    "propose",
-    "register",
-    "registered_change_types",
-    "reject",
-    "withdraw",
-    "withdraw_batch",
-]

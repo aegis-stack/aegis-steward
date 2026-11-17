@@ -16,8 +16,10 @@ from pydantic import BaseModel
 import pytest
 
 import app
+from app.core.chat_transcript import card_component
 from app.core.figures import FIGURES
 from app.core.tools import (
+    card_tool_names,
     get_tool,
     load_tools,
     mcp_servable,
@@ -27,6 +29,7 @@ from app.core.tools import (
     result_data,
     result_text,
     unregister_tool,
+    with_dollars,
 )
 
 
@@ -123,22 +126,30 @@ EXPECTED_EFFECTS = {
     # What the app holds: its database (with that component) and buckets.
     "query": "read",
     "storage": "read",
+    # The web: a search and a page read as text.
+    "web_search": "read",
+    "read_page": "read",
     "plugins": "read",
     "research_search": "read",
     "research_thread": "read",
     "research_history": "read",
-    "meetings_search": "read",
+    "meetings": "read",
     # What an agent knows: its knowledge bases, searched.
     "knowledge": "read",
+    # The eval datasets and runs; a case or a run is proposed.
+    "evals": "read",
     "record_reading": "writes",
-    # Steward's memory tools file a card the user approves.
+    # A memory write files a card; nothing is remembered until approved.
     "save_memory": "proposes",
     "replace_memory": "proposes",
     "update_memory": "proposes",
     "forget_memory": "proposes",
-    "pasted": "read",
     # A card shows what a script computed; it changes nothing.
     "draw_card": "read",
+    # What a shared picture showed, read back.
+    "pasted": "read",
+    # Pointing at the page they are on changes their view, not the app.
+    "page_action": "read",
     # finance
     "ledger": "read",
     "accounts": "read",
@@ -146,7 +157,6 @@ EXPECTED_EFFECTS = {
     "categories": "read",
     "bills": "read",
     "bill_candidates": "read",
-    "cleanup_candidates": "read",
     "tags": "read",
     # Reads the change types' contracts; files nothing.
     "change_types": "read",
@@ -155,6 +165,7 @@ EXPECTED_EFFECTS = {
     "pending": "proposes",
     "withdraw": "proposes",
     "withdraw_batch": "proposes",
+    "cleanup_candidates": "read",
     "revise": "proposes",
     "transactions": "read",
     "projection": "read",
@@ -172,9 +183,6 @@ EXPECTED_EFFECTS = {
     "claim_candidates": "read",
     "policies": "read",
     "arrivals": "read",
-    # the web (#593)
-    "web_search": "read",
-    "read_page": "read",
 }
 
 
@@ -205,6 +213,29 @@ def test_every_registered_app_tool_declares_its_expected_effect() -> None:
     if not declared:
         pytest.skip("no service in this project registers tools")
     assert declared == {n: EXPECTED_EFFECTS.get(n) for n in declared}
+
+
+# The tools whose results name approval cards (``register_tool(cards=)``),
+# drawn by every chat UI. ``withdraw`` proposes too, and draws none.
+EXPECTED_CARDS = frozenset(
+    {
+        "propose",
+        "propose_many",
+        "pending",
+        "save_memory",
+        "replace_memory",
+        "update_memory",
+        "forget_memory",
+    }
+)
+
+
+def test_every_card_tool_says_so_at_registration() -> None:
+    declared = _app_tools()
+
+    if not declared:
+        pytest.skip("no service in this project registers tools")
+    assert card_tool_names() & set(declared) == EXPECTED_CARDS & set(declared)
 
 
 def test_load_tools_registers_every_tool_the_app_defines() -> None:
@@ -269,3 +300,66 @@ def test_a_tools_model_reads_back_as_its_json() -> None:
     assert json.loads(result_text(proposed)) == shape
     assert result_data([proposed]) == [shape]
     assert result_text("refused: no such tag") == "refused: no such tag"
+
+
+@pytest.mark.usefixtures("clean_registry")
+def test_a_card_tools_model_still_names_its_card() -> None:
+    proposed = _Proposed(
+        pending_change_id=7, change_type="tag", at=datetime(2026, 10, 26)
+    )
+    register_tool("proposer", _echo, effect="proposes", cards=True)
+
+    marker = card_component("proposer", proposed)
+
+    assert isinstance(marker, dict) and marker["pending_change_id"] == 7
+
+
+class _Spend(BaseModel):
+    net_cents: int
+    label: str
+
+
+class TestWithDollars:
+    """Tools keep integer cents (scripts and cards compute with them); a
+    model left to convert reads an unlabelled 297614 as dollars. So what
+    it reads carries each ``*_cents`` figure's dollars beside it."""
+
+    def test_every_cents_figure_gets_its_dollars_beside_it(self) -> None:
+        result = with_dollars(
+            {
+                "spent_cents": 297_614,
+                "months": [{"month": "2026-09", "net_cents": -149_203}],
+                "count": 3,
+                "label": "x_cents",
+            }
+        )
+        assert result["spent_cents"] == 297_614  # kept for the next script
+        assert result["spent_usd"] == "$2,976.14"
+        assert result["months"][0]["net_usd"] == "-$1,492.03"
+        assert "count_usd" not in result and result["label"] == "x_cents"
+
+    def test_only_whole_numbers_of_cents_are_money(self) -> None:
+        assert with_dollars({"flag_cents": True, "odd_cents": "12"}) == {
+            "flag_cents": True,
+            "odd_cents": "12",
+        }
+
+    def test_a_model_is_read_as_its_data(self) -> None:
+        assert with_dollars(_Spend(net_cents=-149_203, label="net")) == {
+            "net_cents": -149_203,
+            "label": "net",
+            "net_usd": "-$1,492.03",
+        }
+
+    def test_dollars_already_beside_their_cents_are_kept(self) -> None:
+        """run_code's result is its reads', joined already: kept, not redone."""
+        joined = {"months": [{"net_cents": -149_203, "net_usd": "-$1,492.03"}]}
+        assert with_dollars(joined) is joined
+
+    def test_a_result_without_money_is_handed_back_as_it_is(self) -> None:
+        """A model with no cents stays the model its callers type."""
+        proposed = _Proposed(
+            pending_change_id=7, change_type="tag", at=datetime(2026, 10, 26)
+        )
+        assert with_dollars(proposed) is proposed
+        assert with_dollars("net_cents: -149203") == "net_cents: -149203"

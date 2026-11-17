@@ -334,10 +334,10 @@ class TestThePayload:
 
 @pytest.mark.parametrize("change_type", ["budget.limit", "budget.remove"])
 def test_it_is_registered_and_advertised(change_type: str) -> None:
-    from app.services.finance.domains import writes
+    from app.services import change_queue
     from app.services.finance.domains.detection.analyst.prompt_changes import (
         PROPOSING_CHANGES,
     )
 
-    assert change_type in writes.registered_change_types()
+    assert change_type in change_queue.registered_change_types()
     assert f"`{change_type}`" in PROPOSING_CHANGES

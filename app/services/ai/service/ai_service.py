@@ -3,11 +3,12 @@ layer may call the ones beneath it:
 
     AIServiceBase        state: settings, config, conversation manager
       └─ UsageMixin      token extraction, pricing, usage rollups
-         └─ ContextsMixin   health/usage/catalog context builders
+         └─ ContextsMixin   empty: RAG's retrieval, when installed
             └─ PromptMixin    persona overlay + per-request runtime construction
-               └─ ChatMixin      conversation setup/teardown
-                  └─ StreamingMixin  the turn: stream_chat, and chat draining it
-                     └─ VoiceMixin     empty (voice off)
+               └─ TurnMixin      the agent for a turn, typed or spoken
+                  └─ ChatMixin      a turn's conversation setup and teardown
+                     └─ StreamingMixin  the turn: stream_chat, and chat run to its end
+                        └─ VoiceMixin     STT -> chat -> TTS
     StatusMixin          conversations, status, validation (base only)
 
 The composition below is the whole class - it declares no methods of its

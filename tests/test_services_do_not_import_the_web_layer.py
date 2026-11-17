@@ -36,6 +36,18 @@ FORBIDDEN = (
     "app.components.web_frontend",
 )
 
+# The template's own crossings, taken whole with the update to aegis-stack
+# 8486ce794 and kept identical to it so the next update merges: the AI
+# health check reads the /ai routes' one ``AIService`` (its home in the
+# template), and the dry path walks the configured app's routes. Exact
+# pairs, so nothing else rides on them.
+TEMPLATE_CROSSINGS = frozenset(
+    {
+        "app/services/ai/health.py -> app.components.backend.api.ai.service",
+        "app/services/system/dry_path.py -> app.components.backend.main",
+    }
+)
+
 
 def _imported_modules(source: str) -> list[str]:
     """Every module named by an import, module-level or inside a function.
@@ -56,8 +68,9 @@ def test_no_service_imports_a_delivery_layer() -> None:
     offenders: list[str] = []
     for path in sorted(SERVICES.rglob("*.py")):
         for module in _imported_modules(path.read_text()):
-            if module.startswith(FORBIDDEN):
-                offenders.append(f"{path.relative_to(ROOT)} -> {module}")
+            crossing = f"{path.relative_to(ROOT)} -> {module}"
+            if module.startswith(FORBIDDEN) and crossing not in TEMPLATE_CROSSINGS:
+                offenders.append(crossing)
     assert not offenders, "services reaching into components:\n  " + "\n  ".join(
         offenders
     )

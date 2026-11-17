@@ -1,4 +1,4 @@
-"""Voice profiles: which one is active, and putting it to work (#262).
+"""Voice profiles: which one is active, and putting it to work.
 
 The active profile is applied onto the running settings, the way the active
 model is, so everything that already reads ``settings.TTS_*`` / ``STT_*`` /
@@ -14,21 +14,15 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.time import utcnow
 from app.core.voice_settings import (
     LIVE_IDLE_MAX_SECONDS,
-    TTS_SPEED_MAX,
-    TTS_SPEED_MIN,
     Reply,
     WorkingSound,
 )
-from app.services.ai.domains.voice import queries
-from app.services.ai.domains.voice.catalog import (
-    get_stt_models,
-    get_tts_models,
-    get_tts_voices,
-)
-from app.services.ai.domains.voice.models import STTProvider, TTSProvider
-from app.services.ai.models.voice.profile import VoiceProfile
+from app.services.ai.domains.voice import pronunciations, queries
+from app.services.ai.domains.voice.catalog import get_stt_model, get_stt_models
+from app.services.ai.models.voice import VoiceProfile
 
-SEEDED_NAME = "Illiana"
+# The first profile, seeded from ``.env``.
+SEEDED_NAME = "Default"
 
 # Profile column -> the setting it drives. One table, read both ways: to
 # seed a profile from .env and to put a profile onto the settings.
@@ -47,29 +41,33 @@ SETTINGS = {
 }
 
 
-# What a profile may say: OpenAI's voices and models, from the voice
-# catalog (the one list; the voice API reads it too).
-TTS_VOICES = tuple(v.id for v in get_tts_voices(TTSProvider.OPENAI.value))
-TTS_MODELS = tuple(m.id for m in get_tts_models(TTSProvider.OPENAI.value))
-STT_MODELS = tuple(m.id for m in get_stt_models(STTProvider.OPENAI_WHISPER.value))
+# What the profile form may say (the voice itself, its model, speed and
+# delivery, is put together in the voice designer: ``design``).
+STT_MODELS = tuple(m.id for m in get_stt_models())
 REPLIES = get_args(Reply)
 WORKING_SOUNDS = get_args(WorkingSound)
 # What each picked column of the form may be: what it checks, what it offers.
 CHOICES = {
-    "tts_voice": TTS_VOICES,
-    "tts_model": TTS_MODELS,
     "stt_model": STT_MODELS,
     "reply": REPLIES,
     "working_sound": WORKING_SOUNDS,
 }
-SPEED_RANGE = (TTS_SPEED_MIN, TTS_SPEED_MAX)
 IDLE_RANGE = (0, LIVE_IDLE_MAX_SECONDS)
+
+
+def form_choices() -> dict[str, list[dict[str, Any]]]:
+    """The edit form's options, from the one list each (``CHOICES``)."""
+    return {
+        column: [{"id": v, "name": v} for v in allowed]
+        for column, allowed in CHOICES.items()
+    }
 
 
 def parse_form(form: Any) -> tuple[dict[str, Any], list[str]]:
     """A profile's edit form as column values, and what is wrong with it.
-    The live engine is not on the form: it is picked with her models
-    (``chat_models``)."""
+    The live engine is not on the form: the voice dialog's Calls list picks
+    it (``chat_models.use_for_calls``); nor is the voice: the designer puts
+    it together."""
     errors: list[str] = []
     name = str(form.get("name") or "").strip()
     if not name:
@@ -80,13 +78,8 @@ def parse_form(form: Any) -> tuple[dict[str, Any], list[str]]:
         if value not in allowed:
             errors.append(f"{column.replace('_', ' ')}: pick one of the choices.")
         values[column] = value
-    try:
-        speed = float(str(form.get("tts_speed") or ""))
-        if not SPEED_RANGE[0] <= speed <= SPEED_RANGE[1]:
-            raise ValueError
-        values["tts_speed"] = speed
-    except ValueError:
-        errors.append(f"Speed is a number from {SPEED_RANGE[0]} to {SPEED_RANGE[1]}.")
+    if heard := get_stt_model(values["stt_model"]):  # heard by its own provider
+        values["stt_provider"] = heard.provider_id
     try:
         idle = int(str(form.get("live_idle_seconds") or ""))
         if not IDLE_RANGE[0] <= idle <= IDLE_RANGE[1]:
@@ -96,13 +89,12 @@ def parse_form(form: Any) -> tuple[dict[str, Any], list[str]]:
         errors.append(
             f"Check in after is whole seconds from {IDLE_RANGE[0]} to {IDLE_RANGE[1]}."
         )
-    values["tts_instructions"] = str(form.get("tts_instructions") or "").strip() or None
     return values, errors
 
 
 def settings_for(profile: VoiceProfile, settings: Any) -> Any:
     """A copy of ``settings`` speaking as ``profile`` - for a preview, which
-    must not change the voice she is using."""
+    must not change the voice in use."""
     return settings.model_copy(
         update={key: getattr(profile, column) for column, key in SETTINGS.items()}
     )
@@ -199,13 +191,31 @@ def apply(profile: VoiceProfile, settings: Any, service: Any) -> None:
     service._tts_service = None
 
 
+async def active_settings(session: AsyncSession, settings: Any) -> Any:
+    """``settings`` in the active profile's voice: what anything headless (a
+    worker, the CLI) speaks and hears with, as only the webserver applies
+    the profile at startup (``load_active``). The saved pronunciations come
+    with the voice, as they do there."""
+    await pronunciations.load(session)
+    active = await active_profile(session)
+    return settings if active is None else settings_for(active, settings)
+
+
+async def seeded_active(session: AsyncSession, settings: Any) -> VoiceProfile:
+    """The active profile, a first one seeded from ``settings`` (``.env``)
+    when there is none yet."""
+    await seed_from_settings(session, settings)
+    return await active_profile(session)  # type: ignore[return-value]
+
+
 async def load_active(
     session: AsyncSession, settings: Any, service: Any
 ) -> VoiceProfile | None:
     """At startup: seed a first profile from .env if there is none, then run
-    on the active one. After the first boot the table wins over .env."""
-    await seed_from_settings(session, settings)
-    active = await active_profile(session)
+    on the active one, saying terms the saved way. After the first boot the
+    table wins over .env."""
+    await pronunciations.load(session)
+    active = await seeded_active(session, settings)
     if active is not None:
         apply(active, settings, service)
     return active

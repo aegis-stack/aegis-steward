@@ -1,0 +1,320 @@
+"""Tests for context module CRUD (hybrid, column-driven)."""
+
+from typing import Any
+
+import pytest
+from sqlalchemy import event
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.services.ai.domains.chat.context_modules import (
+    InvalidContextModuleError,
+    create_context_module,
+    delete_context_module,
+    get_context_entry,
+    get_context_module,
+    list_context_modules,
+    module_sources,
+    serialize_context_module,
+    set_context_entry,
+    update_context_module,
+)
+
+
+@pytest.fixture
+def session(async_db_session: AsyncSession) -> AsyncSession:
+    """The root conftest's transactional async session (rolled back per
+    test). A bare local engine cannot create this project's schema-qualified
+    tables (finance, scheduler, ...)."""
+    return async_db_session
+
+
+class TestHybridRoundTrip:
+    async def test_static_only_module(self, session: AsyncSession) -> None:
+        module = await create_context_module(
+            slug="house-rules",
+            name="House Rules",
+            prompt_content="Always answer in metric units.",
+            session=session,
+        )
+
+        loaded = await get_context_module(session, "house-rules")
+        assert loaded is not None
+        assert loaded.prompt_content == "Always answer in metric units."
+        assert loaded.fetch_function is None
+        # context_key defaults to the slug.
+        assert loaded.context_key == "house-rules"
+        assert module.id is not None
+
+    async def test_dynamic_only_module(self, session: AsyncSession) -> None:
+        await create_context_module(
+            slug="recent-orders",
+            name="Recent Orders",
+            fetch_function="fetch_recent_orders",
+            supports_days_back=True,
+            default_days_back=7,
+            session=session,
+        )
+
+        loaded = await get_context_module(session, "recent-orders")
+        assert loaded is not None
+        assert loaded.prompt_content is None
+        assert loaded.fetch_function == "fetch_recent_orders"
+        assert loaded.supports_days_back is True
+        assert loaded.default_days_back == 7
+
+    async def test_hybrid_module_keeps_both_columns(
+        self, session: AsyncSession
+    ) -> None:
+        """The hybrid design: static block AND live fetcher on one row."""
+        await create_context_module(
+            slug="diet",
+            name="Diet Rules",
+            prompt_content="General dietary guidance applies.",
+            fetch_function="fetch_recent_meals",
+            session=session,
+        )
+
+        loaded = await get_context_module(session, "diet")
+        assert loaded is not None
+        assert loaded.prompt_content == "General dietary guidance applies."
+        assert loaded.fetch_function == "fetch_recent_meals"
+
+
+class TestValidation:
+    async def test_empty_module_is_rejected(self, session: AsyncSession) -> None:
+        with pytest.raises(InvalidContextModuleError):
+            await create_context_module(slug="empty", name="Empty", session=session)
+
+    async def test_update_cannot_empty_a_module(self, session: AsyncSession) -> None:
+        await create_context_module(
+            slug="house-rules",
+            name="House Rules",
+            prompt_content="Metric units.",
+            session=session,
+        )
+
+        with pytest.raises(InvalidContextModuleError):
+            await update_context_module(
+                "house-rules", prompt_content=None, session=session
+            )
+
+    async def test_duplicate_slug_is_rejected(self, session: AsyncSession) -> None:
+        await create_context_module(
+            slug="house-rules",
+            name="House Rules",
+            prompt_content="Metric units.",
+            session=session,
+        )
+
+        with pytest.raises(InvalidContextModuleError, match="already exists"):
+            await create_context_module(
+                slug="house-rules",
+                name="Duplicate",
+                prompt_content="x",
+                session=session,
+            )
+
+
+class TestCrud:
+    async def test_update_round_trips(self, session: AsyncSession) -> None:
+        await create_context_module(
+            slug="house-rules",
+            name="House Rules",
+            prompt_content="Metric units.",
+            session=session,
+        )
+
+        updated = await update_context_module(
+            "house-rules",
+            prompt_content="Imperial units.",
+            priority=5,
+            session=session,
+        )
+
+        assert updated.prompt_content == "Imperial units."
+        assert updated.priority == 5
+
+    async def test_list_orders_by_priority_and_filters_active(
+        self, session: AsyncSession
+    ) -> None:
+        await create_context_module(
+            slug="low", name="Low", prompt_content="x", priority=200, session=session
+        )
+        await create_context_module(
+            slug="high", name="High", prompt_content="x", priority=1, session=session
+        )
+        await create_context_module(
+            slug="off",
+            name="Off",
+            prompt_content="x",
+            is_active=False,
+            session=session,
+        )
+
+        active = await list_context_modules(session)
+        assert [m.slug for m in active] == ["high", "low"]
+
+        everything = await list_context_modules(session, active_only=False)
+        assert {m.slug for m in everything} == {"high", "low", "off"}
+
+    async def test_delete_removes_module(self, session: AsyncSession) -> None:
+        await create_context_module(
+            slug="house-rules",
+            name="House Rules",
+            prompt_content="x",
+            session=session,
+        )
+
+        await delete_context_module("house-rules", session=session)
+
+        assert await get_context_module(session, "house-rules") is None
+
+    async def test_delete_unknown_is_an_error(self, session: AsyncSession) -> None:
+        with pytest.raises(InvalidContextModuleError, match="not found"):
+            await delete_context_module("ghost", session=session)
+
+
+class TestPerSubject:
+    """A per-subject module holds its own text for each subject (a project,
+    a ledger): written here, read back for that subject only."""
+
+    async def test_a_per_subject_module_needs_no_other_content(
+        self, session: AsyncSession
+    ) -> None:
+        module = await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+        assert module.per_subject is True
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # each call a request of its own
+    async def test_an_entry_is_its_subjects_alone(self, session: AsyncSession) -> None:
+        await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+
+        await set_context_entry(
+            "notes", "3", "A CLI that scaffolds apps.", session=session
+        )
+
+        assert await get_context_entry("notes", "3", session=session) == (
+            "A CLI that scaffolds apps."
+        )
+        assert await get_context_entry("notes", "8", session=session) is None
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # each call a request of its own
+    async def test_a_write_racing_another_replaces_it(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two writes to a subject with no text yet: the later one finds the
+        other's row only as it commits, and replaces it."""
+        from app.services.ai.domains.chat import queries
+
+        await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+        await set_context_entry("notes", "3", "first", session=session)
+        real = queries.context_entry
+        looks: list[int] = []
+
+        async def raced(*args: Any) -> Any:
+            looks.append(1)
+            return None if len(looks) == 1 else await real(*args)
+
+        monkeypatch.setattr(queries, "context_entry", raced)
+
+        entry = await set_context_entry("notes", "3", "second", session=session)
+
+        assert entry is not None and entry.content == "second"
+        assert await get_context_entry("notes", "3", session=session) == "second"
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # each call a request of its own
+    async def test_setting_again_replaces_and_records_who(
+        self, session: AsyncSession
+    ) -> None:
+        await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+        await set_context_entry("notes", "3", "first", session=session)
+
+        entry = await set_context_entry(
+            "notes", "3", "second", user_id=7, session=session
+        )
+
+        assert entry is not None and entry.updated_by_user_id == 7
+        assert await get_context_entry("notes", "3", session=session) == "second"
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # each call a request of its own
+    async def test_blank_text_removes_the_entry(self, session: AsyncSession) -> None:
+        await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+        await set_context_entry("notes", "3", "something", session=session)
+
+        assert await set_context_entry("notes", "3", "  ", session=session) is None
+        assert await get_context_entry("notes", "3", session=session) is None
+
+    async def test_only_a_per_subject_module_takes_an_entry(
+        self, session: AsyncSession
+    ) -> None:
+        await create_context_module(
+            slug="rules", name="Rules", prompt_content="x", session=session
+        )
+        with pytest.raises(InvalidContextModuleError, match="per subject"):
+            await set_context_entry("rules", "3", "text", session=session)
+        with pytest.raises(InvalidContextModuleError, match="not found"):
+            await set_context_entry("ghost", "3", "text", session=session)
+
+    async def test_its_sources_name_the_subject_text_in_render_order(
+        self, session: AsyncSession
+    ) -> None:
+        module = await create_context_module(
+            slug="notes",
+            name="Notes",
+            prompt_content="rules",
+            fetch_function="live",
+            per_subject=True,
+            session=session,
+        )
+
+        assert module_sources(module) == ["static", "subject", "fetcher"]
+        assert serialize_context_module(module)["sources"] == module_sources(module)
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # each call a request of its own
+    async def test_deleting_the_module_deletes_its_entries(
+        self, session: AsyncSession
+    ) -> None:
+        await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+        await set_context_entry("notes", "3", "old notes", session=session)
+
+        await delete_context_module("notes", session=session)
+        await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+
+        assert await get_context_entry("notes", "3", session=session) is None
+
+    async def test_the_entries_are_deleted_not_left_to_the_cascade(
+        self, session: AsyncSession
+    ) -> None:
+        """SQLite runs the key's cascade only with foreign keys on, and a
+        project's test engine may keep them off: the delete names the
+        entries itself."""
+        await create_context_module(
+            slug="notes", name="Notes", per_subject=True, session=session
+        )
+        await set_context_entry("notes", "3", "old notes", session=session)
+        ran: list[str] = []
+
+        def record(_conn: Any, _cursor: Any, statement: str, *_: Any) -> None:
+            ran.append(statement)
+
+        bind = session.sync_session.get_bind()
+        event.listen(bind, "before_cursor_execute", record)
+        try:
+            await delete_context_module("notes", session=session)
+        finally:
+            event.remove(bind, "before_cursor_execute", record)
+
+        assert any(s.startswith("DELETE FROM context_module_entry") for s in ran)

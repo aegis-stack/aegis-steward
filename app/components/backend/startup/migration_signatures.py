@@ -15,12 +15,18 @@ Forms:
 - ``("column", table, col)`` - column exists (ALTER TABLE migrations).
 - ``("no_column", table, col)`` - the table exists and the column does
   not (a migration that REMOVES one: its absence is the only proof).
+- ``("no_table", table, into)`` - ``into`` exists and ``table`` does not
+  (a migration that folds one table into another and drops it).
 - ``("foreign_key", table, col)`` - an FK constraint covers the column
   (FK-only migrations, e.g. payment_auth_link).
 - ``("check", table, name)`` - a named CHECK constraint exists with the
   migration's text in it. For a migration that WIDENS a constraint and
   adds no object: there is no new table or column to point at, and the
   constraint is the only thing whose shape proves the migration ran.
+- ``("row", table, where)`` - ``SELECT 1 FROM table WHERE where`` finds a
+  row (data-only migrations, e.g. finance_auth_link's user 0). Schema
+  objects cannot prove a data revision ran; stamping one on a persisted
+  volume would skip its INSERT.
 """
 
 SERVICE_MIGRATION_SIGNATURES: dict[str, tuple[str, ...]] = {
@@ -28,6 +34,7 @@ SERVICE_MIGRATION_SIGNATURES: dict[str, tuple[str, ...]] = {
     "ai_agents": ("table", "agent"),
     "agent_code_mode": ("column", "agent", "code_mode"),
     "ai_sentiment": ("table", "sentiment_analysis"),
+    "ai_evals": ("table", "eval_run"),
     "ai_voice": ("table", "voice_profile"),
     "auth": ("table", "user"),
     "auth_org": ("table", "organization"),
@@ -96,7 +103,10 @@ SERVICE_MIGRATION_SIGNATURES: dict[str, tuple[str, ...]] = {
     "finance_subjects": ("table", "finance.finance_subject"),
     "finance": ("table", "finance.finance_account"),
     "finance_budget_payee": ("column", "finance.finance_budget_category", "payee_key"),
-    "finance_auth_link": ("foreign_key", "finance.finance_account", "owner_user_id"),
+    # Data-only since models-derived revisions: the owner FKs are inline in
+    # ``finance``, so the FK proves nothing about this revision. The row it
+    # inserts does.
+    "finance_auth_link": ("row", "user", "id = 0"),
     "finance_icon": ("table", "finance.finance_icon"),
     "transaction_logo": ("column", "finance.finance_transaction", "logo_url"),
     "merchant_alias": ("table", "finance.finance_merchant_alias"),

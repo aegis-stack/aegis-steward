@@ -39,8 +39,13 @@ steward last caught up to, 2026-10-27 (issue 587).
   integrity hashes have nothing to check.
 - **No landing page**: `/` opens Overview, so the template's landing,
   `tests/shell.py`'s shell and the site route stay out.
-- **The change queue is finance's own**, not `app.services.change_queue`,
-  so the system model (`app.core.ontology`) has no change-type nodes.
+- **The change queue** is the template's (`app.services.change_queue`);
+  finance's executors predate its shape, so they register through
+  `finance/domains/writes/registry.finance_type`, which also logs each
+  approval as the proposer's edit (#325). Most of them name no `object` or
+  `description` yet, so the system model's change-type nodes are thin.
+- **Scan pictures** are served through `app.core.uploads.stored_file`, the
+  one sniffer, not the template's own `PICTURES` table.
 - **The LLM picker** is steward's, not `app.core.model_picker`.
 - **The tool registry** is the template's (`app.core.tools`), but an
   agent's tools resolve through steward's `resolve_tools`, which adds each

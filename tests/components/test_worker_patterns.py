@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.components.worker import registry
 from app.components.worker.patterns import TASK, Task
+from app.core.discovery import present
 from app.services.system import patterns
 
 
@@ -25,6 +26,29 @@ def test_every_registered_task_is_an_instance() -> None:
         for name in registry.queue_tasks(queue)
     }
     assert {i.label for i in patterns.report(TASK).instances} == registered
+
+
+def test_a_services_task_is_registered_only_where_the_service_is() -> None:
+    """A task handing its work to a service the stack lacks would reach
+    nothing (the thin-task rule), so the queue leaves it out there."""
+    registered = {
+        name
+        for queue in registry.discover_worker_queues()
+        for name in registry.queue_tasks(queue)
+    }
+    for task, service in (
+        ("extract_document_task", "app.services.documents"),
+        ("embed_files_task", "app.services.rag"),
+        ("run_evals_task", "app.services.ai.domains.evals.jobs"),
+        ("generate_evals_task", "app.services.ai.domains.evals.jobs"),
+        ("fold_conversation_task", "app.services.ai.domains.chat.summary"),
+    ):
+        assert (task in registered) == present(service), task
+    # A picture shared in chat, read into its paste index with documents'.
+    reads = present("app.services.ai.domains.chat.pastes") and present(
+        "app.services.documents"
+    )
+    assert ("read_photo_task" in registered) == reads
 
 
 def test_every_rule_says_why() -> None:

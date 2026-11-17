@@ -66,6 +66,8 @@ services:
       - DOCKER_CONTAINER=1
       - WEBSERVER_ENGINE
       - WEBSERVER_LOOP
+      # Its own operator endpoints answer on loopback, not the service name
+      - API_BASE_URL=http://localhost:${PORT:-8000}
       # Redis connection for health checks
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
     healthcheck:
@@ -81,7 +83,7 @@ services:
     # the webserver crawled at 95% CPU answering nothing, /health included,
     # until restarted by hand (2026-09-30). Compose restarts on exit, never
     # on "unhealthy", so a process that limps is never recovered.
-    memswap_limit: &webserver-memory 768M
+    memswap_limit: &webserver-memory ${WEBSERVER_MEMORY:-768M}
     deploy:
       resources:
         limits:
@@ -267,7 +269,7 @@ services:
     user: "0:0"
     command:
       - "-proxysocketendpoint=/var/run/docker-proxy/docker.sock"
-      - '-allowGET=(/v1\.[0-9]+)?/(containers/json|containers/[a-zA-Z0-9_.-]+/(stats|logs)|info|system/df)'
+      - '-allowGET=(/v1\.[0-9]+)?/(containers/json|containers/[a-zA-Z0-9_.-]+/(stats|logs)|info|system/df|events)'
       - '-allowPOST=(/v1\.[0-9]+)?/containers/[a-zA-Z0-9_.-]+/restart'
       - "-allowhealthcheck"
       - "-shutdowngracetime=5"

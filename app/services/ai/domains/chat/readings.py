@@ -1,8 +1,7 @@
-"""Durable readings: the line items the model extracted from an image.
+"""Durable readings: what the model extracted from an ephemeral image.
 
-Attachment bytes ride one turn by design (see ``attachments.py``). What
-a picture SHOWED is kept beside it and read back with ``pasted``; this
-is the ITEMISED extraction, which must not ride one turn either. ``record_reading`` is the schema-forced write the
+Attachment bytes ride one turn by design (see ``attachments.py``); the
+EXTRACTION must not. ``record_reading`` is the schema-forced write the
 agent calls the moment it reads a receipt, order, or document out of an
 image: the payload validates against a Pydantic contract (bad rows
 bounce back as a correctable tool error, the same door-guarding the
@@ -13,10 +12,10 @@ pixels are gone - and a model that forgets to narrate its reading no
 longer loses it.
 
 Keyed to the user, not the conversation, because "durable" has to mean
-durable. Stored per conversation, twelve pages of extracted Amazon
-orders were invisible the moment a new thread was opened on 2026-09-12,
-and recovering them meant reading them back out of the database by
-hand - which is not a thing the app can ask anyone to do. The readings
+durable. Stored per conversation, twelve pages of extracted order
+listings were invisible the moment a new thread was opened, and
+recovering them meant reading them back out of the database by hand -
+which is not a thing an app can ask anyone to do. The readings
 live beside the saved facts in ``agent_user_memory``: one row per user,
 already the home of everything an agent knows about them across
 conversations.
@@ -33,24 +32,17 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError
 
-from app.core.db import get_async_session
-from app.core.tools import register_tool
-from app.services.ai.domains.chat.user_memory import (
-    load_user_readings,
-    own_write,
-    store_user_readings,
-)
+from app.core.figures import FIGURES
+from app.core.tools import Refused, register_tool
 
 # Bounded: readings are context re-injected EVERY turn, so an unbounded
 # list would slowly crowd out the conversation itself. Oldest go first.
 _MAX_READINGS_PER_USER = 8
 
 # The turn's staging area; None outside a chat turn.
-_staged: ContextVar[list[dict[str, Any]] | None] = ContextVar(
-    "staged_readings", default=None
-)
+_staged: ContextVar[list[Reading] | None] = ContextVar("staged_readings", default=None)
 
 
 class ReadingItem(BaseModel):
@@ -67,29 +59,23 @@ class ReadingItem(BaseModel):
 
 
 class Reading(BaseModel):
-    """One recorded extraction from an attached image (or document): its
-    line items, and the source's own fields - letterhead, address, phone,
-    dates, totals, account numbers. A reading is the only copy of the
-    image left (#286: a dentist's receipt kept the visit and lost the
-    address and phone, so it took a re-upload)."""
+    """One recorded extraction from an attached image (or document)."""
 
     kind: str = "receipt"
     title: str = Field(min_length=1)
-    items: list[ReadingItem] = Field(default_factory=list)
-    fields: dict[str, str] = Field(default_factory=dict)
+    items: list[ReadingItem] = Field(min_length=1)
 
-    @model_validator(mode="after")
-    def _says_something(self) -> Reading:
-        if not self.items and not self.fields:
-            raise ValueError("a reading needs its line items, its fields, or both")
-        return self
+
+def kept_readings(raw: list[dict[str, Any]]) -> list[Reading]:
+    """Readings as stored (the user's row, or a thread's legacy list)."""
+    return [Reading.model_validate(r) for r in raw]
 
 
 @contextmanager
-def reading_stage() -> Iterator[list[dict[str, Any]]]:
+def reading_stage() -> Iterator[list[Reading]]:
     """The turn wrapper: opens a staging list ``record_reading`` writes
     into; the caller merges it into the user's store after the run."""
-    staged: list[dict[str, Any]] = []
+    staged: list[Reading] = []
     token = _staged.set(staged)
     try:
         yield staged
@@ -97,12 +83,18 @@ def reading_stage() -> Iterator[list[dict[str, Any]]]:
         _staged.reset(token)
 
 
+class Recorded(BaseModel):
+    """What a reading kept: how many items, under what title."""
+
+    model_config = FIGURES
+
+    recorded: int
+    title: str
+
+
 async def record_reading(
-    title: str,
-    items: list[dict[str, Any]],
-    kind: str = "receipt",
-    fields: dict[str, str] | None = None,
-) -> dict[str, Any]:
+    title: str, items: list[dict[str, Any]], kind: str = "receipt"
+) -> Recorded | Refused:
     """Durably record what you just read out of an attached image.
 
     Call this THE MOMENT you finish reading a receipt, order, or
@@ -111,28 +103,23 @@ async def record_reading(
     'note'). Preserve the source's own grouping in 'group' (a shipment
     like "Arriving Thu, Aug 27", a sub-receipt, a page): the groups are
     what map items to the right charge later.
-    'fields' is every other visible fact, by its label - the issuer's
-    name, address, phone, email, website, dates, totals, tax, account
-    or invoice numbers - whether or not this question needs them: a
-    later question will, and the image will be gone. A document with no
-    line items (a letter, a card) is recorded with 'fields' alone.
     The image itself is gone after this turn; this record is what
     later turns (and you) get instead. Returns the count recorded, or
     an 'error' explaining exactly what to fix."""
     staged = _staged.get()
     if staged is None:
-        return {"error": "No conversation turn is active; nothing was recorded."}
+        return Refused(error="No conversation turn is active; nothing was recorded.")
     try:
-        reading = Reading(kind=kind, title=title, items=items, fields=fields or {})
+        reading = Reading(kind=kind, title=title, items=items)
     except ValidationError as e:
-        return {"error": f"invalid reading: {e}"}
-    staged.append(reading.model_dump())
-    return {"recorded": len(reading.items), "title": reading.title}
+        return Refused(error=f"invalid reading: {e}")
+    staged.append(reading)
+    return Recorded(recorded=len(reading.items), title=reading.title)
 
 
 async def merge_staged_readings(
     user_id: str,
-    staged: list[dict[str, Any]],
+    staged: list[Reading],
     legacy: list[dict[str, Any]] | None = None,
 ) -> None:
     """Fold the turn's staged readings into the user's store, newest
@@ -147,25 +134,28 @@ async def merge_staged_readings(
     if not staged:
         return
 
-    async def write(session: Any) -> None:
+    try:
+        from app.core.db import get_async_session
+        from app.services.ai.domains.chat.user_memory import (
+            load_user_readings,
+            store_user_readings,
+        )
+    except ImportError:
+        # A memory-backend project ships neither app.core.db nor the
+        # per-user memory table. The tool stays registered so the model
+        # sees one shape everywhere; a reading just lives for the turn
+        # that took it, which is what a memory backend means.
+        return
+
+    async with get_async_session() as session:
         readings = await load_user_readings(session, user_id)
         if not readings and legacy:
-            readings = list(legacy)
+            readings = kept_readings(legacy)
         readings.extend(staged)
         await store_user_readings(session, user_id, readings[-_MAX_READINGS_PER_USER:])
 
-    # The same row the memory tools write, in the same way: its own
-    # session, read then write, the upgrade retried under another writer.
-    await own_write(write)
 
-
-async def user_readings(user_id: str) -> list[dict[str, Any]]:
-    """Everything this user has recorded, for the turn about to run."""
-    async with get_async_session() as session:
-        return await load_user_readings(session, user_id)
-
-
-def format_readings(readings: list[dict[str, Any]] | None) -> str | None:
+def format_readings(readings: list[Reading] | None) -> str | None:
     """The context block for stored readings, or None when there are
     none - rendered fresh into every turn so the extraction outlives
     the image it came from."""
@@ -177,28 +167,22 @@ def format_readings(readings: list[dict[str, Any]] | None) -> str | None:
         "images are gone, these records are authoritative:",
     ]
     for reading in readings:
-        lines.append(f"\n### {reading.get('title')} ({reading.get('kind')})")
-        lines.extend(
-            f"{label}: {value}"
-            for label, value in (reading.get("fields") or {}).items()
-        )
+        lines.append(f"\n### {reading.title} ({reading.kind})")
         current_group: str | None = None
-        for item in reading.get("items") or []:
-            group = item.get("group")
+        for item in reading.items:
+            group = item.group
             if group and group != current_group:
                 lines.append(f"[{group}]")
                 current_group = group
-            piece = f"- {item.get('label')}"
-            quantity = item.get("quantity") or 1
-            if quantity > 1:
-                piece += f" x{quantity}"
-            amount = item.get("amount_cents")
-            if amount is not None:
-                piece += f" - ${amount / 100:.2f}"
-                if quantity > 1:
+            piece = f"- {item.label}"
+            if item.quantity > 1:
+                piece += f" x{item.quantity}"
+            if item.amount_cents is not None:
+                piece += f" - ${item.amount_cents / 100:.2f}"
+                if item.quantity > 1:
                     piece += " each"
-            if item.get("note"):
-                piece += f" ({item['note']})"
+            if item.note:
+                piece += f" ({item.note})"
             lines.append(piece)
     return "\n".join(lines)
 
@@ -208,7 +192,7 @@ def format_readings(readings: list[dict[str, Any]] | None) -> str | None:
 register_tool(
     "record_reading",
     record_reading,
-    description="Durably record everything read from an attached image",
+    description="Durably record line items read from an attached image",
     effect="writes",
     replace=True,
 )

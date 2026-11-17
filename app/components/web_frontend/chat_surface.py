@@ -1,0 +1,490 @@
+"""The chat surface: what it renders from, wherever it is mounted.
+
+The turn itself streams from the mount's ``/stream`` route straight to
+the browser (static/js/chat.js); everything around it is server HTML. A
+turn starts with the question and an empty bubble the script streams into
+(``turn_context``) and settles as the stored message (``settled``), so a
+history replay and a finished turn draw through the same macro and the
+client never renders a settled message.
+
+One surface, mounted as many times as an app needs (``ChatSurface``): the
+Overseer's AI page and drawer are one mount; an app's own chat page, with
+its own agent and its own user's conversations, is another. Every route
+(``routes/partials/chat_surface.py``) and every helper here takes the
+mount it serves. Who a turn is for and what it is about come from the
+mount (``bind``, per request), never from the browser.
+"""
+
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+import importlib
+from importlib.util import find_spec
+import json
+from typing import Any
+from urllib.parse import urlencode
+
+from app.components.backend.api.ai.service import ai_service, lifted_turn
+from app.core.chat_transcript import (
+    card_markers,
+    footer_line,
+    readable,
+    strip_attachment_marker,
+    trace_failed,
+    trace_label,
+    trace_output,
+)
+from app.core.pages import Page
+
+from .chat_attachments import attachment_url, paste_chips
+from .main import CHANGES
+
+# What this stack has: voice (``ai[voice]``), and a database for the
+# catalog, conversations and every row the surface reads.
+PERSISTED = find_spec("app.services.ai.domains.chat.sentiment") is not None
+HAS_VOICE = find_spec("app.services.ai.domains.voice") is not None
+# The Overseer's helpers, where the Overseer ships (it serves logos).
+OVERSEER_COMMON = "app.components.web_frontend.overseer_ai_common"
+
+HISTORY_LIMIT = 25
+# A thread opens on its latest messages; earlier ones load a page at a time.
+THREAD_PAGE = 40
+# What a message of images alone says to the model.
+IMAGES_ONLY = "See the attached images."
+# The approval cards' routes. They ship with the change queue, which every
+# persisted AI stack has, and the queue is all that leaves card markers.
+CARDS: Any = importlib.import_module(CHANGES) if PERSISTED else None
+
+
+@dataclass(frozen=True)
+class ChatSurface:
+    """One mount of the chat surface: the URL its routes live under, whose
+    conversations it holds and the history they list under, and the agent
+    that answers (None: the default agent)."""
+
+    path: str
+    user: str
+    surface: str
+    agent_slug: str | None = None
+    # Who answers a live call: a voice agent (a quicker model, its own
+    # prompt), else the chat agent.
+    voice_agent_slug: str | None = None
+    # A reply's drawer edits the agent behind it (the Overseer's agent
+    # editor); a mount without one leaves the link out.
+    agent_drawer: bool = False
+    # Where a reply is made an eval case: the address its dialog opens
+    # from (the Overseer's Evals), the reply named by ``?turn=``. None
+    # leaves the action out.
+    eval_cases: str | None = None
+    # What its conversations are about, within the surface: an app's
+    # scope key (a project's id, say). The turn binds it for tools and
+    # briefings (``current_subject``), and the history lists only its own.
+    subject: str | None = None
+    # This request's mount: a FastAPI dependency (so it may depend on the
+    # app's signed-in user and active project) returning the mount with
+    # ``user`` and ``subject`` set. None serves the mount as declared. A
+    # live call's socket binds through it too, so it may depend on what a
+    # WebSocket carries (the session, headers), never on ``Request``.
+    bind: Callable[..., Awaitable[ChatSurface]] | None = None
+    # A FastAPI dependency run before a turn reaches the model (a plan's
+    # entitlement, a daily budget): the reason it is refused, or None.
+    gate: Callable[..., Awaitable[str | None]] | None = None
+    # What only an operator should hold: the model and voice chips, which
+    # set what the whole install answers with. A mount for an app's own
+    # users turns them off, keeping the microphone and a reply read aloud;
+    # its ``bind`` may turn them back on for the request of someone who
+    # runs the install (an admin).
+    operator_controls: bool = True
+    # Whether its agent proposes changes for someone to approve: the queue
+    # of them beside the thread. A mount whose agent only reads leaves it
+    # out.
+    approvals: bool = True
+    # Whether its users may call, on what the install calls with. None
+    # follows ``operator_controls``; True lets in a caller with no controls
+    # (a signed-out visitor), and ``bind`` may decide it per request.
+    calls: bool | None = None
+    # A bound on its calls, where someone other than the operator pays for
+    # the minutes. The longest a call runs, in seconds (None: no limit;
+    # how it ends: ``chat_live.WRAP_UP_SECONDS``).
+    longest_call: float | None = None
+    # Seconds of quiet before the assistant checks in (None: the active
+    # voice profile's, install-wide).
+    idle_seconds: int | None = None
+    # Asked after each saved turn of a call, with the bound mount: a reason
+    # ends the call there (a budget spent mid-call). ``gate`` asks once, as
+    # the call opens; this is a plain callable, as a socket mid-call has no
+    # request to resolve a dependency against.
+    call_check: Callable[[ChatSurface], Awaitable[str | None]] | None = None
+    # Called once for every call ``gate`` let through, with how it ended
+    # (``chat_live.CallEnded``): where what the gate took for a call (a
+    # slot) is freed. ``gate`` runs on typed turns too, which have no end
+    # hook: a gate that takes something for calls only checks it is one
+    # (``HTTPConnection.scope["type"] == "websocket"``).
+    on_call_end: Callable[[ChatSurface, str], Awaitable[None]] | None = None
+    # What each page the chat opens on declares (``app.core.pages``), by
+    # its path: the chat says which page it is on, and an agent there may
+    # point at the parts it lists. ``bind`` may give each request its own.
+    pages: Mapping[str, Page] = field(default_factory=dict)
+
+    def page_at(self, path: str | None) -> Page | None:
+        """What the page at ``path`` declares, as the chat names it."""
+        return self.pages.get(path or "")
+
+
+def offers_calls(chat: ChatSurface) -> bool:
+    """Whether the mount takes live calls: voice, a database and the
+    mount's say (``calls``, else the operator's controls)."""
+    allowed = chat.operator_controls if chat.calls is None else chat.calls
+    return HAS_VOICE and PERSISTED and allowed
+
+
+async def assistant_name(chat: ChatSurface, session: Any = None) -> str:
+    """The answering agent's name, as the registry holds it. A route that
+    holds a session passes it: a second one would wait on SQLite's write
+    lock and fail ("database is locked")."""
+    from app.services.ai.service import resolve_agent
+
+    if chat.agent_slug:
+        agent = await resolve_agent(chat.agent_slug, session=session)
+    else:
+        agent = await resolve_agent(session=session)
+    return agent.name
+
+
+def agent_url(chat: ChatSurface) -> str | None:
+    """The answering agent's editor (Overseer's agent drawer), where the
+    mount has one: a saved row, so with a database only."""
+    if not (PERSISTED and chat.agent_drawer):
+        return None
+    from app.services.ai.service import DEFAULT_AGENT_SLUG
+
+    from .overseer_ai_agents import agent_drawer_url
+
+    return agent_drawer_url(chat.agent_slug or DEFAULT_AGENT_SLUG)
+
+
+def resolver(mount: ChatSurface) -> Callable[..., Awaitable[ChatSurface]]:
+    """The dependency every route takes its mount from: the mount's
+    ``bind``, else the mount as declared."""
+    if mount.bind is not None:
+        return mount.bind
+
+    async def declared() -> ChatSurface:
+        return mount
+
+    return declared
+
+
+def gatekeeper(mount: ChatSurface) -> Callable[..., Awaitable[str | None]]:
+    """The dependency a turn passes before the model: the mount's ``gate``,
+    else none (every turn goes through)."""
+    if mount.gate is not None:
+        return mount.gate
+
+    async def open_gate() -> None:
+        return None
+
+    return open_gate
+
+
+async def conversations(chat: ChatSurface) -> list[Any]:
+    """The mount's conversations, newest first."""
+    return await ai_service.list_conversations(
+        chat.user, surface=chat.surface, subject=chat.subject
+    )
+
+
+async def find_conversation(chat: ChatSurface, conversation_id: str) -> Any | None:
+    """The conversation, if it is the mount's user's, about the mount's
+    subject: another's is as absent as a missing one."""
+    conversation = await ai_service.get_conversation(conversation_id)
+    if conversation is None:
+        return None
+    meta = conversation.metadata
+    if meta.get("user_id") != chat.user or meta.get("subject") != chat.subject:
+        return None
+    return conversation
+
+
+def find_message(conversation: Any, message_id: str) -> Any | None:
+    return next((m for m in conversation.messages if m.id == message_id), None)
+
+
+async def marks(names: dict[str, tuple[str, ...]]) -> dict[str, str]:
+    """``{key: logo URL}`` for the keys whose names the catalog holds a
+    mark for, served by the Overseer's icon route; none on a stack without
+    the Overseer, where there is no route to serve them."""
+    if not PERSISTED or not names or find_spec(OVERSEER_COMMON) is None:
+        return {}
+    from app.core.db import get_async_session
+
+    common = importlib.import_module(OVERSEER_COMMON)
+    async with get_async_session() as db:
+        return await common.mark_urls(db, names)
+
+
+async def provider_icons(providers: list[str]) -> dict[str, str]:
+    """``{provider: icon URL}`` for the providers that answered."""
+    return await marks({p: (p,) for p in providers})
+
+
+def spoken(text: str) -> str:
+    """A message as it is said: its attachment note and the marks that only
+    mean something on the page come off (``to_spoken``)."""
+    from app.services.ai.service import to_spoken
+
+    return to_spoken(readable(text))
+
+
+async def synthesize(text: str, tts: Any = None) -> Any:
+    """``text`` said aloud (a ``SpeechResult``: the audio and what it is) by
+    the configured text-to-speech, or by ``tts`` (a voice being previewed)."""
+    from app.components.backend.api.ai.speech import said
+    from app.services.ai.service import SpeechRequest
+
+    return await said(SpeechRequest(text=text), tts)
+
+
+def _voice(chat: ChatSurface) -> dict[str, Any]:
+    """How a spoken turn is heard (static/js/voice.js): each sentence as it
+    streams or the settled answer, and what plays while the assistant works
+    in silence - the active voice profile's, applied onto the settings."""
+    from app.core.config import settings
+
+    return {
+        "reply": settings.VOICE_REPLY,
+        "sound": settings.VOICE_WORKING_SOUND,
+        # Seconds of quiet on a live call before the assistant checks in
+        # (0: never); call-state.js counts it. The mount's, else the profile's.
+        "idle": settings.VOICE_LIVE_IDLE_SECONDS
+        if chat.idle_seconds is None
+        else chat.idle_seconds,
+    }
+
+
+def _pretty_json(value: Any) -> str | None:
+    """Arguments as the reader wants them: re-indented when they parse."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return json.dumps(json.loads(value), indent=2, ensure_ascii=False)
+    except ValueError:
+        return value
+
+
+def run(entry: dict[str, Any]) -> dict[str, Any]:
+    """One tool run for its dialog: the script or arguments, the output."""
+    code = entry.get("code") if isinstance(entry.get("code"), str) else None
+    return {
+        "tool": str(entry.get("tool") or "tool call"),
+        "failed": trace_failed(entry),
+        "code": code,
+        "args": None if code else _pretty_json(entry.get("args")),
+        "output": trace_output(entry),
+    }
+
+
+def _message_url(chat: ChatSurface, conversation_id: str, message_id: str) -> str:
+    return f"{chat.path}/messages/{conversation_id}/{message_id}"
+
+
+# What Continue sends after a reply the token limit cut off.
+CONTINUE = "Continue exactly where you stopped."
+
+
+def cut_off(meta: dict[str, Any]) -> str | None:
+    """Why a reply ends mid-sentence, when the token limit is the reason."""
+    if meta.get("finish_reason") != "length":
+        return None
+    # The agent's setting is the limit; a reply from before replies kept
+    # it falls back to what it spent.
+    configured = (meta.get("agent") or {}).get("max_tokens")
+    tokens = int(configured or meta.get("output_tokens") or 0)
+    limit = f"{tokens:,}-token" if tokens else "token"
+    return f"Stopped at the {limit} limit."
+
+
+def change_urls(trace: list[dict[str, Any]]) -> list[str]:
+    """The approval cards a reply's tools proposed (``propose``,
+    ``propose_many``) or listed (``pending``), once each, in order: the
+    trace keeps each card's identity as its ``component`` marker."""
+    if CARDS is None:
+        return []
+    markers = (card for entry in trace for card in card_markers(entry))
+    return list(dict.fromkeys(u for m in markers if (u := CARDS.card_url(m))))
+
+
+def drawn_card_urls(chat: ChatSurface, trace: list[dict[str, Any]]) -> list[str]:
+    """The card a reply drew, at the mount's card route: one per answer, so
+    a redraw (the first one fixed) replaces the card before it. Cards are
+    rows, so none without a database."""
+    if not PERSISTED:
+        return []
+    from app.services.ai.service import cards
+
+    drawn = cards.last_drawn(trace)
+    return [f"{chat.path}/cards/{drawn}"] if drawn else []
+
+
+def settled(
+    chat: ChatSurface,
+    message: Any,
+    conversation_id: str,
+    icons: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """One stored message, shaped for the bubble macro."""
+    meta = message.metadata or {}
+    url = _message_url(chat, conversation_id, message.id)
+    return {
+        "id": message.id,
+        "role": message.role.value,
+        "content": readable(message.content),
+        # What a replay sends again: its markers, not its attachment note
+        # (those bytes rode one turn).
+        "sent": strip_attachment_marker(message.content),
+        "attachments": [
+            {"url": attachment_url(chat, a), "name": a.get("name") or "image"}
+            for a in meta.get("attachments") or []
+            if a.get("key")
+        ],
+        "pastes": paste_chips(chat, meta.get("pastes") or []),
+        "trail": [
+            {
+                "label": trace_label(e),
+                "failed": trace_failed(e),
+                "url": f"{url}/runs/{i}",
+            }
+            for i, e in enumerate(meta.get("tool_trace") or [])
+        ],
+        "changes": change_urls(meta.get("tool_trace") or []),
+        "cards": drawn_card_urls(chat, meta.get("tool_trace") or []),
+        "footer": footer_line(meta),
+        "cut_off": cut_off(meta),
+        # The agent registry lives in the database: no drawer without it.
+        "agent_url": f"{url}/agent" if PERSISTED and chat.agent_drawer else None,
+        "turns_url": f"{chat.path}/turns",
+        "continue_vals": {"message": CONTINUE, "conversation_id": conversation_id},
+        "model_icon": (icons or {}).get(str(meta.get("provider") or "")),
+        "speech": f"{url}/speech" if HAS_VOICE else None,
+        "eval_url": f"{chat.eval_cases}?{urlencode({'turn': message.id})}"
+        if chat.eval_cases and message.role.value == "assistant"
+        else None,
+    }
+
+
+def _providers(messages: list[Any]) -> list[str]:
+    return sorted(
+        {str(m.metadata["provider"]) for m in messages if m.metadata.get("provider")}
+    )
+
+
+async def transcript(
+    chat: ChatSurface, conversation: Any | None, before: str | None = None
+) -> dict[str, Any]:
+    """A page of the thread: the latest messages, or those just before
+    ``before``; ``earlier`` loads the page before it, when there is one."""
+    assistant = await assistant_name(chat)
+    if conversation is None:
+        return {"assistant": assistant, "conversation_id": None, "messages": []}
+    messages = conversation.messages
+    if before:
+        ids = [m.id for m in messages]
+        messages = messages[: ids.index(before)] if before in ids else []
+    page = messages[-THREAD_PAGE:]
+    icons = await provider_icons(_providers(page))
+    earlier = (
+        f"{chat.path}/conversations/{conversation.id}/earlier?before={page[0].id}"
+        if len(messages) > len(page)
+        else None
+    )
+    return {
+        "assistant": assistant,
+        "conversation_id": conversation.id,
+        "messages": [settled(chat, m, conversation.id, icons) for m in page],
+        "earlier": earlier,
+    }
+
+
+async def message_context(
+    chat: ChatSurface, conversation_id: str, message: Any
+) -> dict[str, Any]:
+    icons = await provider_icons(_providers([message]))
+    return {
+        "assistant": await assistant_name(chat),
+        "message": settled(chat, message, conversation_id, icons),
+    }
+
+
+async def surface_context(chat: ChatSurface) -> dict[str, Any]:
+    """The surface, wherever it is mounted: it opens on the most recent
+    conversation, blank only when there is none."""
+    from app.services.ai.service import composer
+
+    latest = next(iter(await conversations(chat)), None)
+    thread = await transcript(chat, latest)
+    return (
+        thread
+        | _call_context(chat)
+        | {
+            "section_subtitle": f"Ask {thread['assistant']} anything",
+            # What a turn may carry (``attachments.composer``).
+            "composer": composer(),
+            "picker": PERSISTED and chat.operator_controls,
+            # Voice profiles are rows: the voice chip needs a database.
+            "voices": HAS_VOICE and PERSISTED and chat.operator_controls,
+            "agent_url": agent_url(chat),
+            # The change queue lives with a persisted AI backend.
+            "approvals": CARDS.PATH if CARDS and chat.approvals else None,
+            # What a decision anywhere on the page sends (``changes.RESOLVED``).
+            "resolved_event": CARDS.RESOLVED if CARDS else None,
+        }
+    )
+
+
+def _call_context(chat: ChatSurface) -> dict[str, Any]:
+    """What a call needs on any page it is held on (``partials/chat/_call.html``)."""
+    return {
+        "chat_path": chat.path,
+        "voice": _voice(chat) if HAS_VOICE else None,
+        "calls": offers_calls(chat),
+        # A call's engine and running cost are the operator's figures.
+        "operator": chat.operator_controls,
+    }
+
+
+async def stage_context(
+    chat: ChatSurface, conversation_id: str | None
+) -> dict[str, Any]:
+    """The stage: a call and nothing else (``partials/chat/stage.html``),
+    on the conversation the chat had open (the socket checks it is the
+    mount's), else a new one."""
+    return _call_context(chat) | {
+        "assistant": await assistant_name(chat),
+        "conversation_id": conversation_id,
+    }
+
+
+async def turn_context(
+    chat: ChatSurface, message: str, conversation_id: str, attachment_names: list[str]
+) -> dict[str, Any] | None:
+    """The question and the bubble its answer streams into, or None when
+    there is nothing to send. The files ride the stream request from the
+    browser; only their names come here, for the note under the bubble.
+    A wall of pasted text is lifted here too, so it never lands on screen:
+    the reader sees ``text`` and a chip, the model is ``sent`` its marker.
+    The stream lifting it again lands on the same paste. Only where the
+    paste index has a database to live in (``lifted_turn``)."""
+    names = [n for n in attachment_names if n]
+    sent = message.strip() or (IMAGES_ONLY if names else "")
+    if not sent:
+        return None
+    pastes: list[dict[str, Any]] = []
+    if lifted := await lifted_turn(sent, None, chat.user):
+        sent, pastes = lifted.text, lifted.pastes
+    return {
+        "assistant": await assistant_name(chat),
+        "text": readable(sent),
+        "sent": sent,
+        "pastes": paste_chips(chat, pastes),
+        "conversation_id": conversation_id or None,
+        "attachment_names": names,
+    }

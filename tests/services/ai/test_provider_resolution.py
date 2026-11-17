@@ -6,16 +6,23 @@ resolver must map known display names to the right provider. Guards against
 the boot-bricking ``ValueError: 'llm7.io' is not a valid AIProvider``.
 """
 
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
+from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 import pytest
 
+from app.services.ai.domains.llm import model_factory
 from app.services.ai.domains.llm.config import (
     AIServiceConfig,
     _resolve_effort,
     _resolve_provider,
 )
 from app.services.ai.domains.llm.model_factory import (
+    TemperatureTolerant,
     _model_settings,
     _supports_custom_temperature,
 )
@@ -23,15 +30,18 @@ from app.services.ai.models import AIProvider
 
 
 class TestCustomTemperatureSupport:
-    """gpt-5 family and o-series reasoning models reject any temperature but
-    the default (1); sending one 400s. Those must omit temperature."""
+    """A model reasoning by default takes no temperature but the default
+    (1), as its pydantic-ai profile says; a newer family needs no name
+    added here."""
 
     def test_fixed_temperature_models(self) -> None:
-        for model in ["gpt-5.5", "gpt-5", "openai/gpt-5.2", "o1-mini", "o3", "o4-mini"]:
+        for model in ["gpt-5.5", "gpt-5", "gpt-6-luna", "o1-mini", "o3", "o4-mini"]:
             assert _supports_custom_temperature(model) is False, model
 
     def test_custom_temperature_models(self) -> None:
-        for model in ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-6", "auto", None]:
+        # gpt-5.2 reasons only when asked to, so it takes a temperature.
+        custom = ["gpt-4o", "gpt-4o-mini", "openai/gpt-5.2", "claude-sonnet-4-6"]
+        for model in [*custom, "auto", None]:
             assert _supports_custom_temperature(model) is True, model
 
     def test_model_settings_omits_temperature_for_fixed(self) -> None:
@@ -45,6 +55,106 @@ class TestCustomTemperatureSupport:
             model="gpt-4o", temperature=0.7, max_tokens=4096, timeout_seconds=120.0
         )
         assert _model_settings(cfg)["temperature"] == 0.7
+
+
+_REFUSED = {
+    "message": "Unsupported parameter: 'temperature' is not supported with this model.",
+    "type": "invalid_request_error",
+    "param": "temperature",
+}
+
+
+def _refuses_temperature(name: str) -> tuple[FunctionModel, list[bool]]:
+    """A model that 400s the way OpenAI does whenever a temperature is
+    sent, and whether each request it was sent carried one."""
+    sent: list[bool] = []
+
+    def check(info: AgentInfo) -> None:
+        sent.append("temperature" in (info.model_settings or {}))
+        if sent[-1]:
+            raise ModelHTTPError(400, name, _REFUSED)
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        check(info)
+        return ModelResponse(parts=[TextPart("fine")])
+
+    async def stream(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> AsyncIterator[str]:
+        check(info)
+        yield "fine"
+
+    return FunctionModel(answer, stream_function=stream, model_name=name), sent
+
+
+class TestARefusedTemperature:
+    """A model its profile gets wrong 400s on a temperature: the turn
+    retries once without it, and the model is never sent one again."""
+
+    @pytest.fixture(autouse=True)
+    def _forget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(model_factory, "_REJECTS_TEMPERATURE", set())
+
+    async def test_a_turn_retries_without_it(self) -> None:
+        model, sent = _refuses_temperature("gpt-9-new")
+        agent = Agent(TemperatureTolerant(model), model_settings={"temperature": 0.7})
+
+        result = await agent.run("hi")
+
+        assert result.output == "fine"
+        assert sent == [True, False]
+
+    async def test_a_streamed_turn_retries_too(self) -> None:
+        model, sent = _refuses_temperature("gpt-9-new")
+        agent = Agent(TemperatureTolerant(model), model_settings={"temperature": 0.7})
+
+        async with agent.run_stream("hi") as run:
+            assert await run.get_output() == "fine"
+
+        assert sent == [True, False]
+
+    async def test_the_model_is_never_sent_one_again(self) -> None:
+        model, sent = _refuses_temperature("gpt-9-new")
+        agent = Agent(TemperatureTolerant(model), model_settings={"temperature": 0.7})
+        await agent.run("hi")
+
+        await agent.run("again")
+
+        assert sent == [True, False, False]
+        assert model_factory._REJECTS_TEMPERATURE == {"gpt-9-new"}
+
+    async def test_an_agent_on_a_local_server_retries_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only ``model_for``'s models retried: an agent ``get_agent`` built
+        on a local server (or a public endpoint, or the eval harness's
+        model) 400ed on every turn."""
+        from app.services.ai.domains.llm import agents
+
+        model, sent = _refuses_temperature("gpt-9-new")
+        monkeypatch.setattr(model_factory, "OpenAIChatModel", lambda **_: model)
+        config = AIServiceConfig(
+            provider=AIProvider.OLLAMA, model="gpt-9-new", temperature=0.7
+        )
+        settings = SimpleNamespace(ollama_base_url_effective="http://localhost:11434")
+
+        result = await (await agents.get_agent(config, settings)).run("hi")
+
+        assert result.output == "fine"
+        assert sent == [True, False]
+
+    async def test_any_other_refusal_still_fails(self) -> None:
+        def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise ModelHTTPError(400, "gpt-9-new", {"message": "Bad max_tokens"})
+
+        agent = Agent(
+            TemperatureTolerant(FunctionModel(answer, model_name="gpt-9-new")),
+            model_settings={"temperature": 0.7},
+        )
+
+        with pytest.raises(ModelHTTPError):
+            await agent.run("hi")
+        assert model_factory._REJECTS_TEMPERATURE == set()
 
 
 class TestAIProviderFromName:

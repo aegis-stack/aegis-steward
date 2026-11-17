@@ -16,12 +16,10 @@ the next request sees the change. A prompt change made in another process
 recorded prompt change and empties itself when a newer one appears.
 """
 
-import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
-import re
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from typing import Any
-import weakref
 
 from pydantic_ai.settings import ModelSettings
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -29,15 +27,27 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.config import settings
 from app.core.db import get_async_session
 from app.core.log import logger
+from app.core.tools import RUN_CODE
 from app.services.ai.domains.chat import queries
+from app.services.ai.domains.chat.builtin_fetchers import APP_MAP
 from app.services.ai.domains.chat.chat_kit import ContextProvider, ToolChatAgent
-from app.services.ai.domains.chat.module_context import MemoryModuleContextProvider
-from app.services.ai.domains.chat.prompts import DEFAULT_SYSTEM_PROMPT
+from app.services.ai.domains.chat.chat_kit.run_code_guard import run_code_guard
+from app.services.ai.domains.chat.code_mode import with_sandbox_rules
+from app.services.ai.domains.chat.module_context import ContextModuleProvider
+from app.services.ai.domains.chat.prompts import get_default_system_prompt
 from app.services.ai.domains.chat.tools import resolve_tools
-from app.services.ai.domains.spend.recording import record_usage
+from app.services.ai.domains.spend.recording import chat_action, record_usage
 from app.services.ai.models.agents import Agent
 
 DEFAULT_AGENT_SLUG = "assistant"
+
+
+# The code mode every turn in this context runs in, whatever its agent is
+# set to: the eval harness plays a script in the mode its turn was recorded
+# in. Unset everywhere else.
+CODE_MODE_OVERRIDE: ContextVar[bool | None] = ContextVar(
+    "code_mode_override", default=None
+)
 
 
 @dataclass(frozen=True)
@@ -55,10 +65,18 @@ class AgentConfig:
     temperature: float
     max_tokens: int
     tool_names: tuple[str, ...] = ()
-    memory_modules: tuple[str, ...] = ()
+    context_modules: tuple[str, ...] = ()
     knowledge_base_ids: tuple[str, ...] = ()
     code_mode: bool = False
+    # The agent this one extends (``_to_config``), None for most.
     extends: str | None = None
+
+    def led_by(self, instructions: str | None) -> AgentConfig:
+        """This agent with ``instructions`` (a caller's manners for the
+        turn: a call's, a meeting's) leading its own prompt."""
+        if not instructions:
+            return self
+        return replace(self, system_prompt=f"{instructions}\n\n{self.system_prompt}")
 
 
 def default_agent_config() -> AgentConfig:
@@ -71,22 +89,36 @@ def default_agent_config() -> AgentConfig:
     return AgentConfig(
         slug=DEFAULT_AGENT_SLUG,
         name="Assistant",
-        system_prompt=DEFAULT_SYSTEM_PROMPT,
+        system_prompt=get_default_system_prompt(),
         model_id=None,
         temperature=settings.AI_TEMPERATURE,
         max_tokens=settings.AI_MAX_TOKENS,
-        # The registry seed grants these to the row (``attach_tools``).
+        # What the app is, read from its code: its tables for anyone, the
+        # rest for an admin; the model catalog and a card under the answer,
+        # where there is a database; and, for an admin, the app's health, its
+        # errors, the requests it answered, what its buckets hold and its
+        # plugins. The seed grants these to the row.
+        # Her reads run inside one script (``run_code``): fetched, counted
+        # and joined there, only the answer printed back.
+        code_mode=True,
         tool_names=(
             "ontology",
             "aggregate",
+            "catalog",
             "draw_card",
+            # What a picture shared earlier showed (``pastes``).
+            "pasted",
             "health",
             "errors",
-            "server_requests",
+            "requests",
             "plugins",
+            # The web: a search (with BRAVE_SEARCH_API_KEY set) and a
+            # page read as text, public hosts only.
             "web_search",
             "read_page",
         ),
+        # ... and its map always in the prompt, the tool for depth.
+        context_modules=(APP_MAP,),
     )
 
 
@@ -118,10 +150,12 @@ def _tool_names(row: Agent) -> tuple[str, ...]:
 
 
 def _to_config(row: Agent, parent: Agent | None = None) -> AgentConfig:
-    """A row as a config; with ``parent``, the row's section goes FIRST -
-    an instruction at the end of a long prompt is the one that gets
-    ignored - and what the row leaves empty comes from the parent. Only
-    the parent's own row is read, so inheritance is one level deep."""
+    """A row as a config; with ``parent`` (the row it ``extends``), the
+    row's section goes FIRST - an instruction at the end of a long prompt
+    is the one that gets ignored - and the grants the row leaves empty
+    (tools, context modules, knowledge bases) come from the parent. Model,
+    sampling and code mode are always the row's own. Only the parent's own
+    row is read, so inheritance is one level deep."""
     base = parent or row
     return AgentConfig(
         slug=row.slug,
@@ -135,7 +169,7 @@ def _to_config(row: Agent, parent: Agent | None = None) -> AgentConfig:
         temperature=row.temperature,
         max_tokens=row.max_tokens,
         tool_names=_tool_names(row) or _tool_names(base),
-        memory_modules=tuple(row.memory_modules or base.memory_modules),
+        context_modules=tuple(row.context_modules or base.context_modules),
         knowledge_base_ids=tuple(row.knowledge_base_ids or base.knowledge_base_ids),
         code_mode=row.code_mode,
         extends=row.extends,
@@ -214,7 +248,7 @@ def agent_capabilities(config: AgentConfig) -> list[Any]:
 
         # Reads go in the sandbox (slicing a payload in code is the point);
         # writes stay native so they surface as their own tool call. A
-        # tool declares its own nature at registration (its effect) -
+        # tool declares its own effect at registration (effect != "read") -
         # memory saves and queue proposals both ride this, and the next
         # write tool just declares itself.
         native = native_write_tool_names()
@@ -222,131 +256,19 @@ def agent_capabilities(config: AgentConfig) -> list[Any]:
             CodeMode(
                 tools=[name for name in config.tool_names if name not in native],
                 # Explicit, not Monty's 30 s / 256 MiB: the sandbox shares
-                # the webserver process with every other request (#486).
+                # the webserver process with every other request.
                 resource_limits={
                     "max_duration_secs": settings.AI_CODE_MODE_MAX_SECONDS,
                     "max_memory": settings.AI_CODE_MODE_MAX_MEMORY_BYTES,
                 },
             )
         )
-        capabilities.append(_one_run_per_user())
         # Hint only at writes this agent holds: pointing a read-only agent
         # at save_memory would send it after a tool it cannot call.
-        granted_writes = native & frozenset(config.tool_names)
-        if granted_writes:
-            capabilities.append(_native_write_hints(granted_writes))
+        capabilities.append(run_code_guard(native & frozenset(config.tool_names)))
     if config.code_mode or config.tool_names:
         capabilities.append(_tool_output_limits(code_mode=config.code_mode))
-        capabilities.append(_refusals())
     return capabilities
-
-
-def _refusals() -> Any:
-    """A capability answering a tool's ``ValueError`` (an argument it
-    refuses, naming what it knows) as the model's to correct: raised,
-    Pydantic AI ends the turn. A ``ValidationError`` is the tool's own bug
-    and still raises. A script's tool calls inside ``run_code`` are the
-    sandbox's to answer, as its retry."""
-    from pydantic import ValidationError
-    from pydantic_ai.capabilities import AbstractCapability
-
-    from app.core.tools import Refused
-
-    class _Refusals(AbstractCapability[Any]):
-        async def wrap_tool_execute(
-            self, ctx: Any, *, call: Any, tool_def: Any, args: Any, handler: Any
-        ) -> Any:
-            try:
-                return await handler(args)
-            except ValidationError:
-                raise
-            except ValueError as exc:
-                return Refused(error=f"{type(exc).__name__}: {exc}")
-
-    return _Refusals()
-
-
-# How the sandbox says a name is not there: its checker before the script
-# runs, or the interpreter when it does.
-_NOT_IN_THE_SANDBOX = re.compile(
-    r"Unknown function: (\w+)|Name `(\w+)` used when not defined"
-)
-
-
-def native_write_hint(message: str, natives: frozenset[str]) -> str | None:
-    """What to tell a model that called a write tool from inside a script.
-
-    Writes stay out of the sandbox (they must surface as their own tool
-    call), so a script calling one fails "Unknown function". Gemini Live
-    did that with propose on a call, retried the identical script and
-    stalled (2026-10-01): an error that only says what went wrong left it
-    nothing to try. None when the missing name is not a write tool."""
-    for match in _NOT_IN_THE_SANDBOX.finditer(message):
-        name = match.group(1) or match.group(2)
-        if name in natives:
-            return (
-                f"`{name}` is its own tool, not a function inside run_code: "
-                f"work out what it needs in run_code, then call `{name}` "
-                "directly as a separate tool call."
-            )
-    return None
-
-
-def _native_write_hints(granted: frozenset[str]) -> Any:
-    """A capability that adds ``native_write_hint`` to a sandbox failure,
-    for the write tools in ``granted``."""
-    from pydantic_ai.capabilities import AbstractCapability
-    from pydantic_ai.exceptions import ToolRetryError
-
-    class _NativeWriteHints(AbstractCapability[Any]):
-        async def wrap_tool_execute(
-            self, ctx: Any, *, call: Any, tool_def: Any, args: Any, handler: Any
-        ) -> Any:
-            # The sandbox's failure arrives as the retry the model reads.
-            try:
-                return await handler(args)
-            except ToolRetryError as retry:
-                told = retry.tool_retry.content
-                hint = native_write_hint(str(retry), granted)
-                if hint is None or not isinstance(told, str):
-                    raise
-                retry.tool_retry.content = f"{told}\n\n{hint}"
-                raise
-
-    return _NativeWriteHints()
-
-
-# One lock per user while any of their snippets is running or waiting;
-# weak values, so an idle user's lock goes away on its own.
-# ponytail: per process; a multi-worker webserver allows one run per user
-# per worker. Move to a Redis lock if the webserver scales out.
-_RUN_CODE_LOCKS: weakref.WeakValueDictionary[Any, asyncio.Lock] = (
-    weakref.WeakValueDictionary()
-)
-
-
-def _one_run_per_user() -> Any:
-    """A capability that runs one ``run_code`` per user at a time (#486).
-
-    A second snippet WAITS rather than failing: a model often sends two
-    run_code calls in one response, and a refusal would just come back
-    as a retry. Waiting bounds the sandboxes per user at one either way.
-    Keyed on ``deps.user_id``; deps without one share a single lock.
-    """
-    from pydantic_ai.capabilities import AbstractCapability
-
-    class _OneRunPerUser(AbstractCapability[Any]):
-        async def wrap_tool_execute(
-            self, ctx: Any, *, call: Any, tool_def: Any, args: Any, handler: Any
-        ) -> Any:
-            if tool_def.name != "run_code":
-                return await handler(args)
-            user = getattr(ctx.deps, "user_id", None)
-            lock = _RUN_CODE_LOCKS.setdefault(user, asyncio.Lock())
-            async with lock:
-                return await handler(args)
-
-    return _OneRunPerUser()
 
 
 def _tool_output_limits(*, code_mode: bool = False) -> Any:
@@ -363,20 +285,17 @@ def _tool_output_limits(*, code_mode: bool = False) -> Any:
     measurement raises on such values, which would kill the whole turn.
     Those returns are coerced to their ``repr`` instead.
     """
-    from dataclasses import replace
-
     from pydantic_ai.messages import ToolReturn
     from pydantic_ai_harness import ToolOutputLimits
     from pydantic_ai_harness.tool_output_limits import Band, Truncate
 
-    from app.core.money import with_dollars
+    from app.core.tools import with_dollars
 
     class _SafeToolOutputLimits(ToolOutputLimits):  # type: ignore[misc]
         async def after_tool_execute(self, ctx: Any, **kwargs: Any) -> Any:
-            # Money in dollars too (#291) for run_code's result, the
-            # script's own dict; every tool's return has them already
-            # (``resolve_tools``, #460).
-            if kwargs["tool_def"].name == "run_code":
+            # Money in dollars too for run_code's result, the script's own
+            # data; every tool's return has them already (``resolve_tools``).
+            if kwargs["tool_def"].name == RUN_CODE:
                 result = kwargs["result"]
                 kwargs["result"] = (
                     replace(result, return_value=with_dollars(result.return_value))
@@ -404,7 +323,7 @@ def _tool_output_limits(*, code_mode: bool = False) -> Any:
                 action=Truncate(max_chars=TOOL_OUTPUT_CHAR_LIMIT),
             )
         ],
-        tool_filter=["run_code"] if code_mode else "all",
+        tool_filter=[RUN_CODE] if code_mode else "all",
     )
 
 
@@ -424,7 +343,7 @@ def build_chat_agent(
 
     The config supplies the persona (``system_prompt``), sampling
     settings, the DB-granted tool list (resolved through the tool
-    registry, unknown names skipped), and the memory-module scope (wired
+    registry, unknown names skipped), and the context-module scope (wired
     in as a context provider when non-empty; deps must expose
     ``user_id`` for module fetchers to see the user). The caller
     supplies the runtime pieces the config doesn't know about (model
@@ -437,10 +356,10 @@ def build_chat_agent(
     4 for chat, 16 for code mode; an explicit value always wins.
     """
     providers: list[ContextProvider[Any]] = list(context_providers)
-    if config.memory_modules:
+    if config.context_modules:
         providers.append(
-            MemoryModuleContextProvider(
-                config.memory_modules, token_budget=module_token_budget
+            ContextModuleProvider(
+                config.context_modules, token_budget=module_token_budget
             )
         )
     effective_capabilities: list[Any] = list(capabilities)
@@ -453,7 +372,9 @@ def build_chat_agent(
     return ToolChatAgent(
         model=model,
         model_name=model_name,
-        instructions=config.system_prompt,
+        instructions=with_sandbox_rules(
+            config.system_prompt, code_mode=config.code_mode
+        ),
         deps_type=deps_type,
         tools=resolve_tools(config.tool_names),
         context_providers=providers,
@@ -462,7 +383,7 @@ def build_chat_agent(
             max_tokens=config.max_tokens,
         ),
         tool_calls_limit=effective_limit,
-        action=f"chat:{config.slug}",
+        action=chat_action(config.slug),
         recorder=recorder,
         capabilities=effective_capabilities,
         name=config.slug,

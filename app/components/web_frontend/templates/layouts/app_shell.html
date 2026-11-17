@@ -28,7 +28,7 @@
 {% block body_class %}md:h-screen md:overflow-hidden{% endblock %}
 
 {% block page_body %}
-<div x-data="shell('{{ chat_path }}', {{ 'true' if (current_path|default('')).startswith(chat_path) else 'false' }})"
+<div x-data="shell('{{ app_chat_path }}', {{ 'true' if (current_path|default('')).startswith(app_chat_path) else 'false' }})"
      @keydown.escape.window="mobileOpen = false"
      {# Entering the Chat page: the page is the surface, so the drawer
         empties (one instance of the surface at a time) and steps aside. #}

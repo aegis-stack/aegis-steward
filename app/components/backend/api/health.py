@@ -49,7 +49,7 @@ async def detailed_health() -> DetailedHealthResponse:
         # Always return 200 OK - service is available even if components are unhealthy
         return DetailedHealthResponse(
             healthy=system_status.overall_healthy,
-            status="healthy" if system_status.overall_healthy else "unhealthy",
+            status=system_status.overall_status,
             service="aegis-steward",
             version="0.1.0",
             components=system_status.components,
@@ -95,7 +95,7 @@ async def system_dashboard() -> dict[str, Any]:
         recent_alerts = 0
 
         return {
-            "status": "healthy" if system_status.overall_healthy else "unhealthy",
+            "status": system_status.overall_status.value,
             "service": "aegis-steward",
             "version": "0.1.0",
             "dashboard_data": {

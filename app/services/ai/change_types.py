@@ -1,0 +1,6 @@
+"""The AI service's change types for the propose/approve queue, loaded by
+``change_queue.load_change_types`` like every service's ``change_types``:
+what the assistant remembers (``domains.chat.memory_changes``) and, with
+the evals, their cases and runs (``domains.evals.changes``)."""
+
+import app.services.ai.domains.chat.memory_changes  # noqa: F401

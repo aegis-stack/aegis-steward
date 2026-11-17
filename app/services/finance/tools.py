@@ -479,15 +479,7 @@ for name, func, description in (
 # registers the whole finance tool surface.
 from app.services.finance.ai_account_tools import accounts  # noqa: E402,F401
 from app.services.finance.ai_bill_tools import bill_candidates, bills  # noqa: E402,F401
-from app.services.finance.ai_write_tools import (  # noqa: E402,F401
-    categories,
-    pending,
-    propose,
-    propose_many,
-    tags,
-    withdraw,
-    withdraw_batch,
-)
+from app.services.finance.ai_write_tools import categories, tags  # noqa: E402,F401
 from app.services.finance.domains.ledger.cleanup import (  # noqa: E402,F401
     cleanup_candidates,
 )

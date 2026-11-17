@@ -12,6 +12,7 @@ import time
 import weakref
 
 from app.core.constants import ComponentName
+from app.core.discovery import declared_by
 from app.core.log import logger
 from app.services.system.health_probes import (
     _get_cached_system_metrics,
@@ -137,6 +138,16 @@ def register_service_health_check(
     # with the actual status (not hardcoded "success")
 
 
+def register_declared_service_health() -> None:
+    """Register each service's check, ``HEALTH`` in its ``health`` module,
+    found on disk: an app's own service's too. A health module with no
+    ``HEALTH`` is skipped."""
+    import app.services as services
+
+    for owner, check in declared_by(services, "health", "HEALTH", required=False):
+        register_service_health_check(owner, check)
+
+
 async def get_system_status(force_refresh: bool = False) -> SystemStatus:
     """
     Get comprehensive system status, sharing one walk across callers.
@@ -216,24 +227,14 @@ async def _collect_system_status() -> SystemStatus:
 
     # Group system metrics under backend component if it exists
     if ComponentName.BACKEND in component_results:
-        # Backend exists - recreate with system metrics as sub-components
+        # Backend exists - recreate with system metrics as sub-components.
+        # They are the host's figures, not the app's: each keeps its own
+        # status, and the Server stays as its own check says.
         backend_component = component_results[ComponentName.BACKEND]
-
-        # Propagate status from system metrics and original backend status
-        system_metrics_statuses = [
-            getattr(metric, "status", ComponentStatusType.HEALTHY)
-            for metric in system_metrics.values()
-        ]
-        original_backend_status = getattr(
-            backend_component, "status", ComponentStatusType.HEALTHY
-        )
-        all_backend_statuses = system_metrics_statuses + [original_backend_status]
-
-        backend_status = propagate_status(all_backend_statuses)
 
         component_results[ComponentName.BACKEND] = ComponentStatus(
             name=backend_component.name,
-            status=backend_status,
+            status=backend_component.status,
             message=backend_component.message,
             response_time_ms=backend_component.response_time_ms,
             metadata=backend_component.metadata,
@@ -272,9 +273,6 @@ async def _collect_system_status() -> SystemStatus:
         all_statuses.extend(component.sub_components.values())
     overall_healthy = all(status.healthy for status in all_statuses)
 
-    # Create Aegis root structure with components underneath
-    aegis_healthy = all(status.healthy for status in all_statuses)
-
     # Propagate status from all top-level components and services
     component_statuses = [
         getattr(component, "status", ComponentStatusType.HEALTHY)
@@ -284,11 +282,12 @@ async def _collect_system_status() -> SystemStatus:
         getattr(service, "status", ComponentStatusType.HEALTHY)
         for service in service_results.values()
     ]
-    all_top_level_statuses = component_statuses + service_statuses
-    aegis_status = propagate_status(all_top_level_statuses)
+
+    # The root answers for what ``overall_healthy`` counts, a host metric too.
+    aegis_status = propagate_status([status.status for status in all_statuses])
 
     aegis_message = (
-        "Aegis Stack application" if aegis_healthy else "Aegis Stack has issues"
+        "Aegis Stack application" if overall_healthy else "Aegis Stack has issues"
     )
 
     # Create aegis sub-components structure with components and services grouped

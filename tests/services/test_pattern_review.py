@@ -12,6 +12,7 @@ from app.services.system.pattern_review import Note, Review
 from tests._files import write_tree
 
 STORE = "app/services/notes/store.py"
+OTHER = "app/services/tags/store.py"
 CHECK = "parts.reads-in-queries"
 TOUCHED = "### What this change touches\n\n- **Parts:** `service:notes`\n"
 
@@ -46,7 +47,6 @@ def test_every_finding_is_listed_whatever_she_says(fresh: list) -> None:  # type
     )
     text = pattern_review.markdown(fresh, said, touched=TOUCHED)
     assert f"`{STORE}:2`" in text and "Reads live in queries" in text
-    assert "more; `patterns check`" not in text  # all of them listed
     assert "This read belongs in queries.py." in text
     assert "An invented finding." not in text  # not a finding's rule: not listed
     assert text.index(pattern_review.OPINION) < text.index("The module could be split.")
@@ -82,11 +82,12 @@ async def test_she_is_asked_with_the_facts(
     assert "One place, batched." in text  # her silence on it: the rule's why
 
 
-async def test_a_long_list_is_capped_and_counted(
+async def test_every_place_is_listed_and_counted_she_reads_the_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A first run, with no baseline, can bring hundreds: she reads and the
-    comment lists the first ``MOST_LISTED``, and says how many more."""
+    """A change can bring hundreds: the verdict counts them all and the
+    comment lists every one; she reads the first ``MOST_LISTED`` places and
+    a count of all of them by part, so her words cover every one."""
     lines = "".join(f"x{i} = await session.exec(q)\n" for i in range(60))
     write_tree(tmp_path, {STORE: lines})
     many = new_spots(
@@ -100,55 +101,41 @@ async def test_a_long_list_is_capped_and_counted(
 
     monkeypatch.setattr(pattern_review, "_ask", ask)
     text = await pattern_review.review(many, touched="")
-    assert f"{STORE}:{pattern_review.MOST_LISTED}`" in text
-    assert f"{STORE}:{pattern_review.MOST_LISTED + 1}`" not in text
+    assert "60 new places break" in text
+    assert all(f"`{STORE}:{i}`" in text for i in range(1, 61))
+    assert " more" not in text
     assert f'{STORE}:{pattern_review.MOST_LISTED + 1}"' not in asked[0]
-    assert f"and {60 - pattern_review.MOST_LISTED} more" in text
+    assert '"by_part":{"service:notes":60}' in asked[0]
 
 
-def _many(tmp_path: Path) -> list:  # type: ignore[type-arg]
-    """``MOST_LISTED`` advisory places, then one that blocks."""
-    count = pattern_review.MOST_LISTED + 1
-    write_tree(tmp_path, {STORE: "x = await session.exec(q)\n" * count})
-    advisory = _finding(*(f"{STORE}:{i}" for i in range(1, count)))
-    advisory = advisory.model_copy(update={"severity": "warn", "check": "a.rule"})
-    return new_spots(
-        [advisory, _finding(f"{STORE}:{count}")], source_index.at(tmp_path)
+def test_places_are_grouped_by_part_each_counted(tmp_path: Path) -> None:
+    """One rule broken in two services: each part's places under it, with
+    how many."""
+    write_tree(tmp_path, {STORE: "a = 1\nb = 2\nc = 3\n", OTHER: "d = 4\n"})
+    found = [
+        _finding(f"{STORE}:1", f"{STORE}:2", f"{STORE}:3"),
+        _finding(f"{OTHER}:1").model_copy(update={"subject": "service:tags"}),
+    ]
+    text = pattern_review.markdown(
+        new_spots(found, source_index.at(tmp_path)), Review(summary="Two."), ""
     )
+    assert "<summary>4 places</summary>" in text
+    notes = text.index("**`service:notes`** · 3")
+    tags = text.index("**`service:tags`** · 1")
+    assert notes < text.index(f"`{STORE}:3`") < tags < text.index(f"`{OTHER}:1`")
 
 
-async def test_a_place_past_the_cap_that_blocks_still_blocks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_comment_past_githubs_limit_counts_the_rest_in_its_part(
+    tmp_path: Path,
 ) -> None:
-    """The verdict is every new place's, not the listed ones': a blocking
-    place past ``MOST_LISTED`` read as clear."""
-
-    async def ask(_: str) -> Review:
-        return Review(summary="Mostly advisory.")
-
-    monkeypatch.setattr(pattern_review, "_ask", ask)
-    text = await pattern_review.review(_many(tmp_path), touched="")
-    assert "**Blocked.** 1 new place breaks" in text
-
-
-async def test_a_long_list_an_earlier_review_covered_is_not_asked_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Past ``MOST_LISTED`` the comment was fingerprinted on the listed
-    places and compared with all of them, so every push asked again."""
-    many = _many(tmp_path)
-
-    async def ask(_: str) -> Review:
-        return Review(summary="Mostly advisory.")
-
-    monkeypatch.setattr(pattern_review, "_ask", ask)
-    first = await pattern_review.review(many, "", commit="aaaaaaa1")
-
-    async def never(*_: object) -> None:
-        raise AssertionError("no model call for findings already reviewed")
-
-    monkeypatch.setattr(pattern_review, "_ask", never)
-    assert await pattern_review.review(many, "", previous=first, commit="b") == ""
+    """Too many to list within GitHub's limit: each part lists what fits
+    and says how many more there, never dropped at the bottom."""
+    many = _spots(tmp_path, 3000)
+    text = pattern_review.markdown(many, Review(summary="Thousands."), "")
+    assert len(text) <= pattern_review.MOST_CHARS
+    assert "3000 new places break" in text
+    more = text.index("more here; `patterns check` lists them all")
+    assert more < text.index("</details>")
 
 
 async def test_findings_an_earlier_review_covered_are_not_asked_again(

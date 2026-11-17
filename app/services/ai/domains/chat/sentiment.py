@@ -11,13 +11,16 @@ Present but OFF by default: the scheduled job checks
 because every scored conversation costs model tokens.
 """
 
+from datetime import datetime
 import json
 from typing import Any
 
+from pydantic import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.config import settings
-from app.core.db import OpenSession, get_async_session
+from app.core.db import get_async_session, release_lock
+from app.core.figures import FIGURES
 from app.core.log import logger
 from app.models.conversation import Conversation
 from app.services.ai.domains.chat import queries
@@ -43,6 +46,12 @@ SENTIMENT_SYSTEM_PROMPT = (
 )
 
 TRANSCRIPT_MESSAGE_LIMIT = 40
+# The agent the scorer runs as: its model, sampling and prompt are picked
+# in Agents (seeded with the prompt above, on the active model).
+SENTIMENT_AGENT_SLUG = "sentiment"
+# A verdict is a short JSON object, read the same way each time.
+SENTIMENT_TEMPERATURE = 0.0
+SENTIMENT_MAX_TOKENS = 600
 
 
 def _build_transcript(conversation: Conversation) -> str | None:
@@ -90,13 +99,29 @@ def _validate_verdict(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _llm_score(transcript: str) -> dict[str, Any]:
-    """Ask the configured model for a verdict; returns the raw parsed dict."""
-    config = AIServiceConfig.from_settings(settings)
+# What a batch scores with: the model's config, and the prompt.
+Scorer = tuple[AIServiceConfig, str]
+
+
+async def _scorer() -> Scorer:
+    """The ``sentiment`` agent's model, sampling and prompt, or, while no
+    such agent is active, the built-in prompt on the model in force.
+    Resolved once a batch."""
+    from app.services.ai.domains.llm import active_model
+
+    return await active_model.agent_in_force(
+        settings, SENTIMENT_AGENT_SLUG, SENTIMENT_SYSTEM_PROMPT
+    )
+
+
+async def _llm_score(
+    transcript: str, config: AIServiceConfig, prompt: str
+) -> dict[str, Any]:
+    """Ask ``config``'s model for a verdict; returns the raw parsed dict."""
 
     from app.services.ai.domains.llm.providers import get_agent
 
-    agent = await get_agent(config, settings, SENTIMENT_SYSTEM_PROMPT)
+    agent = await get_agent(config, settings, prompt)
     result = await agent.run(transcript)
     reply = result.output
 
@@ -104,28 +129,20 @@ async def _llm_score(transcript: str) -> dict[str, Any]:
 
 
 async def _score_conversation(
-    open_session: OpenSession, conversation_id: str, transcript: str
+    session: AsyncSession, conversation_id: str, transcript: str, scorer: Scorer
 ) -> None:
-    """Score one conversation transcript and write its verdict row.
-
-    Ask the model while holding nothing, then take the database back
-    just to write: an open session is the application-wide write lock,
-    and a verdict costs a network round trip (see ``OpenSession``).
-    """
-    payload = await _llm_score(transcript)
-    verdict = _validate_verdict(payload)
-    async with open_session() as session:
-        session.add(
-            SentimentAnalysis(
-                conversation_id=conversation_id,
-                model_id=settings.AI_MODEL,
-                **verdict,
-            )
+    """Score one conversation transcript and write its verdict row, with
+    the model that scored it."""
+    config, prompt = scorer
+    verdict = _validate_verdict(await _llm_score(transcript, config, prompt))
+    session.add(
+        SentimentAnalysis(
+            conversation_id=conversation_id,
+            model_id=config.model,
+            **verdict,
         )
-        # The session commits on the way out; flush so a caller whose
-        # factory does not commit (a test holding one session open)
-        # still sees the row.
-        await session.flush()
+    )
+    await session.commit()
 
 
 async def _unscored_batch(
@@ -145,27 +162,25 @@ async def _unscored_batch(
 async def score_unscored_conversations(
     *,
     limit: int | None = None,
-    open_session: OpenSession | None = None,
+    session: AsyncSession | None = None,
 ) -> dict[str, int]:
     """Score a batch of unscored conversations.
-
-    Takes a way to OPEN a database rather than an open one, because
-    every conversation in the batch waits on a model and must not be
-    inside a transaction while it does - see ``OpenSession``. The batch
-    is read with one session, each verdict written with another, and
-    neither is held across the model call in between.
 
     Per-conversation failures (model error, unparseable reply, invalid
     verdict) are logged and counted, never fatal to the batch; failed
     conversations stay unscored and are retried by a later run.
     """
-    open_session = open_session or get_async_session
-    async with open_session() as session:
-        batch = await _unscored_batch(
-            session, limit or settings.AI_SENTIMENT_BATCH_LIMIT
-        )
+    if session is None:
+        async with get_async_session() as owned_session:
+            return await score_unscored_conversations(
+                limit=limit, session=owned_session
+            )
 
+    batch_limit = limit or settings.AI_SENTIMENT_BATCH_LIMIT
+    batch = await _unscored_batch(session, batch_limit)
+    await release_lock(session)  # each verdict then writes on its own
     counts = {"scored": 0, "skipped": 0, "failed": 0}
+    scorer: Scorer | None = None
     for conversation_id, transcript in batch:
         if transcript is None:
             logger.debug(
@@ -175,7 +190,8 @@ async def score_unscored_conversations(
             counts["skipped"] += 1
             continue
         try:
-            await _score_conversation(open_session, conversation_id, transcript)
+            scorer = scorer or await _scorer()
+            await _score_conversation(session, conversation_id, transcript, scorer)
             counts["scored"] += 1
         except Exception as exc:
             counts["failed"] += 1
@@ -184,6 +200,7 @@ async def score_unscored_conversations(
                 conversation_id=conversation_id,
                 error=str(exc),
             )
+            await session.rollback()
     logger.info("Sentiment batch finished", **counts)
     return counts
 
@@ -191,43 +208,78 @@ async def score_unscored_conversations(
 RECENT_NEGATIVE_LIMIT = 5
 
 
-async def sentiment_stats(*, session: AsyncSession | None = None) -> dict[str, Any]:
+class SentimentMix(BaseModel):
+    """Verdicts by the user's sentiment and the assistant's performance
+    (every value, zero-filled), and their average score."""
+
+    model_config = FIGURES
+
+    by_sentiment: dict[str, int]
+    by_performance: dict[str, int]
+    average_score: float
+
+
+class RecentNegative(BaseModel):
+    """A conversation scored negative or frustrated, newest first."""
+
+    model_config = FIGURES
+
+    conversation_id: str
+    overall_sentiment: str
+    summary: str | None
+    created_at: datetime
+
+
+class SentimentStats(BaseModel):
+    """Every verdict, zero-filled, for the CLI, the API and Overseer: the
+    mix, whether the job scores, and the latest negatives."""
+
+    model_config = FIGURES
+
+    enabled: bool
+    total: int
+    distribution: dict[str, int]
+    performance: dict[str, int]
+    average_score: float
+    recent_negatives: list[RecentNegative]
+
+
+async def sentiment_mix(
+    session: AsyncSession, since: datetime | None = None
+) -> SentimentMix:
+    """The verdicts scored since ``since`` (all of them when None), as
+    figures: zero-filled, so a reader gets the same shape before any is
+    scored."""
+    by_sentiment = dict.fromkeys(SENTIMENT_VALUES, 0)
+    by_sentiment.update(await queries.sentiment_counts(session, since))
+    by_performance = dict.fromkeys(PERFORMANCE_VALUES, 0)
+    by_performance.update(await queries.performance_counts(session, since))
+    average = await queries.average_sentiment_score(session, since)
+    return SentimentMix(
+        by_sentiment=by_sentiment,
+        by_performance=by_performance,
+        average_score=round(float(average or 0.0), 3),
+    )
+
+
+async def sentiment_stats(*, session: AsyncSession) -> SentimentStats:
     """Aggregate sentiment results for CLI and dashboard surfaces.
 
     Returns zero-filled distributions so consumers can render a stable
     shape whether or not anything has been scored yet.
     """
-    if session is None:
-        async with get_async_session() as owned_session:
-            return await sentiment_stats(session=owned_session)
-
-    distribution = dict.fromkeys(SENTIMENT_VALUES, 0)
-    for sentiment, count in await queries.sentiment_counts(session):
-        distribution[sentiment] = count
-
-    performance = dict.fromkeys(PERFORMANCE_VALUES, 0)
-    for performance_value, count in await queries.performance_counts(session):
-        performance[performance_value] = count
-
-    average_score = await queries.average_sentiment_score(session) or 0.0
-
+    mix = await sentiment_mix(session)
     recent_negatives = [
-        {
-            "conversation_id": row.conversation_id,
-            "overall_sentiment": row.overall_sentiment,
-            "summary": row.summary,
-            "created_at": row.created_at.isoformat(),
-        }
+        RecentNegative.model_validate(row, from_attributes=True)
         for row in await queries.recent_negative_sentiments(
             session, RECENT_NEGATIVE_LIMIT
         )
     ]
-
-    return {
-        "enabled": settings.AI_SENTIMENT_ENABLED,
-        "total": sum(distribution.values()),
-        "distribution": distribution,
-        "performance": performance,
-        "average_score": round(float(average_score or 0.0), 3),
-        "recent_negatives": recent_negatives,
-    }
+    return SentimentStats(
+        enabled=settings.AI_SENTIMENT_ENABLED,
+        total=sum(mix.by_sentiment.values()),
+        distribution=mix.by_sentiment,
+        performance=mix.by_performance,
+        average_score=mix.average_score,
+        recent_negatives=recent_negatives,
+    )

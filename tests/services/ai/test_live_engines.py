@@ -1,8 +1,7 @@
 """Her live engines, as table data (#273).
 
-A live call runs on an engine: GPT-Live (full duplex, our own client
-delegation) or a Pydantic AI realtime model (turn-taking, her own agent
-as the brain). Engines are rows, like agents and voice profiles: seeded
+A live call runs on an engine: GPT-Live (full duplex) or a Pydantic AI
+realtime model (turn-taking, her own agent as the brain). Engines are rows, like agents and voice profiles: seeded
 when missing, never overwritten once edited. The model an engine runs
 on - its name, its maker, its price - is the catalog's row.
 """
@@ -40,16 +39,14 @@ class TestTheRows:
             "gpt-realtime-2.1",
             "gpt-realtime-2.1-mini",
             "gemini-live",
-            "gpt-live-pydantic",  # #274's trial
         ]
-        assert live_engines.DEFAULT == "gpt-live"
+        assert live_engines.DEFAULT in await _keyed(seeded)
 
     @pytest.mark.asyncio
-    async def test_each_says_how_it_connects(self, seeded: AsyncSession) -> None:
+    async def test_each_names_its_model(self, seeded: AsyncSession) -> None:
         rows = await _keyed(seeded)
         live, realtime = rows["gpt-live"], rows["gpt-realtime-2.1"]
-        assert (live.transport, live.llm.model_id) == ("gpt_live", "gpt-live-1")
-        assert realtime.transport == "realtime"
+        assert live.llm.model_id == "gpt-live-1"
         assert live_engines.realtime_model(realtime) == "openai:gpt-realtime-2.1"
 
     @pytest.mark.asyncio
@@ -97,10 +94,7 @@ def test_the_active_profile_carries_its_engine() -> None:
 
 class TestResolving:
     def test_an_unknown_engine_is_the_default(self) -> None:
-        rows = [
-            LiveEngine(llm_id=0, key=seed["key"], transport=seed["transport"])
-            for seed in ENGINE_SEEDS
-        ]
+        rows = [LiveEngine(llm_id=0, key=seed["key"]) for seed in ENGINE_SEEDS]
         found = live_engines.pick(rows, "nope")
         assert found is not None and found.key == live_engines.DEFAULT
 
@@ -127,11 +121,11 @@ class TestResolving:
 
 class TestChoosing:
     @pytest.mark.asyncio
-    async def test_a_gemini_model_is_reached_through_the_relay(
+    async def test_a_gemini_model_picked_talks_like_her_realtime_engines(
         self, async_db_session: AsyncSession
     ) -> None:
-        """Picking a Gemini Live model with no engine makes one that the
-        phone reaches through our server, talking like the seeded relay."""
+        """Picking a Gemini Live model with no engine makes one that talks
+        like her seeded turn-taking engines, not the template's default."""
         from app.services.ai.models.llm import LargeLanguageModel, LLMOrg
 
         await seed_voice_catalog(async_db_session)
@@ -152,9 +146,10 @@ class TestChoosing:
             async_db_session, "gemini-3.1-flash-live-preview", ENGINE_SEEDS
         )
 
-        assert made is not None and made.transport == "relay"
-        seeded = next(s for s in ENGINE_SEEDS if s["transport"] == "relay")
+        assert made is not None
+        seeded = next(s for s in ENGINE_SEEDS if s["key"] == "gemini-live")
         assert made.instructions == seeded["instructions"]
+        assert made.max_output_tokens == seeded["max_output_tokens"]
 
     @pytest.mark.asyncio
     async def test_a_vendor_no_call_can_reach_is_refused(
@@ -179,11 +174,3 @@ class TestChoosing:
             await live_engines.choose(async_db_session, "grok-voice", ENGINE_SEEDS)
             is None
         )
-
-
-def test_gpt_live_can_be_tried_through_pydantic_ai() -> None:
-    """#274: GPT-Live has two engines while the Pydantic AI one is tried -
-    the hand-built path, and the same model on the relay."""
-    trial = next(seed for seed in ENGINE_SEEDS if seed["key"] == "gpt-live-pydantic")
-    assert (trial["transport"], trial["model"]) == ("relay", "gpt-live-1")
-    assert "max_output_tokens" not in trial  # Live has no token limit

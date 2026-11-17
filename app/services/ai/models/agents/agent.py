@@ -33,8 +33,11 @@ class Agent(SQLModel, table=True):
     system_prompt: str
     temperature: float = Field(default=0.7)
     max_tokens: int = Field(default=1000)
-    memory_modules: list[str] = Field(
-        default_factory=list, sa_column=Column(JSON, nullable=False)
+    # A server default too: the column replaced ``memory_modules`` on tables
+    # that already had rows, which the rename's revision then fills.
+    context_modules: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False, server_default="[]"),
     )
     knowledge_base_ids: list[str] = Field(
         default_factory=list, sa_column=Column(JSON, nullable=False)
@@ -45,10 +48,10 @@ class Agent(SQLModel, table=True):
     # runs it in the Monty interpreter. Off by default; flipping it is a
     # capability grant, deliberately DB-driven like tool attachments.
     code_mode: bool = Field(default=False)
-    # The agent this one extends (one level, #260): its section goes in
-    # front of the parent's prompt, and tools, memory modules and knowledge
-    # bases come from the parent unless this row names its own. Model and
-    # sampling are always this row's own.
+    # The agent this one extends, one level deep: its section goes in front
+    # of the parent's prompt, and tools, context modules and knowledge
+    # bases come from the parent unless this row names its own. Model,
+    # sampling and code mode are always this row's own.
     extends: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

@@ -9,10 +9,9 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.components.web_frontend import overseer_scheduler
-from app.core.db import get_async_db
 from app.services.system.models import ComponentStatus
 from tests.web.dom import none, one, select, text
-from tests.web.overseer import sign_in, status_with
+from tests.web.overseer import on_session, sign_in, status_with
 
 SOON = (datetime.now(UTC) + timedelta(hours=5)).isoformat()
 PAST = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
@@ -78,16 +77,13 @@ def signed_in(
         seen.update(kwargs)
         return EXECUTIONS, 60
 
-    async def request_session() -> Any:
-        return REQUEST_SESSION
-
     monkeypatch.setattr(overseer_scheduler, "load_executions", executions)
 
     async def no_stats(**_: Any) -> dict[str, Any]:
         return {}
 
     monkeypatch.setattr(overseer_scheduler, "load_job_stats", no_stats)
-    app.dependency_overrides[get_async_db] = request_session
+    on_session(app, REQUEST_SESSION)
     with TestClient(app) as client:
         yield client
 
@@ -245,6 +241,17 @@ class TestJobs:
         assert cells[0][3] == "Active"
         assert cells[1][1] == "Past due"
 
+    def test_names_and_schedules_wrap_so_status_stays_in_view(
+        self, signed_in: TestClient
+    ) -> None:
+        # In a narrow window (or a zoomed one) the long columns take a
+        # second line rather than push Status out past the card's edge.
+        row = _rows(_get(signed_in, "jobs"))[0]
+        name, _next, schedule, status = row.cssselect("td")[1:]
+        assert "whitespace-normal" in name.get("class")
+        assert "whitespace-normal" in schedule.get("class")
+        assert "whitespace-nowrap" in status.get("class")
+
     def test_past_due_job_is_flagged(self, signed_in: TestClient) -> None:
         badge = one(_rows(_get(signed_in, "jobs"))[1], "[data-tone]")
         assert badge.get("data-tone") == "warn"
@@ -325,6 +332,13 @@ class TestHistory:
         assert "1.5s" in text(row)
         assert one(row, "[data-tone]").get("data-tone") == "error"
         assert "disk full" in text(one(html, "tr[data-detail]"))
+
+    def test_names_wrap_so_status_stays_in_view(self, signed_in: TestClient) -> None:
+        # The same names as the Jobs table, so the same second line.
+        row = _rows(_get(signed_in, "history"))[0]
+        job, _duration, _started, status = row.cssselect("td")[1:]
+        assert "whitespace-normal" in job.get("class")
+        assert "whitespace-nowrap" in status.get("class")
 
     def test_a_run_opens_into_what_it_logged(
         self, signed_in: TestClient, monkeypatch: pytest.MonkeyPatch

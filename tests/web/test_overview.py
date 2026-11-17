@@ -337,6 +337,7 @@ class TestADateRange:
         assert one(form, 'input[type=date][name="to"]').get("value") == str(today)
         none(form, 'input[name="days"]:checked')  # a picked range beats the chips
 
+    @pytest.mark.real_clock  # seeded against the real clock
     async def test_net_worth_and_cash_flow_stop_at_the_end_date(
         self, client: TestClient, ledger: Ledger, async_db_session: AsyncSession
     ) -> None:

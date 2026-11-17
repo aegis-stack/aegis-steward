@@ -89,6 +89,7 @@ class TestANewBillIsAnnounced:
 
         assert await async_db_session.get(FinanceInsight, news.id) is None
 
+    @pytest.mark.real_clock  # seeded against the real clock
     @pytest.mark.asyncio
     async def test_a_proposal_from_weeks_ago_is_not_news(
         self, streams: Streams, async_db_session: AsyncSession

@@ -331,10 +331,10 @@ class TestAPendingDecisionWins:
     async def test_an_alert_with_a_pending_resolution_card_is_not_withdrawn(
         self, async_db_session: AsyncSession
     ) -> None:
+        from app.services.change_queue import approve, propose
         from app.services.finance.domains.detection.insights.rules import (
             create_insight_if_new,
         )
-        from app.services.finance.domains.writes.queue import approve, propose
 
         db = async_db_session
         svc = FinanceService(db)

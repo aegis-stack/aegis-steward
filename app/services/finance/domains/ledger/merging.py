@@ -91,13 +91,14 @@ async def merge(db: AsyncSession, stays: FinanceAccount, gone: FinanceAccount) -
     if why := refusal(stays, gone):
         return Plan(refusal=why)
     assert stays.id is not None and gone.id is not None
+    from app.services import change_queue
     from app.services.finance.domains.ledger import networth
-    from app.services.finance.domains.writes import queue
 
     # A proposal aimed at the copy could rename or reassign the wrong
     # account if it followed the rows here: set aside, saying why.
-    await queue.expire_naming(
+    await change_queue.expire_naming(
         db,
+        "account_id",
         [gone.id],
         owner_user_id=stays.owner_user_id,
         note=f"Its account was merged into {stays.name}; ask again there.",

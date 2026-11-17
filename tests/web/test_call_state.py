@@ -1,8 +1,6 @@
-"""A live call's rules (issue 458) are plain JS, tested on Node's own
-runner (``tests/js``) with nothing to install; this runs them with the
+"""A live call's rules (``call-state.js``) are plain JS, tested on Node's
+own runner (``tests/js``) with nothing to install; this runs them with the
 suite, so ``make check`` and CI hold them too."""
-
-from __future__ import annotations
 
 from pathlib import Path
 import shutil
@@ -24,5 +22,8 @@ def test_the_call_rules_hold() -> None:
 
 
 def test_the_page_loads_the_rules_before_the_call() -> None:
-    base = (ROOT / "app/components/web_frontend/templates/base.html").read_text()
+    macros = ROOT / "app/components/web_frontend/templates/components/macros"
+    base = (macros / "layout.html").read_text()
     assert base.index("js/call-state.js") < base.index("js/voice.js")
+    assert base.index("js/mentions.js") < base.index("js/voice.js")  # it follows her
+    assert base.index("js/taps.js") < base.index("js/voice.js")  # its typing

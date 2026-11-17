@@ -5,11 +5,29 @@ Health monitoring for AI service functionality including provider configuration,
 API connectivity, and service-specific metrics.
 """
 
+from typing import Any
+
+import httpx
+
 from app.core.log import logger
 from app.services.system.models import ComponentStatus, ComponentStatusType
 
 # Default Ollama URL for auto-discovery (local development)
 OLLAMA_LOCAL_DISCOVERY_URL = "http://localhost:11434"
+
+
+async def _ollama_models(url: str) -> list[dict[str, Any]] | None:
+    """The models Ollama at ``url`` has pulled (its own ``/api/tags``), or
+    None when it does not answer. Asked directly: the ollama provider is
+    selectable on any AI stack, the inference component's client only ships
+    with that component."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{url}/api/tags")
+        tags = response.json() if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):  # down, or not Ollama (not JSON)
+        return None
+    return tags.get("models", []) if isinstance(tags, dict) else None
 
 
 async def check_ai_service_health() -> ComponentStatus:
@@ -20,11 +38,12 @@ async def check_ai_service_health() -> ComponentStatus:
         ComponentStatus indicating AI service health
     """
     try:
-        # The same instance the API serves from, so the numbers here are
-        # the live conversation state rather than a second service's.
+        # Import the shared AI service instance from the API router
+        # This ensures health checks reflect actual API conversation state
+        from app.components.backend.api.ai.service import ai_service
+
         # Read FRESH config for provider/model (not cached from server startup)
         from app.core.config import settings
-        from app.services.ai.deps import ai_service
         from app.services.ai.domains.llm.config import get_ai_config
 
         current_config = get_ai_config(settings)
@@ -53,7 +72,7 @@ async def check_ai_service_health() -> ComponentStatus:
             message = f"AI service ready - {current_config.provider.value} provider"
 
         # Get usage statistics (includes total cost) - only with database backend
-        usage_stats = await ai_service.get_usage_stats()
+        usage_totals = await ai_service.usage_totals()
 
         # Collect comprehensive metadata using FRESH config for provider/model
         metadata = {
@@ -75,19 +94,10 @@ async def check_ai_service_health() -> ComponentStatus:
             "persistence": "sqlite",
             "storage": "database (conversations persist across restarts)",
             # Usage tracking (requires database)
-            "total_cost": usage_stats.get("total_cost", 0.0),
-            "total_tokens": usage_stats.get("total_tokens", 0),
+            "total_cost": usage_totals.total_cost,
+            "total_tokens": usage_totals.total_tokens,
             "usage_tracking_available": True,
         }
-
-        # Web search (#173): provider, key present, today's queries. A
-        # cache hiccup must not make the AI service read as unhealthy.
-        from app.core.search import status as search_status
-
-        try:
-            metadata["search"] = await search_status()
-        except Exception as exc:
-            metadata["search"] = {"error": str(exc)}
 
         # Add dependency status
         metadata["dependencies"] = {
@@ -119,55 +129,47 @@ async def check_ai_service_health() -> ComponentStatus:
             # check_ollama_health() (component check). Here we only do a
             # lightweight availability check to avoid redundant timeout
             # costs.
+            ollama_url = settings.ollama_base_url_effective
+            # llama.cpp stands in for Ollama: no Ollama to probe beside it.
+            llamacpp = current_config.provider == AIProvider.LLAMACPP
+            models = None if llamacpp else await _ollama_models(ollama_url)
             if current_config.provider == AIProvider.OLLAMA:
-                try:
-                    from app.components.inference.ollama import OllamaClient
+                metadata["ollama_available"] = models is not None
+                metadata["ollama_base_url"] = ollama_url
+                if models is None:
+                    status = ComponentStatusType.WARNING
+                    message = (
+                        "AI service configured for Ollama but server not reachable"
+                    )
+            elif llamacpp:
+                # Only valid with inference[llamacpp], so its engine is here.
+                from app.components.inference import get_inference_engine
 
-                    ollama_url = settings.ollama_base_url_effective
-                    ollama_client = OllamaClient(base_url=ollama_url)
-                    ollama_available = await ollama_client.is_available()
-
-                    metadata["ollama_available"] = ollama_available
-                    metadata["ollama_base_url"] = ollama_url
-
-                    if not ollama_available:
-                        status = ComponentStatusType.WARNING
-                        message = (
-                            "AI service configured for Ollama but server not reachable"
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to check Ollama availability: {e}")
-                    metadata["ollama_error"] = str(e)
+                engine = get_inference_engine(AIProvider.LLAMACPP.value)
+                reachable = (await engine.get_server_status()).available
+                metadata["llamacpp_available"] = reachable
+                metadata["llamacpp_base_url"] = engine.base_url
+                if not reachable:
+                    status = ComponentStatusType.WARNING
+                    message = (
+                        "AI service configured for llama.cpp but server not reachable"
+                    )
             else:
-                # Auto-discovery: Check if Ollama is running even when
-                # not configured as provider. Uses the configured base
-                # URL (respects Docker vs local environment).
-                try:
-                    import httpx
-
-                    ollama_url = settings.ollama_base_url_effective
-                    discovery_url = f"{ollama_url}/api/tags"
-                    async with httpx.AsyncClient(timeout=2.0) as client:
-                        response = await client.get(discovery_url)
-                        if response.status_code == 200:
-                            data = response.json()
-                            models = data.get("models", [])
-                            metadata["ollama_detected"] = True
-                            metadata["ollama_detected_url"] = ollama_url
-                            metadata["ollama_detected_models_count"] = len(models)
-                            if models:
-                                # Show first 3 model names as preview
-                                model_names = [
-                                    m.get("name", "unknown") for m in models[:3]
-                                ]
-                                metadata["ollama_detected_models_preview"] = model_names
-                            logger.debug(
-                                "Ollama auto-discovered at "
-                                f"{ollama_url} with {len(models)} models"
-                            )
-                except Exception:
-                    # Ollama not running - that's fine, just skip
-                    metadata["ollama_detected"] = False
+                # Auto-discovery: Ollama running even when not configured
+                # as provider, at the configured base URL (Docker or local).
+                metadata["ollama_detected"] = models is not None
+                if models is not None:
+                    metadata["ollama_detected_url"] = ollama_url
+                    metadata["ollama_detected_models_count"] = len(models)
+                    if models:
+                        # Show first 3 model names as preview
+                        metadata["ollama_detected_models_preview"] = [
+                            m.get("name", "unknown") for m in models[:3]
+                        ]
+                    logger.debug(
+                        "Ollama auto-discovered at "
+                        f"{ollama_url} with {len(models)} models"
+                    )
 
         return ComponentStatus(
             name="ai",
@@ -191,3 +193,6 @@ async def check_ai_service_health() -> ComponentStatus:
                 "error_type": "health_check_failure",
             },
         )
+
+
+HEALTH = check_ai_service_health

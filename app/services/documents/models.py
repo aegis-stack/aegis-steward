@@ -20,6 +20,7 @@ from sqlmodel import Field, SQLModel
 
 from app.core.figures import FIGURES
 from app.core.schema import one_of
+from app.core.time import utcnow
 
 # What kind of paper this is. Coarse on purpose: a fixed taxonomy would
 # be the framework deciding what documents exist, which it should not.
@@ -91,18 +92,6 @@ def kind_check() -> str:
     but the migration is then the only place the change is written.
     """
     return one_of("kind", DOCUMENT_KINDS)
-
-
-def utcnow() -> datetime:
-    """Naive UTC, matching the timestamp columns across services.
-
-    A local-time timestamp reads differently depending on where the
-    process runs, which makes "received on the 27th" a question about
-    the server rather than about the document.
-    """
-    from datetime import UTC
-
-    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Document(SQLModel, table=True):

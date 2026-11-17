@@ -53,6 +53,11 @@ def format_cost(cost: float) -> str:
     return f"${cost:.4f}"
 
 
+def format_minutes(seconds: float) -> str | None:
+    """Seconds as minutes to a tenth (``12.5``); None for none."""
+    return f"{seconds / 60:,.1f}" if seconds else None
+
+
 def format_percentage(pct: float) -> str:
     """Format percentage with one decimal place (e.g., 90.5%)."""
     return f"{pct:.1f}%"
@@ -124,27 +129,6 @@ def payee_label(merchant: object, merchant_name: object, name: object) -> str:
     rename never took.
     """
     return str(merchant or merchant_name or name or "")
-
-
-def format_duration_ms(milliseconds: float | str | None) -> str:
-    """How long something took, for a person: ``0.8s``, ``13.4s``,
-    ``1m 03s``. Blank (or unreadable) stays blank.
-
-    Seconds rather than the raw milliseconds a timer hands you: nobody
-    reads 13411.9 as thirteen seconds, and the number that matters is
-    how long the wait felt. Task history hands the value over as Redis
-    stored it, a string.
-    """
-    if not milliseconds:
-        return ""
-    try:
-        seconds = float(milliseconds) / 1000
-    except ValueError:
-        return ""
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    minutes, rest = divmod(seconds, 60)
-    return f"{int(minutes)}m {rest:02.0f}s"
 
 
 def format_date_range(start: object, end: object) -> str:
@@ -236,7 +220,7 @@ def format_relative_time(
         if coarse:
             return _coarse_age(seconds)
         return dt.strftime(CLOCK)
-    except ValueError, TypeError, IndexError:
+    except (ValueError, TypeError, IndexError):
         return str(iso_str)
 
 
@@ -363,6 +347,24 @@ def format_schedule_human_readable(schedule: str) -> str:
     return schedule
 
 
+def format_duration_ms(duration_ms: int | float | str | None) -> str:
+    """Format milliseconds to human-readable duration (e.g., '1.2s', '3m 45s')."""
+    if not duration_ms:
+        return "\u2014"
+    try:
+        ms = float(duration_ms)
+        if ms < 1000:
+            return f"{ms:.0f}ms"
+        s = ms / 1000
+        if s < 60:
+            return f"{s:.1f}s"
+        m = int(s // 60)
+        s = s % 60
+        return f"{m}m {s:.0f}s"
+    except (ValueError, TypeError):
+        return "\u2014"
+
+
 def format_timestamp(iso_str: str | None) -> str:
     """Format ISO timestamp for display (HH:MM:SS)."""
     if not iso_str:
@@ -372,7 +374,7 @@ def format_timestamp(iso_str: str | None) -> str:
 
         dt = datetime.fromisoformat(iso_str)
         return dt.strftime("%H:%M:%S")
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return "\u2014"
 
 

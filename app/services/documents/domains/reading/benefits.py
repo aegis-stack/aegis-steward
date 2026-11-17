@@ -86,9 +86,10 @@ async def propose_benefit(
     no card - a stream that starts "at 67" for a household that never
     said when 67 is would start today.
     """
+    from app.services.change_queue import propose
     from app.services.documents.domains.reading.asked import already_asked, read_pages
     from app.services.documents.domains.reading.proposals import PROPOSED_BY
-    from app.services.finance.service import INCOME_KINDS, plan_row, propose
+    from app.services.finance.service import INCOME_KINDS, plan_row
 
     read = await read_pages(db, document_id)
     found = benefits(read)

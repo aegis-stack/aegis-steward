@@ -18,6 +18,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from app.components.backend.api.auth.router import login as api_login
 from app.components.backend.api.auth.router import register as api_register
 from app.components.backend.api.deps import login_rate_limit, register_rate_limit
+from app.components.backend.security import honeypot
 from app.components.web_frontend.assets import (
     APP_ICON,
     STATIC_DIR,
@@ -29,6 +30,9 @@ from app.components.web_frontend.rendering import templates, with_query
 from app.components.web_frontend.routes import overseer as overseer_routes
 from app.components.web_frontend.routes.partials import (
     overseer_ai as overseer_ai_partials,
+)
+from app.components.web_frontend.routes.partials import (
+    overseer_ai_chat as overseer_ai_chat_partials,
 )
 from app.components.web_frontend.routes.partials import (
     overseer_auth as overseer_auth_partials,
@@ -81,6 +85,7 @@ from app.components.web_frontend.routes.partials import (
 from app.core.audit import AuditEmitter, get_audit
 from app.core.config import settings
 from app.core.formatting import site_path
+from app.core.overseer_pages import include_partials
 from app.core.security import (
     SESSION_COOKIE,
     clear_refresh_cookie,
@@ -162,11 +167,13 @@ router.include_router(overseer_database_partials.router)
 router.include_router(overseer_documents_partials.router)
 router.include_router(overseer_comms_partials.router)
 router.include_router(overseer_ai_partials.router)
+router.include_router(overseer_ai_chat_partials.router)
 router.include_router(overseer_inference_partials.router)
 router.include_router(overseer_worker_partials.router)
 router.include_router(overseer_deployments_partials.router)
 router.include_router(overseer_errors_partials.router)
 router.include_router(overseer_code_partials.router)
+include_partials(router)
 router.include_router(overseer_routes.router)
 
 
@@ -252,6 +259,9 @@ async def register_submit(
     ``Depends`` sentinel and fails the moment the handler touches it.
     """
     redirect = RedirectResponse(url=site_path(next, "/overseer"), status_code=303)
+    if honeypot.tripped(await request.form(), form="register"):
+        # A bot: the redirect a real signup gets, and nothing behind it.
+        return redirect
     try:
         await api_register(
             request=request,

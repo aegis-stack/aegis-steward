@@ -21,6 +21,7 @@ from app.services.ai.models.llm import (
     LLMOrg,
     LLMPrice,
 )
+from app.services.ai.models.provider_names import LOCAL_PROVIDERS
 
 RowT = TypeVar("RowT", bound=SQLModel)
 
@@ -36,7 +37,7 @@ def llms_by_model_ids(
     """The catalog rows for these ids, in one read - keyed by model_id."""
     rows = session.exec(
         select(LargeLanguageModel).where(
-            LargeLanguageModel.model_id.in_(list(model_ids))
+            col(LargeLanguageModel.model_id).in_(model_ids)
         )
     ).all()
     return {row.model_id: row for row in rows}
@@ -75,19 +76,20 @@ def catalog_is_populated(session: Session) -> bool:
     return first is not None
 
 
-def ollama_models_present(session: Session) -> bool:
-    """Whether any locally served Ollama tag is in the catalog.
+def local_models_present(session: Session) -> bool:
+    """Whether any locally served model (Ollama's, llama.cpp's) is in the
+    catalog.
 
     The remote catalog never carries a local tag, and the picker's
     ``usable`` filter shows only vendors the install can call - with no
-    API keys, Ollama alone. A fresh Ollama stack therefore opened an
-    empty picker until someone knew to run ``llm sync --source ollama``.
+    API keys, the local engine alone. A fresh local stack therefore opened
+    an empty picker until someone knew to run ``llm sync --source local``.
     The startup hook syncs local tags when this says none are there.
     """
     first = session.exec(
         select(LargeLanguageModel.id)
         .join(LLMOrg, LargeLanguageModel.served_by_org_id == LLMOrg.id)
-        .where(LLMOrg.name == "ollama")
+        .where(col(LLMOrg.name).in_([p.value for p in LOCAL_PROVIDERS]))
         .limit(1)
     ).first()
     return first is not None

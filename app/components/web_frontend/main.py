@@ -4,39 +4,33 @@ Pages are served at ``/`` by the same webserver that hosts the API and the
 Flet dashboard at ``/dashboard``. The pieces live beside this module:
 ``assets.py`` (fingerprinted URLs, cache policy), ``filters.py`` (Jinja
 filters), ``rendering.py`` (the environment, ``render``, ``with_toast``),
-``nav.py`` (the section list). Routes live under ``routes/``.
+``nav.py`` (the section list). Route modules import from those: full-page
+handlers live in ``routes/pages.py``, fragment handlers in
+``routes/partials/``, each Steward section in its own ``routes/`` module.
 """
+
+import importlib.util
 
 from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 
+CHANGES = "app.components.web_frontend.routes.partials.changes"
+OVERSEER_CHAT = "app.components.web_frontend.routes.partials.overseer_ai_chat"
+SITE = "app.components.web_frontend.routes.site"
+MEETINGS = "app.components.web_frontend.routes.meetings"
+
 
 def create_web_frontend_app() -> APIRouter:
-    """Create the web frontend router: the root redirect, every section,
-    and Overseer. Each route is tagged ``overseer`` or ``web``, so route
-    lists group them apart from the API."""
+    """Create the web frontend router with page and partial routes.
+
+    None of them belong in the API's OpenAPI schema. Each is tagged
+    ``overseer`` or ``web``, so route lists group them apart from the API.
+    The root is ``pages.py``'s redirect to Overview: Steward has no
+    landing page, so the framework's ``routes/landing.py`` is not mounted.
+    """
     router = APIRouter()
 
     from app.components.web_frontend.routes.chat import router as chat_router
-    from app.components.web_frontend.routes.chat_cards import (
-        router as chat_cards_router,
-    )
-    from app.components.web_frontend.routes.chat_changes import (
-        router as chat_changes_router,
-    )
-    from app.components.web_frontend.routes.chat_live import router as chat_live_router
-    from app.components.web_frontend.routes.chat_live_relay import (
-        router as chat_live_relay_router,
-    )
-    from app.components.web_frontend.routes.chat_models import (
-        router as chat_models_router,
-    )
-    from app.components.web_frontend.routes.chat_speech import (
-        router as chat_speech_router,
-    )
-    from app.components.web_frontend.routes.chat_voices import (
-        router as chat_voices_router,
-    )
     from app.components.web_frontend.routes.contact_faces import (
         router as contact_faces_router,
     )
@@ -90,14 +84,37 @@ def create_web_frontend_app() -> APIRouter:
     router.include_router(documents_router)
     router.include_router(mail_router)
     router.include_router(icons_router)
-    router.include_router(chat_router)
-    router.include_router(chat_models_router)
-    router.include_router(chat_speech_router)
-    router.include_router(chat_live_router)
-    router.include_router(chat_live_relay_router)
-    router.include_router(chat_cards_router)
-    router.include_router(chat_changes_router)
-    router.include_router(chat_voices_router)
+    router.include_router(chat_router, include_in_schema=False)
+    # The change queue's approval cards (the signed-in user's, not the
+    # Overseer's alone), on the stacks that ship the queue.
+    if importlib.util.find_spec(CHANGES) is not None:
+        changes = importlib.import_module(CHANGES)
+        router.include_router(changes.router, include_in_schema=False)
+        # The cards wear their subject's face and open the page they cite
+        # in the document reader.
+        from app.components.web_frontend.routes.documents import reading_url
+        from app.components.web_frontend.routes.finance.change_marks import (
+            change_marks,
+        )
+
+        changes.face_provider(change_marks)
+        changes.document_reader = reading_url
+    # The Meetings page (an app page, each meeting its owner's), on the
+    # stacks with the meetings service.
+    if importlib.util.find_spec(MEETINGS) is not None:
+        meetings = importlib.import_module(MEETINGS)
+        router.include_router(meetings.router, include_in_schema=False)
+    # The Overseer chat's live call: a socket, outside the pages' gate,
+    # behind its own (routes/partials/overseer_ai_chat.py).
+    if importlib.util.find_spec(OVERSEER_CHAT) is not None:
+        sockets = importlib.import_module(OVERSEER_CHAT).sockets
+        if sockets is not None:
+            router.include_router(sockets)
+    # The project's own public site, when it has one (routes/site.py):
+    # last, so no route of its can stand in front of the framework's.
+    if importlib.util.find_spec(SITE) is not None:
+        site = importlib.import_module(SITE)
+        router.include_router(site.router, include_in_schema=False)
     for route in router.routes:
         if isinstance(route, APIRoute):
             route.tags = ["overseer" if "/overseer" in route.path else "web"]

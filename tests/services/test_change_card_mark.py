@@ -33,7 +33,9 @@ class TestWhatACardAboutPaperWears:
     async def test_the_file_mark_and_the_papers_name(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.components.backend.api.finance.changes import document_marks
+        from app.components.web_frontend.routes.finance.change_marks import (
+            document_marks,
+        )
 
         document = await _document(
             async_db_session, "2026-08-17.pdf", "application/pdf"
@@ -41,7 +43,7 @@ class TestWhatACardAboutPaperWears:
 
         marks = await document_marks(async_db_session, [document.id])
 
-        assert marks[document.id]["payee"] == "2026-08-17.pdf"
+        assert marks[document.id]["name"] == "2026-08-17.pdf"
         assert marks[document.id]["icon_url"].endswith("/pdf.svg")
 
     @pytest.mark.asyncio
@@ -50,7 +52,9 @@ class TestWhatACardAboutPaperWears:
     ) -> None:
         """A wrong mark is worse than a neutral one: it is read as a
         fact about the file."""
-        from app.components.backend.api.finance.changes import document_marks
+        from app.components.web_frontend.routes.finance.change_marks import (
+            document_marks,
+        )
 
         document = await _document(async_db_session, "mystery.xyz", None)
 
@@ -62,7 +66,9 @@ class TestWhatACardAboutPaperWears:
     async def test_a_document_that_is_gone_marks_nothing(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.components.backend.api.finance.changes import document_marks
+        from app.components.web_frontend.routes.finance.change_marks import (
+            document_marks,
+        )
 
         assert await document_marks(async_db_session, [999999]) == {}
 
@@ -70,6 +76,8 @@ class TestWhatACardAboutPaperWears:
     async def test_nothing_asked_for_is_no_query_at_all(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.components.backend.api.finance.changes import document_marks
+        from app.components.web_frontend.routes.finance.change_marks import (
+            document_marks,
+        )
 
         assert await document_marks(async_db_session, []) == {}

@@ -18,6 +18,7 @@ from ..models import (
     STTProvider,
     TranscriptionResult,
     TranscriptionSegment,
+    not_installed,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,9 +44,49 @@ class BaseSTTProvider(ABC):
         """
         pass
 
+    def _request(
+        self, audio: AudioInput, model: str, response_format: str
+    ) -> dict[str, Any]:
+        """The transcription request the hosted Whisper APIs both take: the
+        audio as a named file, and the language and spelling hint if set."""
+        audio_file = io.BytesIO(audio.content)
+        audio_file.name = f"audio{self._get_file_extension(audio.format)}"
+        params: dict[str, Any] = {
+            "model": model,
+            "file": audio_file,
+            "response_format": response_format,
+        }
+        if audio.language:
+            params["language"] = audio.language
+        if audio.prompt:
+            params["prompt"] = audio.prompt
+        return params
+
     def _get_file_extension(self, format: AudioFormat) -> str:
         """Get file extension for audio format."""
         return f".{format.value}"
+
+
+def _transcribed(
+    response: Any, audio: AudioInput, provider: STTProvider
+) -> TranscriptionResult:
+    """A hosted Whisper API's answer (OpenAI's shape, which Groq shares),
+    with its segments when it gave any."""
+    segments = [
+        TranscriptionSegment(
+            text=getattr(seg, "text", "").strip(),
+            start=getattr(seg, "start", 0.0),
+            end=getattr(seg, "end", 0.0),
+        )
+        for seg in getattr(response, "segments", None) or []
+    ]
+    return TranscriptionResult(
+        text=response.text.strip(),
+        language=getattr(response, "language", audio.language),
+        duration_seconds=getattr(response, "duration", None),
+        provider=provider,
+        segments=segments or None,
+    )
 
 
 class OpenAIWhisperProvider(BaseSTTProvider):
@@ -99,49 +140,11 @@ class OpenAIWhisperProvider(BaseSTTProvider):
         """Transcribe audio using OpenAI Whisper API."""
         client = self._get_client()
 
-        # Create file-like object from bytes
-        audio_file = io.BytesIO(audio.content)
-        audio_file.name = f"audio{self._get_file_extension(audio.format)}"
-
+        whisper = self.model.startswith("whisper")  # gpt-4o-*: json only
+        params = self._request(audio, self.model, "verbose_json" if whisper else "json")
         try:
-            # Build request parameters
-            params: dict[str, Any] = {
-                "model": self.model,
-                "file": audio_file,
-                # Segments and duration come only from whisper-1; the
-                # gpt-4o transcribe models reject verbose_json.
-                "response_format": (
-                    "verbose_json" if self.model.startswith("whisper") else "json"
-                ),
-            }
-
-            if audio.language:
-                params["language"] = audio.language
-            if audio.prompt:
-                params["prompt"] = audio.prompt
-
             response = await client.audio.transcriptions.create(**params)
-
-            # Parse segments if available
-            segments: list[TranscriptionSegment] | None = None
-            if hasattr(response, "segments") and response.segments:
-                segments = [
-                    TranscriptionSegment(
-                        text=getattr(seg, "text", "").strip(),
-                        start=getattr(seg, "start", 0.0),
-                        end=getattr(seg, "end", 0.0),
-                    )
-                    for seg in response.segments
-                ]
-
-            return TranscriptionResult(
-                text=response.text.strip(),
-                language=getattr(response, "language", audio.language),
-                duration_seconds=getattr(response, "duration", None),
-                provider=self.provider_type,
-                segments=segments,
-            )
-
+            return _transcribed(response, audio, self.provider_type)
         except Exception as e:
             logger.error(f"OpenAI Whisper transcription failed: {e}")
             raise RuntimeError(f"Transcription failed: {e}") from e
@@ -180,10 +183,7 @@ class WhisperLocalProvider(BaseSTTProvider):
                 import torch
                 from transformers import pipeline
             except ImportError as e:
-                raise RuntimeError(
-                    "Transformers not installed. Install with: "
-                    "uv add transformers torch"
-                ) from e
+                raise RuntimeError(not_installed(self.provider_type) or e) from e
 
             # Auto-detect device if not specified
             device = self.device
@@ -288,9 +288,7 @@ class FasterWhisperProvider(BaseSTTProvider):
             try:
                 from faster_whisper import WhisperModel
             except ImportError as e:
-                raise RuntimeError(
-                    "faster-whisper not installed. Install with: uv add faster-whisper"
-                ) from e
+                raise RuntimeError(not_installed(self.provider_type) or e) from e
 
             logger.info(f"Loading faster-whisper model {self.model_size}")
 
@@ -410,45 +408,10 @@ class GroqWhisperProvider(BaseSTTProvider):
         """Transcribe audio using Groq Whisper API."""
         client = self._get_client()
 
-        # Create file-like object from bytes
-        audio_file = io.BytesIO(audio.content)
-        audio_file.name = f"audio{self._get_file_extension(audio.format)}"
-
+        params = self._request(audio, self.model, "verbose_json")
         try:
-            # Build request parameters
-            params: dict[str, Any] = {
-                "model": self.model,
-                "file": audio_file,
-                "response_format": "verbose_json",
-            }
-
-            if audio.language:
-                params["language"] = audio.language
-            if audio.prompt:
-                params["prompt"] = audio.prompt
-
             response = await client.audio.transcriptions.create(**params)
-
-            # Parse segments if available
-            segments: list[TranscriptionSegment] | None = None
-            if hasattr(response, "segments") and response.segments:
-                segments = [
-                    TranscriptionSegment(
-                        text=getattr(seg, "text", "").strip(),
-                        start=getattr(seg, "start", 0.0),
-                        end=getattr(seg, "end", 0.0),
-                    )
-                    for seg in response.segments
-                ]
-
-            return TranscriptionResult(
-                text=response.text.strip(),
-                language=getattr(response, "language", audio.language),
-                duration_seconds=getattr(response, "duration", None),
-                provider=self.provider_type,
-                segments=segments,
-            )
-
+            return _transcribed(response, audio, self.provider_type)
         except Exception as e:
             logger.error(f"Groq Whisper transcription failed: {e}")
             raise RuntimeError(f"Transcription failed: {e}") from e
@@ -473,23 +436,22 @@ def get_stt_provider(
 
     Raises:
         ValueError: If provider type is not supported.
+        RuntimeError: If an in-process provider's packages are not installed.
     """
-    model = model or DEFAULT_STT_MODELS.get(provider)
+    if refused := not_installed(provider):
+        raise RuntimeError(refused)
+    model = model or DEFAULT_STT_MODELS[provider]
     if provider == STTProvider.OPENAI_WHISPER:
-        return OpenAIWhisperProvider(
-            api_key=api_key,
-            model=model,
-            **kwargs,
-        )
+        return OpenAIWhisperProvider(api_key=api_key, model=model, **kwargs)
     elif provider == STTProvider.WHISPER_LOCAL:
         return WhisperLocalProvider(model_name=model, **kwargs)
     elif provider == STTProvider.FASTER_WHISPER:
         return FasterWhisperProvider(model_size=model, **kwargs)
     elif provider == STTProvider.GROQ_WHISPER:
-        return GroqWhisperProvider(
-            api_key=api_key,
-            model=model,
-            **kwargs,
-        )
+        return GroqWhisperProvider(api_key=api_key, model=model, **kwargs)
+    elif provider == STTProvider.PARAKEET:
+        from .parakeet import ParakeetProvider  # it imports this module
+
+        return ParakeetProvider(model=model)
     else:
         raise ValueError(f"Unsupported STT provider: {provider}")

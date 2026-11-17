@@ -3,19 +3,24 @@
 Pure functions, shared by every surface that renders a conversation (the
 web chat page, the Flet panel): the fence balancer that keeps partial
 markdown from swallowing what follows an open code block, the trail
-labels for tool calls, the attachment gate and marker, and the footer
-line under a finished answer.
+labels for tool calls, the attachment gate and marker, a paste's marker,
+and the footer line under a finished answer.
 """
 
 from __future__ import annotations
 
 import ast
+from collections import Counter
+from collections.abc import Iterable
 import json
 import pprint
 import re
 from typing import Any
 
-from app.core.formatting import FREE, format_duration_ms
+from app.core.config import settings
+from app.core.formatting import counted
+from app.core.steps import doing
+from app.core.tools import card_tool_names, result_data
 
 # Rendered while text is still arriving; dropped from the final render.
 STREAM_CURSOR = "▌"
@@ -28,12 +33,12 @@ _IMAGE_MEDIA_TYPES = {
     "webp": "image/webp",
     "gif": "image/gif",
 }
-# Every image a turn may carry (what a model sees, what the documents
-# service reads off a page), and how large one may be.
+# Every image a turn may carry: what a model is shown. The one list: a
+# chat turn's attachments, a pasted image and a document read as a picture
+# all take these.
 IMAGE_TYPES = frozenset(_IMAGE_MEDIA_TYPES.values())
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
-# Files one turn may carry: the composer stops here and the request holds it.
-MAX_ATTACHMENTS = 6
+# The most one attached or pasted file may weigh.
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 
 def image_media_type(filename: str) -> str | None:
@@ -50,18 +55,6 @@ def image_media_type(filename: str) -> str | None:
 _ATTACHMENT_MARKER = re.compile(r"\n\n\[attached \d+ images?: [^\]\n]*\]$")
 
 
-# The service's stored marker for a lifted paste - the format written by
-# ``services/ai/domains/chat/pastes.marker``.
-_PASTE_MARKER = re.compile(r"\[pasted text #[0-9a-f]+[^\]]*\]")
-
-
-def strip_paste_markers(text: str) -> str:
-    """What the reader sees instead of a marker: nothing, because the
-    paste is drawn beside the message as a chip they can open. The
-    MODEL still gets the marker - it is how the text is asked for."""
-    return _PASTE_MARKER.sub("", text).strip()
-
-
 def strip_attachment_marker(text: str) -> str:
     """A replayed message must not carry its old attachment marker: the
     bytes are gone (they ride one turn only), so re-sending the marker
@@ -69,9 +62,42 @@ def strip_attachment_marker(text: str) -> str:
     return _ATTACHMENT_MARKER.sub("", text)
 
 
+# What stands in a message for a paste kept apart from it
+# (``services/ai/domains/chat/pastes``): written by ``paste_marker``, read
+# back by ``paste_ids``, taken out of what a reader sees by ``readable``.
+# The id is the whole hex run: what follows it starts with a non-hex
+# character, so the two never contend for one (an unclosed marker over a
+# long run of digits backtracked quadratically). The tail stops at either
+# bracket - a name's are swapped out (``paste_marker``) - so a message of
+# unclosed markers is not rescanned from each one's start.
+_PASTE_MARKER = re.compile(r"\[pasted text #([0-9a-f]+)(?:[^\]\[0-9a-f][^\]\[]*)?\]")
+
+
+def paste_marker(paste_id: str, title: str, chars: int) -> str:
+    """The line the model gets where a paste was: what it is and how to
+    read it, since a marker the agent cannot act on is a hole in the
+    conversation. A bracket in the name would end the marker early."""
+    name = title.replace("[", "(").replace("]", ")")
+    return (
+        f"[pasted text #{paste_id}: {name} - {paste_size(chars)}."
+        f' Read it with pasted("{paste_id}")]'
+    )
+
+
+def paste_size(chars: int) -> str:
+    """How big a paste is, as its marker and its chip say it."""
+    return counted(chars, "character")
+
+
+def paste_ids(text: str) -> list[str]:
+    """The pastes a message's markers name, in order."""
+    return _PASTE_MARKER.findall(text)
+
+
 def readable(content: str) -> str:
-    """A stored message as the reader gets it, on screen or aloud."""
-    return strip_paste_markers(strip_attachment_marker(content))
+    """A stored message as its reader gets it, on screen or aloud: no
+    attachment note, and no paste marker (the paste is a chip beside it)."""
+    return _PASTE_MARKER.sub("", strip_attachment_marker(content)).strip()
 
 
 def balance_fences(text: str) -> str:
@@ -111,9 +137,28 @@ def tool_label(name: str, args: str = "") -> str:
     return f"{name}({inner})"
 
 
-def script_line(code: str) -> str:
-    """What a trail shows of a script: its first line that is not a
-    comment, clipped; empty when it is all comments."""
+def shows_calls() -> bool:
+    """Whether a step's trail line is its call or what it is doing
+    (``AI_CHAT_SHOW_CALLS``). Read with a default: this module ships in
+    stacks without AI, whose settings have no such field."""
+    return bool(getattr(settings, "AI_CHAT_SHOW_CALLS", True))
+
+
+def script_of(args: Any) -> str | None:
+    """A code-mode call's script, from its arguments as a JSON string or
+    already parsed; None for any other call."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    code = args.get("code") if isinstance(args, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def first_code_line(code: str) -> str:
+    """A script's first line of code (no blank, no comment), clipped:
+    what the script was FOR, not the program."""
     for line in code.splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("#"):
@@ -121,14 +166,25 @@ def script_line(code: str) -> str:
     return ""
 
 
+def trail_label(name: str, args: Any) -> str:
+    """A call's trail line, live and stored alike: the call, or what it is
+    doing (``steps.doing``, read from the whole script while its first
+    comment is still there) where ``AI_CHAT_SHOW_CALLS`` is off, so a
+    viewer sees the agent's steps, not its code."""
+    script = script_of(args)
+    text = args if isinstance(args, str) else json.dumps(args, default=str)
+    if not shows_calls():
+        return doing(name, text if script is None else script)
+    if script is None:
+        return tool_label(name, text)
+    return f"{name}: {first_code_line(script)}".rstrip()
+
+
 def trace_label(entry: dict[str, Any]) -> str:
     """A persisted trace entry as its trail line (same look as live)."""
-    name = str(entry.get("tool", ""))
     code = entry.get("code")
-    if isinstance(code, str):
-        line = script_line(code)
-        return f"{name}: {line}" if line else f"{name}:"
-    return tool_label(name, str(entry.get("args", "") or ""))
+    args = {"code": code} if isinstance(code, str) else str(entry.get("args", "") or "")
+    return trail_label(str(entry.get("tool", "")), args)
 
 
 def _pretty(text: str) -> str:
@@ -196,34 +252,16 @@ def narration_note(text: str, limit: int = 100) -> str:
     return flat if len(flat) <= limit else flat[: limit - 3] + "..."
 
 
-def footer_line(meta: dict[str, Any], *, local: bool = False) -> str:
-    """One quiet attribution line for a finished assistant message.
-
-    ``local`` is passed in rather than read off the metadata here: which
-    providers run on this machine is an AI-service fact, and core does
-    not reach upward for it. Same shape as ``format_price``.
-    """
+def footer_line(meta: dict[str, Any]) -> str:
+    """One quiet attribution line for a finished assistant message."""
     parts: list[str] = []
     if meta.get("model"):
         parts.append(str(meta["model"]))
     if meta.get("gen_tps"):
         parts.append(f"{meta['gen_tps']} tps")
-    # Beside the rate, because they answer different questions: how fast
-    # it wrote, and how long you waited for it.
-    elapsed = format_duration_ms(meta.get("response_time_ms"))
-    if elapsed:
-        parts.append(elapsed)
-    # A local model is free and says so; a cloud one with no cost
-    # recorded says nothing, because a blank admits we do not know what
-    # the turn cost and a figure would be invented. Zero renders with
-    # its cents for the same reason it does in the picker: trailing
-    # zeros are what make it read as a price rather than a value that
-    # failed to load.
     cost = meta.get("cost")
     if cost:
         parts.append(f"${cost:.4f}")
-    elif local:
-        parts.append(FREE)
     return "  ·  ".join(parts)
 
 
@@ -256,3 +294,162 @@ def card_outcome(status: str, note: Any) -> str:
     if status == "rejected" and str(note or "").startswith(WITHDRAWN):
         return "withdrawn"
     return status
+
+
+def batch_outcome(statuses: Iterable[str]) -> str:
+    """A decided batch's one line, from its rows' ``card_outcome``s:
+    "2 approved, 1 rejected", in ``CARD_STATUS`` order."""
+    counts = Counter(statuses)
+    return ", ".join(
+        f"{counts[status]} {label.lower()}"
+        for status, (label, _tone) in CARD_STATUS.items()
+        if counts[status]
+    )
+
+
+def card_component(
+    tool: str, content: Any
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """The approval cards a queue tool's result names, compact and
+    parse-safe: a stored trace's ``component`` and a chat kit's
+    ``CardFrame`` both come from here.
+
+    A displayed result is clipped, and a large proposal batch truncates to
+    invalid JSON, so a card built by parsing it silently vanished. The card
+    needs only identity (the queue is read for the rows), so identity rides
+    here, under any cap. A ``pending`` listing carries one per card. A
+    card tool says so at registration (``register_tool(cards=)``).
+    """
+    if tool not in card_tool_names():
+        return None
+    if isinstance(content, str):
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            return None
+    else:
+        data = result_data(content)
+    if not isinstance(data, dict) or data.get("error"):
+        return None
+    if tool == "pending":
+        # The listing nominates what to draw (``draw``): only it knows
+        # whether the user asked to see a card. A trace kept before it
+        # did draws every card it listed, as it did then.
+        rows = data.get("draw")
+        if rows is None:
+            rows = (data.get("pending") or []) + (data.get("decided") or [])
+        return _pending_markers(rows) or None
+    return _identity_marker(data)
+
+
+def _pending_markers(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One marker per listed card, in listing order."""
+    identities = [
+        {
+            **card,
+            "count": card.get("rows"),
+            "pending_change_id": (card.get("pending_change_ids") or [None])[0],
+        }
+        for card in cards
+    ]
+    return [m for m in map(_identity_marker, identities) if m is not None]
+
+
+def _identity_marker(data: dict[str, Any]) -> dict[str, Any] | None:
+    if data.get("batch_id"):
+        return {
+            "kind": "pending_change_batch",
+            "batch_id": data["batch_id"],
+            "change_type": data.get("change_type"),
+            "title": data.get("title"),
+            "count": data.get("count"),
+        }
+    if data.get("pending_change_id"):
+        return {
+            "kind": "pending_change",
+            "pending_change_id": data["pending_change_id"],
+            "change_type": data.get("change_type"),
+            "title": data.get("title"),
+            "status": data.get("status", "pending"),
+        }
+    return None
+
+
+def as_markers(component: Any) -> list[dict[str, Any]]:
+    """A ``card_component`` (one marker or a listing's several) as a list."""
+    markers = component if isinstance(component, list) else [component]
+    return [m for m in markers if isinstance(m, dict) and m.get("kind")]
+
+
+def card_markers(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """The cards a stored trace entry carries: an approval card's marker
+    (``card_component``), and the cards a script drew beside it; for an
+    entry kept before markers, the card its clipped result names."""
+    found = as_markers(entry.get("component"))
+    tool, result = entry.get("tool"), entry.get("result")
+    if found or tool == "pending" or tool not in card_tool_names():
+        return found
+    if not isinstance(result, str):
+        return []
+    try:
+        data = json.loads(result)
+    except ValueError:
+        data = salvage_identity(result)
+    marker = _identity_marker(data) if isinstance(data, dict) else None
+    return [marker] if marker else []
+
+
+def salvage_identity(clipped: str) -> dict[str, Any] | None:
+    """A proposal's identity from its result clipped to invalid JSON: the
+    identity fields lead the result, so they survive the clip."""
+    fields: dict[str, Any] = {}
+    for key in ("batch_id", "change_type", "title", "status"):
+        if found := re.search(rf'"{key}":\s*"([^"]*)"', clipped):
+            fields[key] = found.group(1)
+    if found := re.search(r'"pending_change_id":\s*(\d+)', clipped):
+        fields["pending_change_id"] = int(found.group(1))
+    return fields if fields.get("batch_id") or fields.get("pending_change_id") else None
+
+
+# A reply's steps line (``steps_line``): what its turn DID, replayed with
+# the reply in later turns' history. The words alone do not carry the ids a
+# turn had in hand and the sandbox resets every turn, so "try again"
+# queried for them again. A call's arguments carry those ids, so they get
+# the most room; a script's whole entry is clipped, so lookups cannot crowd
+# a proposal after them out of the cap.
+_STEPS_CAP = 1_200
+_STEP_ARGS_CAP = 400
+_STEP_SCRIPT_CAP = 240
+_STEP_OUTPUT_CAP = 120
+_STEP_DISPATCH_CAP = 60
+
+
+def steps_line(trace: list[dict[str, Any]]) -> str:
+    """One capped line saying what each call of a turn did: a call with its
+    arguments, a script by the calls it dispatched (else its first line of
+    code) and what it printed, and the cards either one named."""
+    parts: list[str] = []
+    for entry in trace:
+        tool = str(entry.get("tool", "?"))
+        code = entry.get("code")
+        if isinstance(code, str):
+            called = ", ".join(
+                f"{n.get('tool')}({str(n.get('args') or '')[:_STEP_DISPATCH_CAP]})"
+                for n in entry.get("nested") or []
+            )
+            said = f"{tool}[{called or first_code_line(code)}]"
+            if printed := " ".join(trace_output(entry).split()):
+                said += f" -> {printed[:_STEP_OUTPUT_CAP]}"
+            said = said[:_STEP_SCRIPT_CAP]
+        else:
+            said = f"{tool}({str(entry.get('args') or '')[:_STEP_ARGS_CAP]})"
+        for marker in card_markers(entry):
+            card = (
+                marker.get("batch_id")
+                or marker.get("pending_change_id")
+                or marker.get("id")
+            )
+            if card:
+                said += f" -> card {card}"
+        parts.append(said)
+    return "; ".join(parts)[:_STEPS_CAP]

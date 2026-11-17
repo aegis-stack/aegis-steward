@@ -6,29 +6,36 @@ chat/stream entrypoints (above it): everything here turns resolved
 contexts + the agent row into something the framework can run.
 """
 
+from datetime import date
 from typing import Any
 
+from app.core.chat_transcript import steps_line
 from app.services.ai.domains.chat.agent_loader import AgentConfig, agent_capabilities
+from app.services.ai.domains.chat.code_mode import with_sandbox_rules
 from app.services.ai.domains.chat.prompts import (
-    DEFAULT_SYSTEM_PROMPT,
     build_system_prompt,
+    meant,
 )
-from app.services.ai.domains.chat.readings import format_readings
+from app.services.ai.domains.chat.readings import Reading, format_readings
+
+# Framework-agnostic: the system prompt is built the same way on both,
+# so what rode into the model is reportable on both.
 from app.services.ai.domains.chat.self_context import (
     Block,
     begin_turn_context,
     record_turn_context,
 )
-from app.services.ai.domains.chat.summary import summary_of
+from app.services.ai.domains.chat.summary import window
 from app.services.ai.domains.chat.tools import resolve_tools
+from app.services.ai.domains.llm.config import AIServiceConfig
 from app.services.ai.domains.llm.providers import get_agent
-from app.services.ai.models import Conversation, MessageRole
+from app.services.ai.models import Conversation, ConversationMessage, MessageRole
 from app.services.ai.service.contexts import ContextsMixin
-from app.services.ai.service.trace import steps_line
 
 # Conversation history carried into each model call, in characters
-# (~1.5k tokens). Newest messages first; the oldest drop when a thread
-# outgrows the budget - prefill cost is paid on EVERY call of a turn.
+# (~1.5k tokens). The oldest drop, a slab at a time (``_history_start``),
+# when a thread outgrows the budget - prefill cost is paid on EVERY call of
+# a turn.
 # The replayed-history budget scales with the ACTIVE model's context
 # window: a fixed budget sized for small local models is how a
 # long-context agent "forgets" an allocation it computed minutes ago,
@@ -38,8 +45,6 @@ _HISTORY_CONTEXT_FRACTION = 0.05
 HISTORY_CHAR_BUDGET_MIN = 6_000
 HISTORY_CHAR_BUDGET_DEFAULT = 24_000  # model not in the catalog
 HISTORY_CHAR_BUDGET_MAX = 60_000
-# How many of the newest replies replay their steps line (#242).
-_STEPS_REPLIES = 3
 
 
 def history_char_budget(context_window_tokens: int | None) -> int:
@@ -50,71 +55,167 @@ def history_char_budget(context_window_tokens: int | None) -> int:
     return max(HISTORY_CHAR_BUDGET_MIN, min(HISTORY_CHAR_BUDGET_MAX, chars))
 
 
+def _day_line(on: date) -> str:
+    """The line ahead of a day's first message in the history.
+
+    A stored answer is just text: a figure quoted weeks ago would reach the
+    model beside today's with equal standing, and the only way to prefer the
+    fresh one is to notice the contradiction. Under its day, the old numbers
+    read as true when written. Read from the messages alone, it never moves:
+    an answer dated against today changed every line of the day at midnight,
+    and the first turn after it read the whole history afresh.
+    """
+    return f"--- {on.isoformat()} ---"
+
+
+def _history_start(lengths: list[int], budget: int) -> int:
+    """The first message the replayed history keeps, given each message's
+    length, oldest first.
+
+    The cut lands only on a slab boundary: the first message past each
+    whole multiple of half the budget, counted from the conversation's
+    start, so a boundary never moves as the conversation grows. The cut is
+    the first boundary that sheds the excess, and it moves on only when the
+    history outgrows the budget past the next one. Between moves every turn
+    replays the start the last one did, so a prompt cache reuses it;
+    dropping one message a turn changed the start every turn. At least half
+    the budget, less one message, still replays after a cut.
+    """
+    excess = sum(lengths) - budget
+    if excess <= 0:
+        return 0
+    step = max(budget // 2, 1)
+    dropped, slab = 0, 0
+    for index, length in enumerate(lengths):
+        if dropped // step > slab:  # this message opens a new slab
+            slab = dropped // step
+            if dropped >= excess:
+                return index
+        dropped += length
+    return len(lengths)
+
+
+def history_lines(messages: list[ConversationMessage]) -> list[str]:
+    """The thread as history replays it, one line per message: who said it
+    and what, what a reply's turn did ahead of its words (``steps_line``),
+    and a day's first message under its day (``_day_line``). A message's
+    line never changes as the thread grows or the clock moves, so neither
+    does replayed history."""
+    lines: list[str] = []
+    day: date | None = None
+    for msg in messages:
+        if msg.role == MessageRole.USER:
+            line = f"User: {msg.content}"
+        elif msg.role == MessageRole.ASSISTANT:
+            said = f"Assistant: {msg.content}"
+            steps = steps_line(msg.metadata.get("tool_trace") or [])
+            line = f"Assistant steps: {steps}\n{said}" if steps else said
+        else:
+            continue
+        if (on := msg.timestamp.date()) != day:
+            day = on
+            line = f"{_day_line(on)}\n{line}"
+        lines.append(line)
+    return lines
+
+
 class PromptMixin(ContextsMixin):
     """Agent-config overlay and per-request prompt/runtime construction."""
 
     def _agent_persona(self, agent_config: AgentConfig | None) -> str | None:
-        """The persona override for this request, or None for the built-in.
-
-        ``DEFAULT_SYSTEM_PROMPT`` is the seeded marker meaning "use the
-        service's dynamic persona"; any other prompt text (an edited agent
-        row) is used verbatim as the persona base.
-        """
+        """The agent row's prompt, or None (no agent) for the default. A row
+        still holding ``LEGACY_SYSTEM_PROMPT`` gets the default it meant.
+        In code mode the sandbox's rules follow it, in the prompt's stable
+        head, as the chat-kit runtime has them."""
         if agent_config is None:
             return None
-        if agent_config.system_prompt == DEFAULT_SYSTEM_PROMPT:
-            return None
-        return agent_config.system_prompt
+        persona = meant(agent_config.system_prompt)
+        return with_sandbox_rules(persona, code_mode=agent_config.code_mode)
+
+    def _system_prompt_for(
+        self,
+        config: AIServiceConfig,
+        agent_config: AgentConfig | None,
+        *,
+        memory_context: str | None = None,
+        agent_modules_context: str | None = None,
+    ) -> str:
+        """The system prompt for one turn: persona plus every context block,
+        formatted for the model in force. Nothing live: what changes turn
+        to turn (``right_now``; with RAG, the code retrieved for the
+        question) rides the message, after the history and beside the
+        question, so a prompt cache (an engine's, a provider's) reuses
+        everything ahead of it. The same prompt on both frameworks; only the
+        runtime that receives it differs."""
+        persona = self._agent_persona(agent_config)
+        system_prompt = build_system_prompt(
+            current_model=config.model,
+            current_provider=config.provider.value,
+            persona=persona,
+            memory_context=memory_context,
+        )
+
+        # The agent row's context modules (e.g. the finance snapshot): the
+        # same briefing the chat_kit runtime injects via its provider.
+        if agent_modules_context:
+            system_prompt += f"\n\n{agent_modules_context}"
+
+        # What the ``context`` tool reports: sizes, never the text.
+        record_turn_context(
+            blocks=[
+                b
+                for b in (
+                    Block("persona", len(persona or "")),
+                    Block("saved memory", len(memory_context or "")),
+                    Block("briefings", len(agent_modules_context or "")),
+                )
+                if b.chars
+            ]
+        )
+
+        return system_prompt
 
     async def _prepare_agent_and_context(
         self,
         conversation: Conversation,
-        catalog_context: str | None = None,
         agent_config: AgentConfig | None = None,
         memory_context: str | None = None,
         agent_modules_context: str | None = None,
         history_budget: int | None = None,
         context_window: int | None = None,
-        readings: list[dict[str, Any]] | None = None,
+        readings: list[Reading] | None = None,
+        right_now: str | None = None,
     ) -> tuple[Any, str]:
         """
         Create agent for request and build conversation context.
 
         Args:
             conversation: The conversation to prepare context from
-
-            catalog_context: Optional LLM catalog context for model awareness
             agent_config: Resolved agent definition; supplies sampling
                 parameters, an optional model pin, and an optional persona
             context_window: The effective model's window, for the stamp
                 the ``context`` tool reports from
             readings: The user's recorded extractions, replayed ahead of
                 history
+            right_now: What this turn alone brings (``_build_turn``): what
+                is wrong across the app, and with RAG the code retrieved
+                for the question; it rides after the history, or None
 
         Returns:
             tuple[Any, str]: (agent instance, conversation context string)
         """
         # One stamp per turn, opened here because this is the one place
-        # both the streaming and non-streaming entrypoints pass through.
+        # every entrypoint passes through on its way to the model.
         begin_turn_context()
         record_turn_context(context_window=context_window)
 
-        # Build system prompt with project context and optional contexts
-        # Get fresh config for current model/provider
         config = self.config.for_agent(agent_config)
-
-        system_prompt_override = build_system_prompt(
-            catalog_context=catalog_context,
-            current_model=config.model,
-            current_provider=config.provider.value,
-            persona=self._agent_persona(agent_config),
+        system_prompt_override = self._system_prompt_for(
+            config,
+            agent_config,
             memory_context=memory_context,
+            agent_modules_context=agent_modules_context,
         )
-
-        # The agent row's memory modules (e.g. the finance snapshot): the
-        # same briefing the chat_kit runtime injects via its provider.
-        if agent_modules_context:
-            system_prompt_override += f"\n\n{agent_modules_context}"
 
         # Create agent for this request, carrying the agent row's grants:
         # its attached tools resolve through the registry, and a code_mode
@@ -122,9 +223,9 @@ class PromptMixin(ContextsMixin):
         # chat_kit path, so an agent behaves identically on both runtimes.
         tools: list[Any] = []
         capabilities: list[Any] = []
-
         if agent_config is not None:
             tools = resolve_tools(agent_config.tool_names)
+
             capabilities = agent_capabilities(agent_config)
 
         agent = await get_agent(
@@ -138,26 +239,18 @@ class PromptMixin(ContextsMixin):
 
         # Build conversation context for AI
         conversation_context = self._build_conversation_context(
-            conversation, history_budget=history_budget, readings=readings
+            conversation,
+            history_budget=history_budget,
+            readings=readings,
+            right_now=right_now,
         )
 
-        # Stamp the shape for the ``context`` tool: an agent asked what it
-        # can still see answers from this, not from a guess.
+        # Stamp the shape for the ``context`` tool: an agent asked what
+        # it can still see answers from this, not from a guess.
         record_turn_context(
             model=config.model,
             provider=config.provider.value,
-            blocks=[
-                b
-                for b in (
-                    Block("persona", len(self._agent_persona(agent_config) or "")),
-                    Block("saved memory", len(memory_context or "")),
-                    Block("model catalog", len(catalog_context or "")),
-                    Block("briefings", len(agent_modules_context or "")),
-                )
-                if b.chars
-            ],
             tools=list(agent_config.tool_names) if agent_config else [],
-            code_mode=bool(agent_config and agent_config.code_mode),
         )
 
         return agent, conversation_context
@@ -166,7 +259,8 @@ class PromptMixin(ContextsMixin):
         self,
         conversation: Conversation,
         history_budget: int | None = None,
-        readings: list[dict[str, Any]] | None = None,
+        readings: list[Reading] | None = None,
+        right_now: str | None = None,
     ) -> str:
         """
         Build conversation context for AI from message history.
@@ -184,82 +278,58 @@ class PromptMixin(ContextsMixin):
         # every turn, ahead of history - they are the durable record the
         # ephemeral attachment left behind, and they belong to the user
         # rather than to the thread they were read in.
-        readings_block = format_readings(readings)
-        prefix = f"{readings_block}\n\n" if readings_block else ""
+        # What this turn alone brings (``right_now``) rides after the
+        # history, beside the question (``_system_prompt_for``).
 
-        # Budget history by SIZE, newest first, rather than by message
-        # count: one agent's answers can run 1k+ tokens each, so "last 10
-        # messages" re-prefills an essay collection on every model call.
-        # Oldest messages drop first; the current message always rides.
+        # Budget history by SIZE rather than by message count: one agent's
+        # answers can run 1k+ tokens each, so "last 10 messages" re-prefills
+        # an essay collection on every model call. Oldest messages drop
+        # first, a slab at a time (``_history_start``); the current message
+        # always rides.
         budget = history_budget or HISTORY_CHAR_BUDGET_DEFAULT
-        context_parts: list[str] = []
-        used = 0
-        dropped = 0
-        replies = 0
         # The last message is set aside only when it is the question being
-        # asked now. A live call opens on a thread that ends with HER last
-        # reply, and setting that aside - then returning nothing, since it
-        # was not a question - started every call with no history at all
-        # ("I can't see our previous conversation", 2026-09-30).
+        # asked now. A live call opens on a thread that ends with the
+        # assistant's last reply, and setting that aside - then returning
+        # nothing, since it was not a question - started every call with
+        # no history at all.
         latest_message = conversation.get_last_message()
         asking = latest_message is not None and latest_message.role == MessageRole.USER
         earlier = conversation.messages[:-1] if asking else conversation.messages
-        first_kept = len(earlier)
-        for index in range(len(earlier) - 1, -1, -1):
-            msg = earlier[index]
-            if msg.role == MessageRole.USER:
-                line = f"User: {msg.content}"
-            elif msg.role == MessageRole.ASSISTANT:
-                line = f"Assistant: {msg.content}"
-            else:
-                continue
-            if dropped or used + len(line) > budget:
-                # Keep counting once the budget is spent: how much the
-                # agent LOST is the number worth being able to report.
-                dropped += 1
-                continue
-            context_parts.insert(0, line)
-            used += len(line) + 1
-            first_kept = index
-            # What the newest replies DID, ahead of what they said: the
-            # sandbox resets every turn and the text alone does not carry
-            # the ids, so "try again" re-queried for them (#242). Only
-            # where it fits after the words - what was said outranks it.
-            if msg.role == MessageRole.ASSISTANT and replies < _STEPS_REPLIES:
-                replies += 1
-                steps = steps_line(msg.metadata.get("tool_trace") or [])
-                did = f"Assistant steps: {steps}"
-                if steps and used + len(did) <= budget:
-                    context_parts.insert(0, did)
-                    used += len(did) + 1
+        lines = history_lines(earlier)
+        lengths = [len(line) + 1 for line in lines]
+        start = _history_start(lengths, budget)
+        # What fell out is not gone: its running summary rides ahead of the
+        # turns still in view, and moves only with the cut (``window``).
+        seen = window(conversation, lengths, start, budget)
+        start, earlier_summary = seen.start, seen.summary
 
+        # How much the agent LOST is the number worth being able to report.
         record_turn_context(
-            history_chars=used,
+            history_chars=sum(lengths[start:]),
             history_budget=budget,
-            messages_kept=len(context_parts),
-            messages_dropped=dropped,
-            first_kept=first_kept if dropped else 0,
+            messages_kept=len(lines) - start,
+            messages_dropped=start,
+            summary_chars=len(earlier_summary),
+            fold_to=seen.fold_to,
         )
-        # What fell out is not gone: its running summary rides ahead of
-        # the turns still in view (#295), folded in after turns like this.
-        earlier_summary = summary_of(conversation)["text"] if dropped else ""
-        if earlier_summary:
-            prefix += (
-                "Earlier in this conversation, before the turns below "
-                f"(a running summary):\n{earlier_summary}\n\n"
-            )
 
-        # Add the current user message
-        if asking and latest_message is not None:
-            if context_parts:
-                # Include conversation history + current message
-                return (
-                    prefix
-                    + "\n".join(context_parts)
-                    + f"\n\nUser: {latest_message.content}"
-                )
-            else:
-                # First message in conversation
-                return prefix + latest_message.content
-        # Nothing being asked (a call opening): the thread so far.
-        return prefix + "\n".join(context_parts)
+        history = "\n".join(lines[start:])
+        # A call opening on the thread so far has no question: the history
+        # alone. The first message of a thread goes as it was typed.
+        question = (
+            (f"User: {latest_message.content}" if history else latest_message.content)
+            if asking and latest_message is not None
+            else None
+        )
+        return "\n\n".join(
+            filter(
+                None,
+                (
+                    format_readings(readings),
+                    earlier_summary,
+                    history,
+                    right_now,
+                    question,
+                ),
+            )
+        )

@@ -4,7 +4,7 @@ import pytest
 from sqlmodel import Session, col, select
 
 from app.core.seed import missing_rows, seed_rows
-from app.services.ai.models.agents import MemoryModule
+from app.services.ai.models.agents import ContextModule
 
 
 def _module(slug: str, text: str = "static") -> dict[str, object]:
@@ -12,42 +12,42 @@ def _module(slug: str, text: str = "static") -> dict[str, object]:
 
 
 def test_inserts_only_the_missing_rows(db_session: Session) -> None:
-    db_session.add(MemoryModule(**_module("present")))
+    db_session.add(ContextModule(**_module("present")))
     db_session.commit()
 
     added = seed_rows(
-        db_session, MemoryModule, "slug", [_module("present"), _module("new")]
+        db_session, ContextModule, "slug", [_module("present"), _module("new")]
     )
     db_session.commit()
 
     assert added == 1
-    slugs = sorted(db_session.exec(select(MemoryModule.slug)).all())
+    slugs = sorted(db_session.exec(select(ContextModule.slug)).all())
     assert slugs == ["new", "present"]
 
 
 @pytest.mark.queryspy(threshold=3)  # seeds, then reads the rows back
 def test_an_edited_row_survives_reseeding(db_session: Session) -> None:
-    seed_rows(db_session, MemoryModule, "slug", [_module("kept", "seeded")])
+    seed_rows(db_session, ContextModule, "slug", [_module("kept", "seeded")])
     db_session.commit()
-    row = db_session.exec(select(MemoryModule)).one()
+    row = db_session.exec(select(ContextModule)).one()
     row.prompt_content = "edited"
     db_session.add(row)
     db_session.commit()
 
-    assert seed_rows(db_session, MemoryModule, "slug", [_module("kept")]) == 0
-    assert db_session.exec(select(MemoryModule)).one().prompt_content == "edited"
+    assert seed_rows(db_session, ContextModule, "slug", [_module("kept")]) == 0
+    assert db_session.exec(select(ContextModule)).one().prompt_content == "edited"
 
 
 def test_where_scopes_what_counts_as_present(db_session: Session) -> None:
-    db_session.add(MemoryModule(**_module("inactive"), is_active=False))
+    db_session.add(ContextModule(**_module("inactive"), is_active=False))
     db_session.commit()
 
     scoped = missing_rows(
         db_session,
-        MemoryModule,
+        ContextModule,
         "slug",
         [_module("inactive")],
-        col(MemoryModule.is_active).is_(True),
+        col(ContextModule.is_active).is_(True),
     )
 
     assert [row["slug"] for row in scoped] == ["inactive"]
@@ -56,10 +56,10 @@ def test_where_scopes_what_counts_as_present(db_session: Session) -> None:
 def test_a_key_of_several_columns_is_matched_whole(db_session: Session) -> None:
     """A link row's pair: present only as the pair, and a pair asked for
     twice is one row."""
-    db_session.add(MemoryModule(**_module("a")))
+    db_session.add(ContextModule(**_module("a")))
     db_session.commit()
     rows = [_module("a"), {**_module("a"), "name": "b"}, {**_module("a"), "name": "b"}]
 
-    missing = missing_rows(db_session, MemoryModule, ("slug", "name"), rows)
+    missing = missing_rows(db_session, ContextModule, ("slug", "name"), rows)
 
     assert [(row["slug"], row["name"]) for row in missing] == [("a", "b")]

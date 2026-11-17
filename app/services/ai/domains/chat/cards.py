@@ -1,21 +1,20 @@
-"""Cards Illiana draws in a reply (#266): the kinds, and the turn's stage.
+"""Cards the assistant draws in a reply: the kinds, and the turn's stage.
 
-Ported from Pulse, where she draws charts under her answers. Three rules
-the shape enforces:
+Three rules the shape enforces:
 
 **The model authors data, never layout.** A ``kind`` selects a template
 the app wrote; no classes, colours or column order travel in a payload.
 
-**A kind owns a schema, checked when she draws.** Rows come out of a
-code-mode script, which can produce any shape; a payload that does not
-fit is a tool error she can fix on her next step, never a stored row that
-fails in a template later.
+**A kind owns a schema, checked when the card is drawn.** Rows come out of
+a code-mode script, which can produce any shape; a payload that does not
+fit is a tool error the assistant can fix on its next step, never a stored
+row that fails in a template later.
 
-**The tool runs inside the sandbox.** ``draw_card`` is a read, not native:
-that would take it out of ``run_code`` and make her retype every row she
-just computed. The cards a script draws are staged for the turn (like
-``record_reading``) and ride that script's trace entry as markers
-(``attach_cards``), which is what the settled message draws from.
+**The tool runs inside the sandbox.** ``draw_card`` stays inside
+``run_code``, so the rows a script just computed go straight into the card
+rather than being typed out again. The cards a script draws are staged for
+the turn and ride that script's trace entry as markers (``attach_cards``),
+which is what the settled message draws from.
 """
 
 from __future__ import annotations
@@ -25,29 +24,30 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import re
-from types import UnionType
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError, computed_field, model_validator
 
+from app.core.chat_transcript import card_markers
 from app.core.db import get_async_session
-from app.core.tools import register_tool
+from app.core.figures import FIGURES, misfit, shape_of
+from app.core.tools import Refused, current_conversation_id, register_tool
 from app.services.ai.domains.chat import path_card
-from app.services.ai.domains.chat.user_memory import current_conversation_id
 from app.services.ai.models.chat_card import ChatCard
 
 MARKER = "chat_card"
-# Money is integer cents, like every finance tool; a count is a count.
-Unit = Literal["money", "count"]
+# Money is integer cents.
+Unit = Literal["money", "count", "percent"]
 
 
 @dataclass(frozen=True, slots=True)
 class CardKind:
     """One drawable kind. ``rows`` is its own ceiling (0: nothing to cap):
     a ranking and a two-figure comparison want very different limits. A
-    kind the server fills in (``prepare``: a path staged from the source
+    kind the server fills in (``prepare``: a path staged from the request
     she names) keeps what it made, not what she asked: ``stored``, the
-    shape a drawn card is kept in and read back through."""
+    shape a drawn card is kept in and read back through (its schema, for
+    the rest)."""
 
     name: str
     schema: type[BaseModel]
@@ -83,12 +83,15 @@ def lookup(name: str) -> CardKind | None:
 
 
 # --- the kinds ---------------------------------------------------------------
-# Ten rows is a top-10, which is what a card in a conversation is for; the
-# long tail belongs in the prose, or on the page that already lists it.
+# Ten rows is a top-10, which is what a ranking in a conversation is for;
+# the long tail belongs in the prose, or on the page that already lists it.
 ROW_CAP = 10
+# A table is read through, not ranked (every component and its status runs
+# past ten); fifty still stops short of a dump.
+TABLE_ROWS = 50
 
 
-# A figure as she writes one: "$1,800.00", "-25%", "(12.5)", "3k".
+# A figure as the assistant writes one: "$1,800.00", "-25%", "(12.5)", "3k".
 FIGURE = re.compile(r"^[(+-]?[$€£¥]?[(+-]?\d[\d,]*(\.\d+)?[%kKmM]?\)?$")
 BLANK = {"", "-", "—", "n/a"}
 
@@ -99,7 +102,8 @@ class TableRow(BaseModel):
 
 
 class TablePayload(BaseModel):
-    """``columns`` names EVERY column, the label one first."""
+    """``columns`` names EVERY column, the label one first (named only the
+    values, the label column is left unnamed)."""
 
     title: str
     columns: list[str]
@@ -107,6 +111,8 @@ class TablePayload(BaseModel):
 
     @model_validator(mode="after")
     def _columns_match_rows(self) -> TablePayload:
+        if self.rows and all(len(r.values) == len(self.columns) for r in self.rows):
+            self.columns = ["", *self.columns]
         if len(self.columns) < 2:
             raise ValueError("columns: the label column, then one per value")
         wanted = len(self.columns) - 1
@@ -140,6 +146,13 @@ def _figure(value: str | int | float) -> bool:
     return not isinstance(value, str) or bool(FIGURE.match(value.strip()))
 
 
+def _something(values: list[float]) -> None:
+    """A chart of nothing is said in words, not drawn: an idle worker's
+    task counts, all 0."""
+    if values and all(value == 0 for value in values):
+        raise ValueError("every value is 0, nothing to chart. Say it in words instead")
+
+
 class BarRow(BaseModel):
     label: str
     value: float
@@ -153,6 +166,11 @@ class BarPayload(BaseModel):
     unit: Unit = "money"
     rows: list[BarRow]
 
+    @model_validator(mode="after")
+    def _drawn(self) -> BarPayload:
+        _something([row.value for row in self.rows])
+        return self
+
 
 class PiePayload(BaseModel):
     """Parts of a whole: each row a slice, drawn like the Overview's
@@ -163,6 +181,11 @@ class PiePayload(BaseModel):
     unit: Unit = "money"
     rows: list[BarRow]
 
+    @model_validator(mode="after")
+    def _drawn(self) -> PiePayload:
+        _something([row.value for row in self.rows])
+        return self
+
 
 # The chart palette has eight colours; a ninth slice would repeat one.
 SLICE_CAP = 8
@@ -170,7 +193,7 @@ SLICE_CAP = 8
 
 class ComparePayload(BaseModel):
     """A before and an after. No change field: the card works it out, so
-    she is never asked for arithmetic nobody checks."""
+    the assistant is never asked for arithmetic nobody checks."""
 
     title: str
     measure: str
@@ -179,6 +202,11 @@ class ComparePayload(BaseModel):
     before: float
     after_label: str
     after: float
+
+    @model_validator(mode="after")
+    def _drawn(self) -> ComparePayload:
+        _something([self.before, self.after])
+        return self
 
 
 class TrendPoint(BaseModel):
@@ -194,8 +222,13 @@ class TrendPayload(BaseModel):
     unit: Unit = "money"
     rows: list[TrendPoint]
 
+    @model_validator(mode="after")
+    def _drawn(self) -> TrendPayload:
+        _something([row.value for row in self.rows])
+        return self
 
-register_kind("table", TablePayload, rows=ROW_CAP)
+
+register_kind("table", TablePayload, rows=TABLE_ROWS)
 register_kind("bar", BarPayload, rows=ROW_CAP)
 register_kind("pie", PiePayload, rows=SLICE_CAP)
 register_kind("compare", ComparePayload, rows=0)
@@ -209,31 +242,6 @@ register_kind(
 )
 
 
-def shape_of(schema: type[BaseModel], depth: int = 0) -> str:
-    """A schema as the object literal that satisfies it."""
-    fields = [
-        f"{name}: {_type_name(info.annotation, depth)}"
-        for name, info in schema.model_fields.items()
-    ]
-    return "{" + ", ".join(fields) + "}"
-
-
-def _type_name(annotation: Any, depth: int) -> str:
-    origin = get_origin(annotation)
-    if origin is list:
-        (inner,) = get_args(annotation)
-        return f"[{_type_name(inner, depth + 1)}, ...]"
-    if origin in (Union, UnionType):
-        return "|".join(_type_name(arg, depth) for arg in get_args(annotation))
-    if origin is Literal:
-        return "|".join(str(arg) for arg in get_args(annotation))
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return shape_of(annotation, depth + 1) if depth < 2 else annotation.__name__
-    if annotation is type(None):
-        return "null"
-    return getattr(annotation, "__name__", str(annotation))
-
-
 def kinds_help() -> str:
     """Every kind and its payload, derived from the schemas: a hand-kept
     list is one a new kind silently falls out of."""
@@ -245,26 +253,19 @@ def kinds_help() -> str:
     return "\n".join(lines)
 
 
+def last_drawn(trace: list[dict[str, Any]]) -> str | None:
+    """The card a reply drew (its id, from the markers on its steps): one
+    per answer, so a redraw replaces the card before it."""
+    drawn = [m for e in trace for m in card_markers(e) if m["kind"] == MARKER]
+    return drawn[-1]["id"] if drawn else None
+
+
 async def stored_card(card_id: str) -> ChatCard | None:
     """A drawn card by id, read in a session of its own that is closed on
     return: SQLite sessions here BEGIN IMMEDIATE, so a caller holding one
     open while it checks the conversation locked against itself."""
     async with get_async_session() as session:
         return await session.get(ChatCard, card_id)
-
-
-async def kept_card(card_id: str) -> tuple[ChatCard, CardKind, BaseModel] | None:
-    """A drawn card read through the shape its kind keeps (its defaults
-    filled in), or None: gone, of a kind no longer drawn, or stored in a
-    shape an old version wrote. The caller checks whose it is."""
-    row = await stored_card(card_id)
-    kind = lookup(row.kind) if row else None
-    if row is None or kind is None:
-        return None
-    try:
-        return row, kind, kind.stored.model_validate(row.payload)
-    except ValidationError:
-        return None
 
 
 # --- the turn ----------------------------------------------------------------
@@ -286,80 +287,100 @@ def card_stage() -> Iterator[list[dict[str, Any]]]:
         _staged.reset(token)
 
 
-def markers_of(entry: dict[str, Any]) -> list[dict[str, Any]]:
-    """The component markers a trace entry holds: one stored bare (an
-    approval card's), or a list (cards drawn beside it)."""
-    held = entry.get("component")
-    items = held if isinstance(held, list) else [held] if held else []
-    return [m for m in items if isinstance(m, dict)]
-
-
-def attach_cards(trace: list[dict[str, Any]], drawn: list[dict[str, Any]]) -> None:
+def attach_cards(entry: dict[str, Any], drawn: list[dict[str, Any]]) -> None:
     """Move the cards drawn so far onto the trace entry that just finished
-    (the ``run_code`` that drew them), emptying ``drawn``."""
-    if not drawn or not trace:
+    (``record_tool_result``'s: the ``run_code`` that drew them), emptying
+    ``drawn``."""
+    if not drawn:
         return
-    entry = trace[-1]
-    entry["component"] = [*markers_of(entry), *drawn]
+    entry["component"] = [*card_markers(entry), *drawn]
     drawn.clear()
 
 
-async def draw_card(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Draw a card under your answer. Compute the data first, then call this
-    from your script with the kind and the data - it displays what you give
-    it and computes nothing itself.
+class Drawn(BaseModel):
+    """A card drawn under the answer."""
 
-    Pass data only: layout and colours belong to the kind. Money is integer
-    cents (unit "money", the default); use unit "count" for anything else.
-    Keep a card to what it shows and say the rest in prose - a card is a
-    top-10, not a dump - and say what it shows in your answer too, so the
-    reply still reads to someone who cannot see it. One card per answer:
+    model_config = FIGURES
+
+    kind: str
+    id: str
+
+
+async def draw_card(kind: str, payload: dict[str, Any]) -> Drawn | Refused:
+    """Draw a card under your answer. Asked for a table, chart or graph,
+    draw it here: a table typed into your answer is not a card. Asked for
+    a kind (a table, a pie), draw that kind. Otherwise the numbers your
+    answer rests on choose for you, whatever the subject:
+        two figures to hold against each other -> compare
+        one measure across many dates -> trend
+        three or more, ranked -> bar
+        parts of a whole -> pie
+        rows each carrying several values -> table
+        one figure, or none -> no card, just say it
+        a flow on the map -> path: a request's replay (request_id), a
+          route's code path (route: what its code can do, never run;
+          also what a route touches, what happens when someone signs
+          up, pays, uploads: its route) or,
+          for a flow neither shows, its stops (node ids from ontology, in
+          order: the server joins them along the map's own lines and
+          refuses a stop none reaches)
+        how a part or a table is wired, what it connects to, what uses
+          it, what breaks if it fails -> path with its node (its id, a
+          table's object:<name> too: what the ontology joins it to, on
+          the map)
+        call these a flow, a replay, a code path or its wiring, never a
+          "path card"; a diagram of parts is this card, never arrows
+          typed in your answer. Name its parts as the map titles them
+          (Server, Authentication, Cache): each one you name lights on
+          the card as it is read or heard
+
+    Compute the data first, then call this with the kind and the data
+    (from your script, in code mode) - it displays what you give it and
+    computes nothing itself.
+
+    Pass data only: layout and colours belong to the kind. A unit is "money"
+    (integer cents), "percent" (0 to 100: "86.1" for 86.1%) or "count";
+    leave it out for the app's default.
+    Keep a card within its kind's rows (below) and say the rest in prose.
+    Your answer says what the card means, not its rows again, and still
+    reads to someone who cannot see it: never a line standing in for it
+    ("[diagram]", "the card shows its connections"). One card per answer:
     drawing again replaces the one before, so fix a card by redrawing it.
 
-    How the app is wired is a path card, never arrows typed in your
-    answer: how a part or a table connects, what uses it, what breaks if
-    it fails -> path with its node (an ontology id); a request's replay ->
-    request_id; what a route's code can do -> route ("METHOD /path"); a
-    flow neither shows -> stops (node ids in order, joined along the map's
-    own lines). Call it a flow, a replay, a code path or its wiring.
-
-    Returns {'kind', 'id'}, or {'error'} saying what to fix.
+    Answers its 'kind' and 'id', or an 'error' saying what to fix. An error drew
+    nothing: fix what it says and call again before you answer, never
+    answer as if the card were there.
 
     Kinds, and the payload each takes:
     """
     staged = _staged.get()
     conversation_id = current_conversation_id.get()
     if staged is None or not conversation_id:
-        return {"error": "No conversation turn is active; nothing was drawn."}
+        return Refused(error="No conversation turn is active; nothing was drawn.")
     declared = lookup((kind or "").strip())
     if declared is None:
         offered = ", ".join(kind_names())
-        return {"error": f"Unknown card kind {kind!r}. Available kinds: {offered}."}
+        return Refused(error=f"Unknown card kind {kind!r}. Available kinds: {offered}.")
     try:
         data = declared.schema.model_validate(payload)
     except ValidationError as exc:
-        # Every fault at once, and the shape that fits: one at a time is
-        # how a wrong guess becomes four round trips.
-        faults = "; ".join(
-            f"{'.'.join(str(p) for p in err.get('loc', ())) or 'payload'} "
-            f"{err.get('msg', 'is invalid')}"
-            for err in exc.errors()[:4]
-        )
-        return {
-            "error": f"{declared.name} card: {faults}. "
-            f"It takes {shape_of(declared.schema)}."
-        }
+        return Refused(error=f"{declared.name} card: {misfit(exc, declared.schema)}")
     held = len(getattr(data, "rows", None) or [])
+    if declared.rows and not held:
+        return Refused(
+            error=f"{declared.name} card has no rows. Draw it from what "
+            "the lookup returned, in the same script, after it returns."
+        )
     if declared.rows and held > declared.rows:
-        return {
-            "error": f"{declared.name} card takes at most {declared.rows} rows, "
+        return Refused(
+            error=f"{declared.name} card takes at most {declared.rows} rows, "
             f"got {held}. Narrow it and say the rest in prose."
-        }
+        )
     if declared.prepare is not None:
         try:
             data = await declared.prepare(data)
         except ValueError as exc:
-            return {"error": f"{declared.name} card: {exc}"}
+            return Refused(error=f"{declared.name} card: {exc}")
     card = ChatCard(
         conversation_id=conversation_id,
         kind=declared.name,
@@ -368,7 +389,7 @@ async def draw_card(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     async with get_async_session() as session:
         session.add(card)
     staged.append({"kind": MARKER, "id": card.id})
-    return {"kind": declared.name, "id": card.id}
+    return Drawn(kind=declared.name, id=card.id)
 
 
 # The model reads the docstring as the tool's description; appended at
@@ -378,7 +399,9 @@ draw_card.__doc__ = (draw_card.__doc__ or "") + kinds_help()
 register_tool(
     "draw_card",
     draw_card,
-    description="Draw a chart, ranking, comparison, table or the app's wiring under the answer",
+    description="Draw a chart, ranking, comparison or table under the answer",
+    # It shows what a script computed and changes nothing.
     effect="read",
     replace=True,
+    doing="Drawing it",
 )

@@ -279,13 +279,13 @@ class TestTheMessageIsALetter:
 
 
 async def _cards(db: AsyncSession) -> list[Any]:
-    from app.services.finance.models.changes import FinancePendingChange
+    from app.services.change_queue import PendingChange
 
     return list(
         (
             await db.exec(
-                select(FinancePendingChange).where(
-                    FinancePendingChange.change_type == "contact.create"
+                select(PendingChange).where(
+                    PendingChange.change_type == "contact.create"
                 )
             )
         ).all()
@@ -381,7 +381,7 @@ class TestAStrangerIsOfferedAsAContact:
         """The letterhead reader proposed this address off a PDF and the
         card is still waiting. Mail offering a second one is asking the
         same question twice - it does not matter who asked first."""
-        from app.services.finance.domains.writes.queue import propose
+        from app.services.change_queue import propose
 
         await propose(
             async_db_session,
@@ -392,6 +392,7 @@ class TestAStrangerIsOfferedAsAContact:
                 "email": "of-service@of.optum.com",
             },
             proposed_by_agent="steward",
+            owner_user_id=None,
         )
         data = eml_bytes(message(sender="of-service@of.optum.com"))
         await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
@@ -449,8 +450,8 @@ class TestPaperIsFiledUnderTheSender:
     async def test_approving_a_strangers_card_adopts_what_they_sent(
         self, async_db_session: AsyncSession, open_session: Any, dispatched: list[int]
     ) -> None:
+        from app.services.change_queue import approve
         from app.services.documents.service import DocumentService
-        from app.services.finance.domains.writes.queue import approve
         from app.services.matters.models.core import party_tag
 
         data = eml_bytes(
@@ -464,7 +465,7 @@ class TestPaperIsFiledUnderTheSender:
         assert row.party_id is None
         [card] = await _cards(async_db_session)
 
-        done = await approve(async_db_session, int(card.id))
+        done = await approve(async_db_session, int(card.id), owner_user_id=None)
         party_id = int(done.result["party_id"])
 
         await async_db_session.refresh(row)

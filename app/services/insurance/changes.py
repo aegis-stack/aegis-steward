@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.schema import known
-from app.services.finance.schemas import ChangeDisplayRow
+from app.services.change_queue import ChangeDisplayRow
 from app.services.insurance.models import CLAIM_STATUSES, POLICY_KINDS
 from app.services.matters.service import PartyService
 

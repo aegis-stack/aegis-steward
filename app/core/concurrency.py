@@ -1,7 +1,8 @@
 """Running independent work concurrently, with a ceiling (``fanout``),
 CPU work off the event loop (``cpu_bound``), work not waited for
-(``background``), and a stream that ends as the server starts shutting
-down (``until_closing``).
+(``background``), a stream that ends as the server starts shutting
+down (``until_closing``), and one whose silences are named
+(``announce_waiting``).
 
 The slow thing in this stack is rarely the server and rarely the event
 loop. It is a ``for`` loop over items that do not depend on each other,
@@ -34,9 +35,15 @@ from collections.abc import (
     Iterable,
     Sequence,
 )
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 import contextlib
+import contextvars
+from dataclasses import dataclass
+import multiprocessing
 import signal
 import threading
+import time
 from types import FrameType
 from typing import NamedTuple, TypeVar
 import weakref
@@ -82,7 +89,7 @@ async def fanout(
 
     ``fn`` must be a coroutine function. Wrap blocking I/O in
     ``asyncio.to_thread`` and CPU work in ``cpu_bound`` at the call site,
-    where it is obvious that a thread is involved.
+    where it is obvious that a thread or a process is involved.
     """
     if limit < 1:
         raise ValueError(f"limit must be at least 1, got {limit}")
@@ -103,34 +110,54 @@ async def fanout(
     return list(await asyncio.gather(*(guarded(item) for item in listed)))
 
 
-# One gate per event loop (an asyncio.Semaphore belongs to the loop that
-# first waits on it, and tests run several).
-_cpu_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
-    weakref.WeakKeyDictionary()
-)
-
-
-def _cpu_gate() -> asyncio.Semaphore:
-    loop = asyncio.get_running_loop()
-    gate = _cpu_gates.get(loop)
-    if gate is None:
-        gate = _cpu_gates[loop] = asyncio.Semaphore(1)
-    return gate
+# One process per worker process, made on first use, so a process that
+# forks (dramatiq, uvicorn workers) makes its own after the fork. Spawned,
+# never forked: before 3.14 Linux forks by default, unsafe from a process
+# already running threads.
+_cpu_pool: ProcessPoolExecutor | None = None
 
 
 async def cpu_bound(fn: Callable[..., R], *args: object) -> R:
-    """Run CPU-bound ``fn(*args)`` in a thread, one at a time per process.
+    """Run CPU-bound ``fn(*args)`` in a process of its own, one at a time.
 
     A coroutine doing CPU work never awaits, so it holds the event loop
     until it finishes, and everything else on the loop waits: a worker's
     other tasks, its claim keep-alive, its heartbeat and its runtime
-    report. In a thread the loop stays free; the gate keeps the CPU work
-    itself to one at a time, which is all the GIL runs anyway.
+    report. A thread is not enough: pure Python work in it shares the
+    loop's GIL, so every await on the loop waits out the switch interval
+    (a Redis call goes from a fraction of a millisecond to ten or more),
+    which starved arq's poll loop until its health key lapsed. ``fn`` and
+    ``args`` are pickled across, so ``fn`` is a module-level function.
     """
-    # ponytail: a cancelled caller (a job timeout) frees the gate while its
-    # thread runs on; hold the gate until the thread ends if timeouts pile up.
-    async with _cpu_gate():
-        return await asyncio.to_thread(fn, *args)
+    # ponytail: a cancelled caller leaves its piece running in the process,
+    # and later calls wait behind it; terminate the process and drop the
+    # pool on CancelledError if abandoned work starts to hold calls up.
+    global _cpu_pool
+    if _cpu_pool is None:
+        _cpu_pool = ProcessPoolExecutor(
+            1, mp_context=multiprocessing.get_context("spawn")
+        )
+    try:
+        return await asyncio.get_running_loop().run_in_executor(_cpu_pool, fn, *args)
+    except BrokenProcessPool:
+        _cpu_pool = None  # its process died (OOM): the next call makes a new one
+        raise
+
+
+def once(build: Callable[[], R]) -> Callable[[], R]:
+    """``build``'s result, built once a process. ``functools.cache`` lets
+    two threads that ask before the first build ends each run it; here the
+    second waits on that build and takes its result."""
+    lock = threading.Lock()
+    built: list[R] = []
+
+    def result() -> R:
+        with lock:
+            if not built:
+                built.append(build())
+            return built[0]
+
+    return result
 
 
 # Work in flight that no one waits for, held so none is collected first.
@@ -233,3 +260,79 @@ async def until_closing(events: AsyncIterator[T]) -> AsyncIterator[T]:
                 await step
         if isinstance(events, AsyncGenerator):
             await events.aclose()
+
+
+# A stream gone quiet, named (``announce_waiting``). Between a chat stream's
+# first frame and its first token nothing is sent, so a local model loading
+# for forty seconds looked exactly like a hang. Not a heartbeat (one ticks
+# regardless, and a stream that is answering has nothing to explain): this
+# is silence, named, only while it lasts. The SSE event a caller sends for
+# one is ``waiting``.
+# Long enough that an answering stream never trips it, short enough that
+# a stalled one is named before someone decides the app is broken.
+QUIET_SECONDS = 2.0
+
+
+@dataclass(frozen=True)
+class Waiting:
+    """``seconds`` of silence since the last item (not since the stream
+    opened: a pause mid-answer reports its own length), and why, when the
+    caller's explainer could say."""
+
+    seconds: int
+    reason: str | None = None
+
+
+async def announce_waiting(
+    source: AsyncIterator[T],
+    *,
+    every: float = QUIET_SECONDS,
+    explain: Callable[[], Coroutine[object, object, str | None]] | None = None,
+) -> AsyncIterator[T | Waiting]:
+    """Pass ``source`` through, yielding a ``Waiting`` every ``every``
+    seconds it is quiet. What the source raises is raised here.
+
+    ``explain`` is asked once per quiet stretch, in the source's own
+    context (so it reads what the source has set by then, the turn's
+    model), and one that fails is no reason: a missing reason must never
+    turn a slow answer into a failed one.
+
+    Each step runs as a task, so a timeout ends the wait and not the step;
+    every step shares one context, so a ContextVar the source sets while
+    producing one item can be reset while producing a later one. Closed
+    early (Stop, a closed tab), the step in flight is cancelled with it.
+    """
+    stepping = source.__aiter__()
+
+    async def step() -> T:
+        return await stepping.__anext__()
+
+    context = contextvars.copy_context()
+    loop = asyncio.get_running_loop()
+    since = time.monotonic()
+    pending: asyncio.Task[T] | None = None
+    try:
+        while True:
+            pending = loop.create_task(step(), context=context)
+            reason: str | None = None
+            asked = False
+            while True:
+                try:
+                    item = await asyncio.wait_for(asyncio.shield(pending), every)
+                except TimeoutError:
+                    if explain is not None and not asked:
+                        asked = True
+                        try:
+                            reason = await loop.create_task(explain(), context=context)
+                        except Exception:  # noqa: BLE001 - see the docstring
+                            reason = None
+                    yield Waiting(seconds=int(time.monotonic() - since), reason=reason)
+                    continue
+                except StopAsyncIteration:
+                    return
+                break
+            since = time.monotonic()
+            yield item
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()

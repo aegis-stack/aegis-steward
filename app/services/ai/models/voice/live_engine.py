@@ -1,10 +1,10 @@
-"""What a live call can run on, as rows the app changes (#273).
+"""What a live call can run on, as rows the app changes.
 
-An engine is how she uses a catalog model on a call, the way an agent is
-how she uses one in chat: the model itself (its name, its maker, its
-price) is the catalog's row (``llm_id``), and only what is ours lives
-here - how it connects, its instructions and reply cap, and whether it
-is offered. The defaults are seeded at startup when missing and never
+An engine is how the assistant uses a catalog model on a call, the way an
+agent is how it uses one in chat: the model itself (its name, its maker,
+its price) is the catalog's row (``llm_id``), and only what is the app's
+lives here - its instructions and reply cap, and whether it is offered.
+Every engine runs on the one call path (``voice/realtime_calls.py``). The defaults are seeded at startup when missing and never
 overwrite an edit.
 """
 
@@ -22,21 +22,18 @@ KEY_LENGTH = 48
 
 
 class LiveEngine(SQLModel, table=True):
-    """How a live call runs on a catalog model: its connection, instructions
-    and reply cap, and whether it is offered."""
+    """How the assistant uses a catalog model on a live call."""
 
     __tablename__ = "live_engine"
 
     id: int | None = Field(default=None, primary_key=True)
     key: str = Field(unique=True, index=True, max_length=KEY_LENGTH)
     llm_id: int = Field(foreign_key="large_language_model.id", index=True)
-    # "gpt_live" (our GPT-Live path) or "realtime" (a Pydantic AI model).
-    transport: str = Field(max_length=16)
     # A line on what it is like; and what does not work yet, if anything.
     note: str = ""
     warning: str | None = None
-    # Its own instructions: GPT-Live's persona, or a realtime model's
-    # live-call section ahead of her voice agent's prompt.
+    # Its own instructions: the live-call section ahead of the voice
+    # agent's prompt.
     instructions: str | None = None
     # A hard cap on one spoken reply, where the engine takes one.
     max_output_tokens: int | None = Field(default=None, ge=1)

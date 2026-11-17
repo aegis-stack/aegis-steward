@@ -1,10 +1,10 @@
 """The Overseer AI page's Agents and Memory sections.
 
 Agents: the agent registry, each agent's definition edited in the drawer
-(persona, sampling, model pin, active). Grants (tools, memory modules) are
+(persona, sampling, model pin, active). Grants (tools, context modules) are
 shown, not edited: the registry keeps them out of its editable fields.
 
-Memory: the memory modules an agent opts into, edited in the drawer beside
+Memory: the context modules an agent opts into, edited in the drawer beside
 a preview of what the module renders right now (the only way to tell a
 working fetcher from a silently empty one), and the facts saved about the
 user, corrected and forgotten.
@@ -15,15 +15,18 @@ registries exist only with a persistence backend.
 
 from typing import Any
 
-from app.core.db import release_lock
-from app.services.ai.domains.llm.picker import display_title, group_models
-
+from . import chat_models
 from .overseer_ai_common import PARTIALS, section_url
 from .rendering import drawer_state, form_number, status_cell
-from .routes import chat_models
 
 AGENT_PARAM = "agent"
 MODULE_PARAM = "module"
+# A module's sources (``module_sources``), as the Memory tab names them.
+_SOURCE_LABELS = {
+    "static": "Static text",
+    "subject": "Text per subject",
+    "fetcher": "Fetcher: {fetch_function}",
+}
 
 
 def agents_url(**query: str | None) -> str:
@@ -36,7 +39,7 @@ def agent_drawer_url(slug: str) -> str:
 
 async def agent_rows(db: Any) -> list[dict[str, Any]]:
     """Every agent in the registry, as the admin surfaces serialize it."""
-    from app.services.ai.domains.chat.agent_registry import list_agents, serialize_agent
+    from app.services.ai.service import list_agents, serialize_agent
 
     return [serialize_agent(a) for a in await list_agents(session=db)]
 
@@ -62,7 +65,7 @@ def _row(agent: dict[str, Any]) -> dict[str, Any]:
         "model": agent.get("model_id") or "Default",
         "state": _active(agent),
         "tools": len(agent.get("tools") or []),
-        "modules": len(agent.get("memory_modules") or []),
+        "modules": len(agent.get("context_modules") or []),
     }
 
 
@@ -78,43 +81,21 @@ async def agent_context(db: Any, slug: str) -> dict[str, Any] | None:
     agent = await agent_row(db, slug)
     if agent is None:
         return None
-    # The catalog reads on its own connection: never behind this request's.
-    await release_lock(db)
     return {
         "agent": agent,
         "save_url": f"{PARTIALS}/agents/{slug}",
-        "model_choices": await model_choices(agent.get("model_id")),
+        "model_choices": await chat_models.model_choices(db, agent.get("model_id")),
         "grants": [
             ("Tools", ", ".join(agent.get("tools") or []) or None),
-            ("Memory modules", ", ".join(agent.get("memory_modules") or []) or None),
+            ("Context modules", ", ".join(agent.get("context_modules") or []) or None),
             (
                 "Knowledge bases",
                 ", ".join(map(str, agent.get("knowledge_base_ids") or [])) or None,
             ),
             ("Code mode", "On" if agent.get("code_mode") else None),
+            ("Extends", agent.get("extends")),
         ],
     }
-
-
-async def model_choices(current: str | None) -> list[dict[str, Any]]:
-    """The models an agent can run on, grouped by vendor as the chat's
-    picker groups them (``routes.chat_models.catalog``); its own model kept, first,
-    when the catalog no longer lists it, so saving does not drop it."""
-    models = await chat_models.catalog("chat")
-    groups = [
-        {
-            "label": vendor,
-            "options": [
-                {"id": m["model_id"], "name": display_title(m, under_vendor=vendor)}
-                for m in rows
-            ],
-        }
-        for vendor, rows in group_models(models)
-    ]
-    if current and all(m["model_id"] != current for m in models):
-        unlisted = {"id": current, "name": f"{current} (not in the catalog)"}
-        groups.insert(0, {"label": "Chosen", "options": [unlisted]})
-    return groups
 
 
 def parse_agent_form(form: dict[str, str]) -> dict[str, Any]:
@@ -139,14 +120,11 @@ def memory_url(**query: str | None) -> str:
 
 
 async def module_rows(db: Any) -> list[dict[str, Any]]:
-    """Every memory module, active or not, in render order."""
-    from app.services.ai.domains.chat.memory_modules import (
-        list_memory_modules,
-        serialize_memory_module,
-    )
+    """Every context module, active or not, in render order."""
+    from app.services.ai.service import list_context_modules, serialize_context_module
 
-    modules = await list_memory_modules(db, active_only=False)
-    return [serialize_memory_module(m) for m in modules]
+    modules = await list_context_modules(db, active_only=False)
+    return [serialize_context_module(m) for m in modules]
 
 
 async def module_row(db: Any, slug: str) -> dict[str, Any] | None:
@@ -155,20 +133,16 @@ async def module_row(db: Any, slug: str) -> dict[str, Any] | None:
 
 async def render_preview(db: Any, slug: str) -> str | None:
     """What the module hands an agent now, rendered by the real renderer."""
-    from app.services.ai.domains.chat.module_context import render_memory_modules
-    from app.services.ai.domains.chat.user_memory import DEFAULT_MEMORY_USER_ID
+    from app.services.ai.service import DEFAULT_MEMORY_USER_ID, render_context_modules
 
-    return await render_memory_modules(
+    return await render_context_modules(
         [slug], user_id=DEFAULT_MEMORY_USER_ID, session=db
     )
 
 
-async def fact_rows(db: Any) -> list[dict[str, Any]]:
+async def fact_rows(db: Any) -> list[Any]:
     """The facts saved about the user, each with the index that addresses it."""
-    from app.services.ai.domains.chat.user_memory import (
-        DEFAULT_MEMORY_USER_ID,
-        list_user_facts,
-    )
+    from app.services.ai.service import DEFAULT_MEMORY_USER_ID, list_user_facts
 
     return await list_user_facts(DEFAULT_MEMORY_USER_ID, session=db)
 
@@ -187,9 +161,9 @@ async def memory_context(db: Any, query: Any) -> dict[str, Any]:
             {
                 "name": {"label": m["name"], "url": memory_url(module=m["slug"])},
                 "category": m.get("category"),
-                "source": f"Fetcher: {m['fetch_function']}"
-                if m.get("fetch_function")
-                else "Static text",
+                "source": " + ".join(
+                    _SOURCE_LABELS[s].format(**m) for s in m["sources"]
+                ),
                 "priority": m.get("priority"),
                 "tokens": m.get("token_estimate"),
                 "state": _active(m),
@@ -198,12 +172,12 @@ async def memory_context(db: Any, query: Any) -> dict[str, Any]:
         ],
         "facts": [
             {
-                "fact": f["fact"],
-                "category": f.get("category"),
-                "saved": format_relative_time(f.get("saved_at")),
-                "edit": hx_dialog(f"{PARTIALS}/facts/{f['index']}/edit", "data-write"),
+                "fact": f.fact,
+                "category": f.category,
+                "saved": format_relative_time(f.saved_at),
+                "edit": hx_dialog(f"{PARTIALS}/facts/{f.index}/edit", "data-write"),
                 "forget": hx_dialog(
-                    f"{PARTIALS}/facts/{f['index']}/confirm-forget", "data-write"
+                    f"{PARTIALS}/facts/{f.index}/confirm-forget", "data-write"
                 ),
             }
             for f in await fact_rows(db)

@@ -5,16 +5,11 @@ Provides a high-level interface for transcription with provider abstraction,
 configuration management, and optional caching.
 """
 
-from datetime import UTC, datetime
 import logging
 import time
 from typing import Any
 
-from ..models import (
-    AudioInput,
-    STTProvider,
-    TranscriptionResult,
-)
+from ..models import AudioInput, STTProvider, TranscriptionResult
 from .config import STTConfig, get_stt_config
 from .providers import BaseSTTProvider, get_stt_provider
 
@@ -36,7 +31,7 @@ class STTService:
         stt = STTService(settings)
 
         # Or with explicit configuration
-        stt = STTService(provider=STTProvider.OPENAI_WHISPER, model=DEFAULT_STT_MODEL)
+        stt = STTService(provider=STTProvider.OPENAI_WHISPER, model="whisper-1")
 
         # Transcribe audio
         audio = AudioInput(content=audio_bytes, format="wav")
@@ -64,6 +59,7 @@ class STTService:
         self._settings = settings
         self._explicit_api_key = api_key
         self._provider_instance: BaseSTTProvider | None = None
+        self._provider_key: str | None = None
 
         # Build config from settings or explicit values
         if provider or model:
@@ -94,22 +90,24 @@ class STTService:
         """Get the configured model name/size (with provider default fallback)."""
         return self._config.get_model()
 
-    def _get_api_key(self) -> str | None:
+    async def _get_api_key(self) -> str | None:
         """Get API key for the current provider."""
         if self._explicit_api_key:
             return self._explicit_api_key
 
         if self._settings:
-            return self._config.get_api_key(self._settings)
+            return await self._config.get_api_key(self._settings)
 
         return None
 
-    def _get_provider(self) -> BaseSTTProvider:
-        """Get or create the STT provider instance."""
-        if self._provider_instance is None:
+    async def _get_provider(self) -> BaseSTTProvider:
+        """Get or create the STT provider instance; rebuilt when the
+        key changes, so one saved while the app runs takes effect."""
+        api_key = await self._get_api_key()
+        if self._provider_instance is None or api_key != self._provider_key:
+            self._provider_key = api_key
             provider_type = self.provider_type
             model = self.model
-            api_key = self._get_api_key()
 
             logger.info(f"Initializing STT provider: {provider_type.value}")
 
@@ -146,7 +144,7 @@ class STTService:
         Raises:
             RuntimeError: If transcription fails.
         """
-        provider = self._get_provider()
+        provider = await self._get_provider()
 
         logger.debug(
             f"Transcribing audio ({len(audio.content)} bytes, "
@@ -176,10 +174,7 @@ class STTService:
         finally:
             latency_ms = int((time.perf_counter() - start_time) * 1000)
             await self._record_usage(
-                input_bytes=len(audio.content),
                 input_duration_seconds=audio.duration_seconds,
-                output_characters=len(result.text) if result else None,
-                detected_language=result.language if result else None,
                 latency_ms=latency_ms,
                 user_id=user_id,
                 success=success,
@@ -193,34 +188,34 @@ class STTService:
         """
         self._provider_instance = None
 
-    def validate(self) -> list[str]:
+    async def validate(self) -> list[str]:
         """Validate the STT configuration.
 
         Returns:
             List of validation error messages (empty if valid).
         """
         if self._settings:
-            return self._config.validation_errors(self._settings)
+            return await self._config.validation_errors(self._settings)
         return []
 
-    def is_available(self) -> bool:
+    async def is_available(self) -> bool:
         """Check if the configured STT provider is available.
 
         Returns:
             True if the provider is properly configured and available.
         """
         if self._settings:
-            return self._config.is_available(self._settings)
+            return await self._config.is_available(self._settings)
         # Without settings, assume available (will fail at runtime if not)
         return True
 
-    def get_status(self) -> dict[str, Any]:
+    async def get_status(self) -> dict[str, Any]:
         """Get STT service status information.
 
         Returns:
             Dictionary with provider type, model, availability, and validation info.
         """
-        errors = self.validate()
+        errors = await self.validate()
         return {
             "provider": self.provider_type.value,
             "model": self.model,
@@ -233,76 +228,31 @@ class STTService:
 
     async def _record_usage(
         self,
-        input_bytes: int,
         input_duration_seconds: float | None,
-        output_characters: int | None,
-        detected_language: str | None,
         latency_ms: int,
         user_id: str | None,
         success: bool,
         error_message: str | None,
     ) -> None:
-        """Record STT usage to database.
-
-        Args:
-            input_bytes: Size of input audio in bytes.
-            input_duration_seconds: Duration of input audio.
-            output_characters: Length of transcribed text.
-            detected_language: Detected or specified language.
-            latency_ms: Request latency in milliseconds.
-            user_id: Optional user identifier.
-            success: Whether transcription succeeded.
-            error_message: Error message if transcription failed.
-        """
+        """The transcription's row in the usage ledger, priced by the second
+        at the catalog's rate. Never fails the request."""
         try:
-            from app.core.db import get_async_session
             from app.services.ai.domains.spend import recording as usage_recording
-            from app.services.ai.models.voice.usage import STTUsage
         except ImportError:
-            # A project generated without a database has no stt_usage table
-            # (and no app.core.db at all). The recording call stays in the
-            # transcription path so the code is one shape everywhere; there is
-            # simply nowhere to write, and a warning per request would be
-            # worse than silence.
+            # A project generated without a database has no ledger (and no
+            # app.core.db at all). The recording call stays in the path so
+            # the code is one shape everywhere; there is simply nowhere to
+            # write, and a warning per request would be worse than silence.
             return
-
-        # Priced by the second at the catalog's rate, and written to the
-        # usage ledger beside every other model cost (#270).
-        cost = await usage_recording.speech_cost(
-            self.model, input_seconds=input_duration_seconds
+        await usage_recording.record_speech(
+            usage_recording.STT_ACTION,
+            self.model,
+            cost=await usage_recording.speech_cost(
+                self.model, input_seconds=input_duration_seconds
+            ),
+            seconds=input_duration_seconds,
+            duration_ms=latency_ms,
+            user_id=user_id,
+            success=success,
+            error_message=error_message,
         )
-        try:
-            async with get_async_session() as session:
-                usage = STTUsage(
-                    provider=self.provider_type.value,
-                    model=self.model,
-                    user_id=user_id,
-                    timestamp=datetime.now(UTC),
-                    input_duration_seconds=input_duration_seconds,
-                    input_bytes=input_bytes,
-                    output_characters=output_characters,
-                    detected_language=detected_language,
-                    latency_ms=latency_ms,
-                    total_cost=cost,
-                    success=success,
-                    error_message=error_message,
-                )
-                session.add(usage)
-            await usage_recording.record_speech(
-                "stt",
-                self.model,
-                cost=cost,
-                seconds=input_duration_seconds,
-                user_id=user_id,
-                success=success,
-                error_message=error_message,
-            )
-
-            logger.debug(
-                f"STT usage recorded: {input_bytes} bytes, "
-                f"{latency_ms}ms, success={success}"
-            )
-
-        except Exception as e:
-            # Don't fail the request if usage tracking fails
-            logger.warning(f"Failed to record STT usage: {e}")

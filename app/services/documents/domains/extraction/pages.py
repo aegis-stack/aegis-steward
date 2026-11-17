@@ -16,23 +16,38 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from typing import Any, TypeVar
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.chat_transcript import IMAGE_TYPES
+from app.core.concurrency import fanout
 from app.core.db import release_lock
 from app.core.log import logger
 from app.core.storage import get_storage
+from app.core.time import utcnow
 from app.services.documents.domains.extraction import ocr
 from app.services.documents.domains.extraction.pdf import PNG_MEDIA_TYPE, PdfPages
-from app.services.documents.models import Document, DocumentPage, utcnow
+from app.services.documents.models import Document, DocumentPage
 from app.services.documents.queries import document_by_id, pages_for
 
 # Reads one page image and returns (text, model name). None when the
 # stack has no vision model to offer.
 VisionReader = Callable[[bytes, str], Awaitable[tuple[str, str]]]
 Progress = Callable[[int, int], None]
+Answer = TypeVar("Answer")
+
+# PDFium is not thread-safe, and rendering a page is real CPU: every call
+# into it runs on this one thread, so none holds up the event loop and no
+# two overlap.
+_PDFIUM = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdfium")
+
+
+async def _pdfium(call: Callable[..., Answer], *args: Any) -> Answer:
+    """``call(*args)`` on PDFium's thread."""
+    return await asyncio.get_running_loop().run_in_executor(_PDFIUM, call, *args)
 
 
 # ponytail: a scanned PDF often carries a junk text layer of a few glyphs
@@ -40,6 +55,15 @@ Progress = Callable[[int, int], None]
 # real scans slip through as text; lower it if short pages get sent to
 # the model needlessly.
 MIN_TEXT_CHARS = 10
+
+# How many pages are read at once. Deliberately below ``fanout``'s own
+# default: a page can spawn a Tesseract subprocess AND a model call, so
+# this is simultaneously a cap on local processes and on requests to a
+# provider that rate-limits. Four keeps a 100-page scan from looking
+# like an attack while still hiding most of the waiting.
+# ponytail: a module constant, not a setting, because core/config.py is
+# at its size ceiling; promote it when that file is split.
+PAGE_CONCURRENCY = 4
 
 NO_VISION = "No vision model is available to read a page without a text layer."
 
@@ -115,9 +139,9 @@ async def _extract_pdf(
     force: bool,
     progress: Progress | None,
 ) -> None:
-    pdf = PdfPages(data)
+    pdf = await _pdfium(PdfPages, data)
     try:
-        total = len(pdf)
+        total = await _pdfium(len, pdf)
         if document.page_count != total:
             document.page_count = total
             db.add(document)
@@ -129,37 +153,77 @@ async def _extract_pdf(
                 read=reading,
                 total=total,
             )
-        for number in range(1, reading + 1):
+        numbers = range(1, reading + 1)
+        done = 0
+        # One writer. The reads overlap; the session is touched by
+        # exactly one coroutine at a time, and only ever briefly.
+        writing = asyncio.Lock()
+
+        async def read(number: int) -> DocumentPage | None:
+            """Read one page, then land it before returning.
+
+            The landing is inside the fanned-out work on purpose. A page
+            still commits as soon as it is read, which is the invariant
+            that made this loop bearable: one transaction across a whole
+            scan held SQLite's single write lock for every model call of
+            every page - minutes - and two readings of one file
+            deadlocked. Gathering every page and committing at the end
+            would bring that back, and would also throw away an entire
+            scan's model spend if the process died on the last page.
+
+            PDFium is not thread-safe: the two ``pdf`` calls run on its
+            one thread (``_pdfium``), each self-contained - open the
+            page, use it, close it - so whole calls queue there, never
+            overlap, and never block the loop.
+            """
+            nonlocal done
             page = existing.get(number)
             if page is not None and page.status == "read" and not force:
-                result.skipped += 1
-                continue
+                return None
             page = page or DocumentPage(document_id=document_id, page_number=number)
             png: bytes | None = None
-            if not page.image_key:
-                png = pdf.render_png(number)
-                page.image_key = await get_storage().put(
-                    png, content_type=PNG_MEDIA_TYPE
+            try:
+                if not page.image_key:
+                    png = await _pdfium(pdf.render_png, number)
+                    page.image_key = await get_storage().put(
+                        png, content_type=PNG_MEDIA_TYPE
+                    )
+                text = await _pdfium(pdf.text, number)
+                if len(text) >= MIN_TEXT_CHARS:
+                    _mark_read(page, text, method="text_layer", model=None)
+                elif not await _read_with_ocr(
+                    page, png or await get_storage().get(page.image_key)
+                ):
+                    await _read_with_vision(
+                        page, page.image_key, PNG_MEDIA_TYPE, vision
+                    )
+            except Exception as exc:  # noqa: BLE001 - a page is a row either way
+                logger.warning("documents.page_failed", page=number, error=str(exc))
+                _mark_unread(page, f"Reading this page failed: {exc}")
+
+            async with writing:
+                _finish(db, page, result)
+                await db.commit()
+                # Pages finish out of order now, so this counts the ones
+                # that have landed rather than naming the current one.
+                done += 1
+                if progress is not None:
+                    progress(done, reading)
+            return page
+
+        outcomes = await fanout(read, numbers, limit=PAGE_CONCURRENCY)
+
+        for number, outcome in zip(numbers, outcomes, strict=True):
+            if not outcome.ok:
+                # ``read`` turns its own failures into unread rows, so
+                # arriving here means the landing itself broke.
+                logger.error(
+                    "documents.page_lost", page=number, error=str(outcome.error)
                 )
-            text = pdf.text(number)
-            if len(text) >= MIN_TEXT_CHARS:
-                _mark_read(page, text, method="text_layer", model=None)
-            elif not await _read_with_ocr(
-                page, png or await get_storage().get(page.image_key)
-            ):
-                await _read_with_vision(page, page.image_key, PNG_MEDIA_TYPE, vision)
-            _finish(db, page, result)
-            # Each page lands on its own. A read is minutes of model calls
-            # on a scan, and one transaction across all of them holds
-            # SQLite's single write lock for the whole document: every
-            # other writer - the ledger row the model call itself
-            # records, a second page of this same document, the chat -
-            # waits on this one, and two readings of one file deadlock.
-            await db.commit()
-            if progress is not None:
-                progress(number, reading)
+            elif outcome.value is None:
+                result.skipped += 1
     finally:
-        pdf.close()
+        await _pdfium(pdf.close)
 
 
 async def _extract_image(

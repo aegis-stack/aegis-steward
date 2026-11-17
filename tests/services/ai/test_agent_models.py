@@ -9,13 +9,22 @@ from sqlmodel import Session, select
 
 from app.core.tools import register_tool, unregister_tool
 from app.services.ai.domains.chat.agent_loader import default_agent_config
-from app.services.ai.domains.chat.prompts import DEFAULT_SYSTEM_PROMPT
+from app.services.ai.domains.chat.agent_registry import seed_agent
+from app.services.ai.domains.chat.builtin_fetchers import APP_MAP
+from app.services.ai.domains.chat.prompts import get_default_system_prompt
+from app.services.ai.domains.chat.sentiment import (
+    SENTIMENT_AGENT_SLUG,
+    SENTIMENT_SYSTEM_PROMPT,
+)
 from app.services.ai.domains.chat.tools import resolve_tools
 from app.services.ai.fixtures.agent_fixtures import (
     DEFAULT_AGENT_SLUG,
+    built_in_agents,
+    default_agent_definition,
     load_agent_fixtures,
 )
 from app.services.ai.models import Agent, AgentTool, Tool
+from app.services.ai.models.agents import ContextModule
 
 
 @pytest.fixture
@@ -35,17 +44,45 @@ class TestAgentSeed:
     def test_seeds_default_agent(self, session: Session) -> None:
         counts = load_agent_fixtures(session)
 
-        assert counts["agents"] == 1
+        assert counts["agents"] == len(built_in_agents())
         agent = session.exec(
             select(Agent).where(Agent.slug == DEFAULT_AGENT_SLUG)
         ).one()
         assert agent.is_active
-        assert agent.system_prompt == DEFAULT_SYSTEM_PROMPT
+        assert agent.system_prompt == get_default_system_prompt()
         # None = "use the service's active model".
         assert agent.model_id is None
 
+    def test_seeds_the_sentiment_agent(self, session: Session) -> None:
+        """Its own row, so the batch scorer's model is picked in Agents: the
+        active model until someone chooses a faster one."""
+        load_agent_fixtures(session)
+        agent = session.exec(
+            select(Agent).where(Agent.slug == SENTIMENT_AGENT_SLUG)
+        ).one()
+        assert agent.system_prompt == SENTIMENT_SYSTEM_PROMPT
+        assert agent.model_id is None and agent.is_active
+
+    def test_seeds_the_pull_request_reviewer(self, session: Session) -> None:
+        """Illiana reviewing (``patterns review``): her persona and the
+        reviewing on its own row, so how long it writes and on what model
+        are set in Agents, not in code."""
+        from app.services.system.pattern_review import REVIEWER
+
+        load_agent_fixtures(session)
+        agent = session.exec(select(Agent).where(Agent.slug == REVIEWER)).one()
+        assert agent.system_prompt.startswith(get_default_system_prompt().rstrip())
+        assert "pull request" in agent.system_prompt
+        # More room than the shipped default, not than this project's .env
+        # (which may set AI_MAX_TOKENS up to the reviewer's own 8000).
+        from app.core.config import Settings
+
+        assert agent.max_tokens > Settings.model_fields["AI_MAX_TOKENS"].default
+        assert agent.is_active and not agent.context_modules
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # each service seeds its own modules
     def test_every_seeded_agent_records_its_seed(self, session: Session) -> None:
-        """#355: the seed is the first recorded change, so an agent's
+        """The seed is the first recorded change, so an agent's
         history starts at the text it was born with."""
         from app.services.ai.fixtures import load_agent_registry_fixtures
         from app.services.ai.models.agents import AgentPromptChange
@@ -59,39 +96,66 @@ class TestAgentSeed:
             (c.agent_id, c.system_prompt, c.source) for c in changes
         ) == sorted((a.id, a.system_prompt, "seed") for a in agents)
 
-    def test_the_default_agent_reads_the_app_and_draws(self) -> None:
-        """Overseer's Illiana: what the app is and what is wrong with it,
-        and a card to draw it on."""
-        names = default_agent_config().tool_names
-        assert {"ontology", "health", "errors", "server_requests", "draw_card"} <= set(
-            names
-        )
-        # ``requests`` is the matters tool: a letter's asks, not the app's.
-        assert "requests" not in names
-
-    @pytest.mark.queryspy(threshold=4)  # seeds three times
-    def test_a_row_seeded_without_tools_is_granted_them(self, session: Session) -> None:
-        """Additive and by name: a database seeded before the grant picks
-        the tools up on the next boot, and a re-seed grants nothing more."""
-        from app.services.ai.fixtures import load_agent_registry_fixtures
-
-        load_agent_registry_fixtures(session)
+    def test_the_default_agent_reads_the_app_from_the_ontology(
+        self, session: Session
+    ) -> None:
+        """Granted on a fresh seed, and on a re-seed of a database seeded
+        before the grant existed: a grant is additive by name."""
+        load_agent_fixtures(session)
         agent = session.exec(
             select(Agent).where(Agent.slug == DEFAULT_AGENT_SLUG)
         ).one()
-        agent.tools.clear()
+        assert "ontology" in {t.name for t in agent.tools}
+
+        for link in session.exec(
+            select(AgentTool).where(AgentTool.agent_id == agent.id)
+        ).all():
+            session.delete(link)
+        session.commit()
+        regranted = load_agent_fixtures(session)["tool_links"]
+        assert regranted == len(default_agent_config().tool_names)
+        session.refresh(agent)
+        assert "ontology" in {t.name for t in agent.tools}
+
+    def test_the_default_agent_looks_up_what_left_her_prompt(
+        self, session: Session
+    ) -> None:
+        """The model catalog and the app's health are tools of hers, not
+        blocks in every prompt."""
+        load_agent_fixtures(session)
+
+        agent = session.exec(
+            select(Agent).where(Agent.slug == DEFAULT_AGENT_SLUG)
+        ).one()
+        assert {"catalog", "health"} <= {t.name for t in agent.tools}
+
+    def test_the_default_agent_knows_the_app_without_asking(
+        self, session: Session
+    ) -> None:
+        """The app's map is a context module of its own, the default agent's."""
+        load_agent_fixtures(session)
+
+        modules = {m.slug: m for m in session.exec(select(ContextModule)).all()}
+        assert modules[APP_MAP].fetch_function == APP_MAP
+        agent = session.exec(
+            select(Agent).where(Agent.slug == DEFAULT_AGENT_SLUG)
+        ).one()
+        assert APP_MAP in agent.context_modules
+
+    def test_a_database_seeded_before_the_map_gets_it(self, session: Session) -> None:
+        """Its agent has neither the grant nor the module's row: the next
+        seed adds both, additive by name."""
+        seed_agent(session, default_agent_definition() | {"context_modules": []})
         session.commit()
 
-        counts = load_agent_registry_fixtures(session)
+        assert load_agent_fixtures(session)["module_links"] == 1
 
-        session.refresh(agent)
-        assert sorted(t.name for t in agent.tools) == sorted(
-            default_agent_config().tool_names
-        )
-        assert counts["tool_links"] == len(default_agent_config().tool_names)
-        assert load_agent_registry_fixtures(session)["tool_links"] == 0
+        assert APP_MAP in {m.slug for m in session.exec(select(ContextModule)).all()}
+        agent = session.exec(
+            select(Agent).where(Agent.slug == DEFAULT_AGENT_SLUG)
+        ).one()
+        assert APP_MAP in agent.context_modules
 
-    @pytest.mark.queryspy(threshold=3)  # seeds, then reads the rows back
     def test_seed_is_idempotent(self, session: Session) -> None:
         load_agent_fixtures(session)
         counts = load_agent_fixtures(session)
@@ -99,7 +163,7 @@ class TestAgentSeed:
         assert counts["agents"] == 0
         assert counts["tools"] == 0
         agents = session.exec(select(Agent)).all()
-        assert len(agents) == 1
+        assert len(agents) == len(built_in_agents())
 
     def test_registered_tools_get_grantable_rows(self, session: Session) -> None:
         """Every name in the Python tool registry gets a ``tool`` row."""
@@ -120,7 +184,6 @@ class TestAgentSeed:
         finally:
             unregister_tool("cm_probe")
 
-    @pytest.mark.queryspy(threshold=3)  # seeds, then reads the rows back
     def test_seed_never_overwrites_edited_agent(self, session: Session) -> None:
         load_agent_fixtures(session)
         agent = session.exec(
@@ -138,6 +201,7 @@ class TestAgentSeed:
         assert refreshed.system_prompt == "Customized prompt"
 
 
+@pytest.mark.queryspy(allow_n_plus_one=True)  # each service seeds its own modules
 class TestStartupSeedsTheRegistry:
     """Nothing in a running project used to call the fixture loaders, so a
     deployed stack had agents without tools (or no agents at all). Startup
@@ -165,7 +229,6 @@ class TestStartupSeedsTheRegistry:
             is not None
         )
 
-    @pytest.mark.queryspy(threshold=3)  # seeds, then reads the rows back
     def test_reseeding_changes_nothing(
         self, session: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:

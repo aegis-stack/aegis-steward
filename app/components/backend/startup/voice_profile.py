@@ -1,6 +1,6 @@
-"""Put the active voice profile to work at startup (#262).
+"""Put the active voice profile, and how it says terms, to work at startup.
 
-Her voice is table data, like the active model (``llm_active_model``): the
+The voice is table data, like the active model (``llm_active_model``): the
 first boot seeds a profile from ``.env``, and from then on the active row is
 applied onto the running settings. A missing table (migrations not yet run)
 must not stop the app from booting: ``.env`` is already the right default.
@@ -12,9 +12,9 @@ from app.core.log import logger
 
 
 async def startup_hook() -> Any:
+    from app.components.backend.api.ai.service import ai_service
     from app.core.config import settings
     from app.core.db import get_async_session
-    from app.services.ai.deps import ai_service
     from app.services.ai.service import profiles
 
     try:

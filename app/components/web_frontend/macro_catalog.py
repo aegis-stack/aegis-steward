@@ -16,6 +16,7 @@ from markupsafe import Markup
 
 from app.core.log import logger
 
+from .app_macro_examples import APP_CODE_ONLY, APP_EXAMPLES
 from .rendering import templates
 
 FILES = {
@@ -36,9 +37,11 @@ CODE_ONLY = frozenset(
         "toast_region",
         "oob",
         "pager",
-        "sse_job",
-        "confirm_permanent",
+        "interactive_head",
+        "chat_scripts",
+        "interactive_body",
     }
+    | APP_CODE_ONLY
 )
 
 # An optional comment directly above ``{% macro name(...) %}``.
@@ -101,6 +104,46 @@ EXAMPLES: dict[str, dict[str, str]] = {
               {{ avatar("Anthropic") }} {{ avatar("OpenAI") }} {{ avatar("Groq") }}
             </span>""",
         "theme_toggle": "{{ theme_toggle() }}",
+        # A layout's <head>, not a page's: shown here as it renders (the
+        # theme script, the theme's faces if any, the stylesheet).
+        "appearance_head": "{{ appearance_head(default_theme) }}",
+        "interactive_head": """
+            {# In a layout's <head>, before its own head blocks. #}
+            {{ interactive_head() }}""",
+        "interactive_body": """
+            {# At the end of a layout's <body>, after interactive_head in its head. #}
+            {{ interactive_body() }}""",
+        "chat_scripts": """
+            {# After app.js, wherever a chat mount shows. #}
+            {{ chat_scripts() }}""",
+        "modal_scrim": """
+            <div x-data="{ open: false }">
+              <button type="button" class="chip" @click="open = true">Open</button>
+              <div x-show="open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center px-4">
+                {{ modal_scrim() }}
+                <div class="relative bg-aegis-card border border-aegis-border rounded-lg p-6 text-sm">
+                  Click outside to close.
+                </div>
+              </div>
+            </div>""",
+        "popover_panel": """
+            <span class="relative inline-block"
+                  x-data="{ open: false, show() { this.open = true }, hide() { this.open = false } }"
+                  @mouseenter="show()" @mouseleave="hide()">
+              <span class="text-sm underline decoration-dotted">Hover me</span>
+              {% call popover_panel() %}The one tooltip shell.{% endcall %}
+            </span>""",
+        "hover_hint": """
+            <p class="text-sm">Queue empties in
+              {% call hover_hint("Drain", "Waiting jobs over the net rate.") %}4 min{% endcall %}
+            </p>""",
+        "hint_panel": """
+            <span class="group relative inline-block">
+              <span class="text-sm underline decoration-dotted">Hover me</span>
+              {% call hint_panel("", "left-0 top-full pt-1.5 group-hover:block") %}Shown on hover by CSS alone, so a live frame cannot close it.{% endcall %}
+            </span>""",
+        "info_tooltip": """
+            {% call info_tooltip() %}<p>Any markup can go in the body.</p>{% endcall %}""",
         "badge": """
             <span class="flex flex-wrap gap-4 text-sm">
               {{ badge("Healthy", "ok") }} {{ badge("Degraded", "warn") }}
@@ -121,6 +164,7 @@ EXAMPLES: dict[str, dict[str, str]] = {
             {% set on_click %}@click="$dispatch('toast', { text: 'Clicked', tone: 'ok' })"{% endset %}
             {% call dropdown("Actions", align="left") %}
               {{ menu_item("Retry", on_click) }}
+              {{ menu_item("Open", url="#") }}
               {{ menu_item("Delete", "", danger=True) }}
             {% endcall %}""",
         "menu_heading": """
@@ -131,12 +175,29 @@ EXAMPLES: dict[str, dict[str, str]] = {
               {{ menu_heading("Copy", "copy") }}
               {{ menu_item("Markdown", on_click) }}
             {% endcall %}""",
+        "pick_menu": """
+            {% call pick_menu("users", "catalog-pick-tables", "Find a table") %}
+              {{ menu_heading("public", tag="p", count=2) }}
+              {% call pick_item("users", url="#", attrs='aria-current="page"', mono=True) %}<span class="text-aegis-muted">42</span>{% endcall %}
+              {% call pick_item("orders", url="#", mono=True) %}<span class="text-aegis-muted">7</span>{% endcall %}
+            {% endcall %}""",
+        "pick_item": """
+            {% call pick_menu("Alloy", "catalog-pick-voices", "Find a voice", name="voice_q") %}
+              {{ menu_heading("OpenAI", tag="p", count=2) }}
+              {% call pick_item("Alloy", attrs='aria-current="true"') %}<span class="text-aegis-muted">neutral</span>{% endcall %}
+              {{ pick_item("Echo") }}
+            {% endcall %}""",
         "dropdown": """
             {% set on_click %}@click="$dispatch('toast', { text: 'Clicked', tone: 'ok' })"{% endset %}
-            {% call dropdown("Actions", align="left") %}
-              {{ menu_item("Retry", on_click) }}
-              {{ menu_item("Pause", "") }}
-            {% endcall %}""",
+            <span class="flex items-center gap-3">
+              {% call dropdown("Actions", align="left") %}
+                {{ menu_item("Retry", on_click) }}
+                {{ menu_item("Pause", "") }}
+              {% endcall %}
+              {% call dropdown(align="left", options=True) %}
+                {{ menu_item("Remove", on_click, danger=True) }}
+              {% endcall %}
+            </span>""",
         "dialog_title": """
             {{ dialog_title("Remove user", "They lose access at once. Their history stays.") }}""",
         "confirm": """
@@ -162,6 +223,10 @@ EXAMPLES: dict[str, dict[str, str]] = {
               <span class="inline-flex items-center gap-2">{{ chart_dot(4) }} Grace</span>
               <span class="inline-flex items-center gap-2">{{ chart_dot(7) }} Linus</span>
             </span>""",
+        "fold": """
+            {% call fold("More options") %}
+              <p class="text-aegis-muted">What most can leave folded.</p>
+            {% endcall %}""",
         "fold_mark": """
             <details open class="text-sm">
               <summary class="list-none cursor-pointer flex items-center gap-2">{{ fold_mark() }} Two quotes</summary>
@@ -182,6 +247,11 @@ EXAMPLES: dict[str, dict[str, str]] = {
               {{ tab_item("Overview", href="#macro-tab_item") }}
               {{ tab_item("History", active=True, href="#macro-tab_item") }}
             {% endcall %}""",
+        "section_tabs": """
+            {{ section_tabs([
+              {"label": "Profiles", "url": "#macro-section_tabs", "active": True},
+              {"label": "Models", "url": "#macro-section_tabs"},
+            ], "Example tabs") }}""",
         "tabbed": """
             {% call tabbed("example", [("notes", "Notes"), ("transcript", "Transcript")]) %}
               {% call tab_panel("notes", "notes") %}<p class="text-sm">The notes.</p>{% endcall %}
@@ -192,11 +262,6 @@ EXAMPLES: dict[str, dict[str, str]] = {
               {% call tab_panel("one", "two") %}<p class="text-sm">Hidden until picked.</p>{% endcall %}
               {% call tab_panel("two", "two") %}<p class="text-sm">Shown first.</p>{% endcall %}
             {% endcall %}""",
-        "hint_panel": """
-            <span class="group relative inline-block">
-              <span class="text-sm underline decoration-dotted">Hover me</span>
-              {% call hint_panel("", "left-0 top-full pt-1.5 group-hover:block") %}Shown on hover by CSS alone, so a live frame cannot close it.{% endcall %}
-            </span>""",
         "chip": """
             <div class="flex gap-1.5">
               {{ chip("1h", href="#macro-chip") }}
@@ -205,42 +270,7 @@ EXAMPLES: dict[str, dict[str, str]] = {
             </div>""",
         "lazy": """{{ lazy("/partials/overseer/runs/abc123/log", 'data-run-log-of="abc123"', "Loading…") }}""",
         "copy_button": """{{ copy_button("redis://localhost:6379/0") }}""",
-        "brand": """{{ brand("Steward") }}""",
-        "nav_item": """
-            {% set section = {"key": "overview", "label": "Overview", "path": "/overview",
-                              "icon": "M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1v-9.5Z"} %}
-            <nav class="w-56">{{ nav_item(section, "/overview") }}</nav>""",
-        "appearance_fields": """
-            <div x-data="{ ...appearance() }" class="w-64 space-y-2">{{ appearance_fields() }}</div>""",
-        "chip_nav": """
-            {{ chip_nav("catalog-window", "Window", [("30d", True, "#macro-chip_nav"), ("90d", False, "#macro-chip_nav")], "#catalog-window") }}""",
-        "mark": """
-            <span class="inline-flex items-center gap-3">
-              {{ mark({"icon_url": None, "category": "Groceries"}, "Market") }}
-              {{ mark({"icon_url": None, "category": None}, "Rent") }}
-            </span>""",
-        "file_mark": """{{ file_mark(file_badge("application/pdf", "statement.pdf")) }}""",
-        "contact_link": """{{ contact_link(7, "County Clerk") }}""",
-        "page_link": """{{ page_link("/settings/activity", "Activity") }}""",
-        "local_time": """{{ local_time("2026-10-19T02:19:05") }}""",
-        "doors": """
-            {{ doors([{"label": "Checking", "url": "/accounts/1"}, {"label": "Taxes", "url": "/matters/2"},
-                      {"label": "Renewal", "url": "/matters/3"}], show=2) }}""",
-        "dot": """
-            <span class="flex items-center gap-3">
-              {{ dot("ok", "Synced today") }} {{ dot("warn", "A week old") }} {{ dot("error", "A month old") }}
-            </span>""",
-        "remove_button": """
-            <div class="flex w-48 items-center">Groceries{{ remove_button("/budget/envelopes/1/remove", "Remove Groceries") }}</div>""",
-        "item_grid": """
-            {% call item_grid("catalog-goals") %}
-              {% call item_card("catalog-goal-1") %}<p class="text-sm">Emergency fund</p>{% endcall %}
-              {% call item_card("catalog-goal-2") %}<p class="text-sm">New roof</p>{% endcall %}
-            {% endcall %}""",
-        "item_card": """
-            <ul class="grid gap-4 sm:grid-cols-2">
-              {% call item_card("catalog-card") %}<p class="text-sm">One card of a grid</p>{% endcall %}
-            </ul>""",
+        "goto": """{{ goto("/overseer/ai/evals", "All runs") }}""",
         "command": """<p class="flex items-center gap-2">{{ command("make serve") }}</p>""",
         "sparkline": """{{ sparkline("0.0,20.0 30.0,8.0 60.0,14.0 90.0,2.0 120.0,10.0", extra="w-40 h-6") }}""",
         "copy_icon": """<span class="group inline-flex items-center gap-1.5">redis://localhost:6379/0{{ copy_icon("redis://localhost:6379/0", "opacity-0 group-hover:opacity-100") }}</span>""",
@@ -262,13 +292,6 @@ EXAMPLES: dict[str, dict[str, str]] = {
             {{ empty_state("No jobs yet", "Enqueue one from the CLI to see it here.") }}""",
         "error_banner": """
             {{ error_banner(["Email is already registered.", "Password is too short."]) }}""",
-        "sse_job": """
-            {# Follows /jobs/<id>/events until the job's terminal frame. #}
-            {{ sse_job("import-42", "Importing") }}""",
-        "unfiled_notice": """
-            {{ unfiled_notice(5000) }}""",
-        "notice": """
-            {{ notice("catalog-waiting", 3, "/review", "3 transactions are waiting for review") }}""",
         "oob": """
             {# Sent beside a swapped row; htmx puts it wherever #queue-count is. #}
             {% call oob("queue-count") %}1,204{% endcall %}""",
@@ -288,7 +311,29 @@ EXAMPLES: dict[str, dict[str, str]] = {
         "checkbox": """{{ checkbox("failed_only", True, "Failed only") }}""",
         "search_input": """{{ search_input("catalog", placeholder="Search keys") }}""",
         "filter_input": """{{ filter_input("#catalog-demo-rows", placeholder="Filter rows") }}""",
-        "file_button": """{{ file_button("catalog-demo-file", "Add picture", "image/png,image/jpeg") }}""",
+        "file_button": """
+            {{ file_button("catalog-demo-file", "Add picture", "image/png,image/jpeg") }}
+            {{ file_button("catalog-demo-files", "Choose files", submit=False, multiple=True) }}""",
+        "form_section": """
+            {% call form_section("Files", "optional") %}
+              {{ file_button("catalog-demo-section-files", "Choose files", submit=False, multiple=True) }}
+            {% endcall %}""",
+        "form_footer": """{{ form_footer("Save") }}""",
+        "cancel_button": """{{ cancel_button() }}""",
+        "wizard": """
+            <form x-data="{}">
+            {% call wizard([("Name", None), ("Review", None)]) %}
+              {% call wizard_step(0) %}{% call field("Name") %}{{ text_input("name", placeholder="policies") }}{% endcall %}{% endcall %}
+              {% call wizard_step(1) %}<p class="text-sm">All set.</p>{% endcall %}
+              {{ form_footer("Make it", wizard=True) }}
+            {% endcall %}
+            </form>""",
+        "wizard_step": """
+            <form x-data="{}">
+            {% call wizard([("One", None)]) %}
+              {% call wizard_step(0) %}<p class="text-sm">The step at hand.</p>{% endcall %}
+            {% endcall %}
+            </form>""",
         "field": """
             {% call field("Email", error="Enter a valid address") %}
               {{ text_input("email", "ops@") }}
@@ -297,44 +342,18 @@ EXAMPLES: dict[str, dict[str, str]] = {
         "money_input": """{{ money_input("amount", "12.50") }}""",
         "number_input": """{{ number_input("speed", 1.25, step=0.05, min=0.25, max=4) }}""",
         "textarea": """{{ textarea("notes", rows=3, placeholder="Notes") }}""",
+        "select_field": """
+            <div x-data="{ queue: 'system' }" class="w-48">
+              {{ select_field("queue", "[{value: 'system', label: 'system'}, {value: 'load_test', label: 'load_test'}]") }}
+            </div>""",
         "password_input": """
             {{ password_input("password", placeholder="Password", required=False) }}""",
+        "or_divider": "{{ or_divider() }}",
+        "honeypot": "{{ honeypot() }}",
+        "no_autofill": """{{ text_input("api_key", placeholder="Paste a key", attrs=no_autofill()) }}""",
         "range_chips": """{{ range_chips([(1, "1d"), (7, "7d"), (30, "30d")], 7) }}""",
         "checklist": """{{ checklist("example-services", "service", "Services", [{"value": "redis", "label": "Cache", "checked": True}, {"value": "worker", "label": "Worker", "checked": False, "count": 3}]) }}""",
         "range_form": """{{ range_form([(1, "1d"), (7, "7d"), (30, "30d")], 7, "/overseer", "#overseer-main") }}""",
-        "account_filter": """
-            {# The accounts' dropdown needs account rows (account_sections); without
-               any the filter is its window chips. #}
-            {{ account_filter("/overview", [], [], 30, [(30, "30d"), (90, "90d")]) }}""",
-        "control": """<input type="text" placeholder="A bare control" class="{{ control('input') }}">""",
-        "button_classes": """
-            <span class="flex gap-2">
-              <button type="button" class="{{ button_classes() }}">Save</button>
-              <button type="button" class="{{ button_classes('default') }}">Cancel</button>
-            </span>""",
-        "check_apply": """<form>{{ check_apply("Merge", True) }}</form>""",
-        "summary_panel": """
-            {% call summary_panel('data-summary') %}<dt>Rows</dt><dd class="text-right">12</dd>{% endcall %}""",
-        "pick_or_add": """
-            {{ pick_or_add("payee_id", [{"id": 1, "name": "Market"}, {"id": 2, "name": "Landlord"}], new_field="payee_name") }}""",
-        "file_input": """{{ file_input("document", accept=".pdf") }}""",
-        "picker": """
-            {{ picker("catalog-picker", "/register/1/payee", "payee_id",
-                      [{"id": 1, "name": "Market", "fact": "12x"}, {"id": 2, "name": "Landlord"}],
-                      hint="Search payees", create="payee_name") }}""",
-        "target_inputs": """<form>{{ target_inputs(4, None, None) }}</form>""",
-        "money_edit": """<form>{{ money_edit("limit", "400.00", "$400.00", "Edit the limit") }}</form>""",
-        "term_fields": """
-            {% set terms = [{"name": "rate", "label": "Rate", "kind": "text", "choices": ()},
-                            {"name": "opened", "label": "Opened", "kind": "date", "choices": ()}] %}
-            {{ term_fields(terms, {"rate": "6.25%"}) }}""",
-        "chip_select": """
-            {{ chip_select("places", [{"id": 1, "name": "Checking"}, {"id": 2, "name": "Taxes"}], [{"id": 1, "name": "Checking"}]) }}""",
-        "line_row": """{{ line_row("label", "value", "Policy", "H-123") }}""",
-        "line_rows": """{{ line_rows("label", "value", [("Policy", "H-123")]) }}""",
-        "confirm_permanent": """
-            {# Below a dialog's archive action; the route checks the typed name. #}
-            {{ confirm_permanent("this account", "Checking", "/accounts/1/purge") }}""",
         "action": """
             {% set on_click %}@click="$dispatch('toast', { text: 'Clicked', tone: 'ok' })"{% endset %}
             <div class="flex flex-wrap gap-2">
@@ -342,6 +361,7 @@ EXAMPLES: dict[str, dict[str, str]] = {
               {{ action("Pause", "", "warn") }}
               {{ action("Delete", "", "danger") }}
               {{ action("Details", "") }}
+              {{ action("Download", "download", href="#") }}
             </div>""",
     },
     "table": {
@@ -360,9 +380,6 @@ EXAMPLES: dict[str, dict[str, str]] = {
               {{ table_row([{"key": "queue", "label": "Queue"}, {"key": "waiting", "label": "Waiting", "kind": "int", "align": "right"}],
                            {"queue": "system", "waiting": 3}) }}
             </tbody></table>""",
-        "new_dot": """<span class="inline-flex items-center gap-2 text-sm">{{ new_dot() }} New</span>""",
-        "new_mark": """
-            <table class="w-full text-sm"><tbody><tr><td class="relative pl-5">{{ new_mark({"is_new": True, "import_batch_id": None}) }}Coffee</td></tr></tbody></table>""",
         "pager": """
             {{ pager({"start": 26, "end": 50, "total": 80, "prev": "?page=1", "next": "?page=3"}, "#jobs") }}""",
     },
@@ -376,6 +393,10 @@ class MacroEntry(NamedTuple):
     example: str
     preview: Markup | None
     error: str | None
+
+
+for _section, _extra in APP_EXAMPLES.items():
+    EXAMPLES[_section].update(_extra)
 
 
 def _render(imports: str, example: str) -> tuple[Markup | None, str | None]:

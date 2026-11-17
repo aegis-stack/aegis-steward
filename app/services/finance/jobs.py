@@ -9,16 +9,16 @@ import logging
 from typing import Any
 
 from app.core.db import get_async_session
-from app.services.finance.domains.detection import (
-    detect_recurring,
-    generate_insights,
-    promote_curated_streams,
-)
 from app.services.finance.domains.detection.insights.rules.plan import plan_check
 from app.services.finance.domains.ledger.accounts import redraw_line
 from app.services.finance.domains.ledger.queries import account_owner_ids
 from app.services.finance.domains.planning.queries import plan_rows
-from app.services.finance.service import FinanceService
+from app.services.finance.service import (
+    FinanceService,
+    detect_recurring,
+    generate_insights,
+    promote_curated_streams,
+)
 from app.services.finance.utils import current_date
 
 logger = logging.getLogger(__name__)
@@ -169,23 +169,16 @@ async def finance_analyst_note_job() -> None:
     their note. ``run_analyst_note`` already absorbs its own errors, so this
     only has to guard the session.
     """
-    from app.services.finance.domains.detection.analyst import run_analyst_note
+    from app.services.finance.service import run_analyst_note
 
     try:
-        # Two short transactions per owner, not one long one for all of
-        # them. The owners query is its own; ``run_analyst_note`` opens
-        # what it needs and lets go around the model call, which is the
-        # whole point - this job used to hold the write lock across every
-        # model call it made, and SQLite has one writer (2026-09-20).
         async with get_async_session() as session:
             owners = await account_owner_ids(session)
-
-        written = 0
-        for owner_user_id in owners:
-            note = await run_analyst_note(
-                get_async_session, owner_user_id=owner_user_id
-            )
-            written += 1 if note is not None else 0
+            written = 0
+            for owner_user_id in owners:
+                note = await run_analyst_note(session, owner_user_id=owner_user_id)
+                written += 1 if note is not None else 0
+            await session.commit()
         logger.info(
             "Finance: analyst notes ready for %d of %d owner(s)",
             written,

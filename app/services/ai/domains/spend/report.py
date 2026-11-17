@@ -1,109 +1,72 @@
-"""What models and voice cost, read back from the one ledger (#270).
+"""What models and voice cost, by kind and model, and each live call
+costed with the answers it handed off: read back from the one ledger
+(``llm_usage``), for the Costs section and ``ai costs``."""
 
-``llm_usage`` holds chat and agent turns, live calls (``live``),
-transcriptions (``stt``) and spoken replies (``tts``). The report groups
-it into those four kinds, lists it by model, and costs each live call as
-its minutes plus the answers her agent gave during it.
-"""
-
-from __future__ import annotations
-
-from datetime import UTC, datetime, timedelta
-from typing import Any
+from datetime import datetime
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.ai.domains.llm import queries
-from app.services.ai.domains.spend.recording import LIVE_ACTION, REALTIME_ACTION
+from app.services.ai.domains.spend import queries
+from app.services.ai.domains.spend.recording import REALTIME_ACTION, VOICE_ACTIONS
+from app.services.ai.domains.spend.schemas import CallSpend, KindModelSpend
 
-KIND_LABELS = {
-    "chat": "Chat and agents",
-    "live": "Live calls",
-    "stt": "Hearing",
-    "tts": "Speaking",
-}
-# An answer belongs to a call if it lands while the call runs; a reply
-# still arriving as it is hung up counts too.
-_CALL_GRACE = timedelta(minutes=2)
-_CALL_LIMIT = 50
+# What every action that is not a voice one is: a model call (a chat or
+# agent turn, a job's).
+MODEL_CALLS = "Model calls"
+CALLS_SHOWN = 50
+# How a call ended, as the Costs section and ``ai costs`` say it.
+ENDED = {True: "Ended", False: "Failed"}
 
 
-# Every way a live call is recorded: GPT-Live's metered row, and a
-# realtime engine's priced one (#273).
-CALL_ACTIONS = (LIVE_ACTION, REALTIME_ACTION)
+def kind(action: str) -> str:
+    """The kind of use an action is: a voice kind by its name, else a
+    model call."""
+    return VOICE_ACTIONS.get(action, MODEL_CALLS)
 
 
-def kind_of(action: str) -> str:
-    if action in CALL_ACTIONS:
-        return "live"
-    return action if action in ("stt", "tts") else "chat"
-
-
-async def usage_report(
-    session: AsyncSession, *, days: int, now: datetime | None = None
-) -> dict[str, Any]:
-    now = now or datetime.now(UTC)
-    # Stored naive in UTC; compare the same way.
-    since = (now - timedelta(days=days)).astimezone(UTC).replace(tzinfo=None)
-
-    grouped = await queries.usage_by_action_and_model(session, since)
-    kinds = {
-        key: {"key": key, "label": label, "cost": 0.0, "uses": 0, "minutes": 0.0}
-        for key, label in KIND_LABELS.items()
-    }
-    models: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in grouped:
-        kind = kind_of(row.action)
-        kinds[kind]["cost"] += row.cost
-        kinds[kind]["uses"] += row.uses
-        kinds[kind]["minutes"] += row.seconds / 60
-        model = models.setdefault(
-            (kind, row.model_id),
-            {
-                "kind": KIND_LABELS[kind],
-                "model": row.model_id,
-                "uses": 0,
-                "minutes": 0.0,
-                "tokens": 0,
-                "cost": 0.0,
-            },
+async def models_by_kind(
+    session: AsyncSession, start: datetime, end: datetime
+) -> list[KindModelSpend]:
+    """Each model under each kind it was used for in ``[start, end)``,
+    most spent first."""
+    spent: dict[tuple[str, str], list[float]] = {}
+    rows = await queries.spend_by_action_model(session, start, end)
+    for action, model, *figures in rows:
+        total = spent.setdefault((kind(action), model), [0.0] * len(figures))
+        for i, value in enumerate(figures):
+            total[i] += value
+    models = [
+        KindModelSpend(
+            kind=k,
+            model_id=model,
+            uses=int(uses),
+            seconds=seconds,
+            tokens=int(tokens),
+            cost=cost,
         )
-        model["uses"] += row.uses
-        model["minutes"] += row.seconds / 60
-        model["tokens"] += row.tokens
-        model["cost"] += row.cost
+        for (k, model), (uses, seconds, tokens, cost) in spent.items()
+    ]
+    return sorted(models, key=lambda row: -row.cost)
 
-    calls = await queries.live_call_rows(session, since, CALL_ACTIONS, _CALL_LIMIT)
-    turns = await queries.turns_in_conversations(
-        session,
-        {c.conversation_id for c in calls if c.conversation_id},
-        since,
-        CALL_ACTIONS,
+
+async def live_calls(
+    session: AsyncSession, start: datetime, end: datetime
+) -> list[CallSpend]:
+    """The window's live calls, newest first: each with what the turns it
+    handed off cost (a picture looked at), the replies the call bar counted
+    as they landed."""
+    calls = await queries.rows_of(session, REALTIME_ACTION, start, end, CALLS_SHOWN)
+    answers = await queries.handed_off_spend(
+        session, [c.id for c in calls if c.id is not None]
     )
-    call_rows = []
-    for call in calls:
-        ends = call.timestamp + timedelta(seconds=call.audio_seconds or 0) + _CALL_GRACE
-        answers = sum(
-            cost
-            for conversation_id, when, cost in turns
-            if conversation_id == call.conversation_id
-            and call.timestamp <= when <= ends
+    return [
+        CallSpend(
+            started=call.timestamp,
+            model_id=call.model_id,
+            seconds=call.audio_seconds or 0.0,
+            call_cost=call.total_cost,
+            answers_cost=answers.get(call.id or 0, 0.0),
+            success=call.success,
         )
-        call_rows.append(
-            {
-                "when": call.timestamp,
-                "model": call.model_id,
-                "minutes": (call.audio_seconds or 0) / 60,
-                "call_cost": call.total_cost,
-                "answers_cost": answers,
-                "total": call.total_cost + answers,
-                "ended": call.error_message or ("ok" if call.success else "failed"),
-            }
-        )
-    return {
-        "days": days,
-        "total": sum(k["cost"] for k in kinds.values()),
-        "kinds": list(kinds.values()),
-        "models": sorted(models.values(), key=lambda m: m["cost"], reverse=True),
-        "calls": call_rows,
-    }
+        for call in calls
+    ]

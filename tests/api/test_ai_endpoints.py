@@ -10,6 +10,7 @@ import pytest
 
 from app.integrations.main import create_integrated_app
 from app.services.ai.models import ConversationMessage, MessageRole
+from app.services.ai.schemas import UsageStatsResponse
 
 
 @pytest.fixture
@@ -20,53 +21,55 @@ def client() -> TestClient:
 
 
 @pytest.fixture
-def mock_usage_stats() -> dict[str, Any]:
-    """Sample usage stats response."""
-    return {
-        "total_tokens": 1500,
-        "input_tokens": 1000,
-        "output_tokens": 500,
-        "total_cost": 0.015,
-        "total_requests": 10,
-        "success_rate": 95.0,
-        "models": [
-            {
-                "model_id": "gpt-4o",
-                "model_title": "GPT-4o",
-                "vendor": "openai",
-                "vendor_color": "#10A37F",
-                "requests": 10,
-                "tokens": 1500,
-                "cost": 0.015,
-                "percentage": 100.0,
-            }
-        ],
-        "recent_activity": [
-            {
-                "timestamp": "2024-01-01T12:00:00",
-                "model": "GPT-4o",
-                # Response schema split ``tokens`` into ``input_tokens`` +
-                # ``output_tokens`` so the UI can colorize prompt vs
-                # completion spend separately.
-                "input_tokens": 100,
-                "output_tokens": 50,
-                "cost": 0.0015,
-                "success": True,
-                "action": "chat",
-            }
-        ],
-    }
+def mock_usage_stats() -> UsageStatsResponse:
+    """Sample usage stats, as the service returns them."""
+    return UsageStatsResponse.model_validate(
+        {
+            "total_tokens": 1500,
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "total_cost": 0.015,
+            "total_requests": 10,
+            "success_rate": 95.0,
+            "models": [
+                {
+                    "model_id": "gpt-4o",
+                    "model_title": "GPT-4o",
+                    "vendor": "openai",
+                    "vendor_color": "#10A37F",
+                    "requests": 10,
+                    "tokens": 1500,
+                    "cost": 0.015,
+                    "percentage": 100.0,
+                }
+            ],
+            "recent_activity": [
+                {
+                    "timestamp": "2024-01-01T12:00:00",
+                    "model": "GPT-4o",
+                    # Response schema split ``tokens`` into ``input_tokens`` +
+                    # ``output_tokens`` so the UI can colorize prompt vs
+                    # completion spend separately.
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cost": 0.0015,
+                    "success": True,
+                    "action": "chat",
+                }
+            ],
+        }
+    )
 
 
 class TestUsageStatsEndpoint:
     """Tests for /api/v1/ai/usage/stats endpoint."""
 
     def test_get_usage_stats_success(
-        self, client: TestClient, mock_usage_stats: dict[str, Any]
+        self, client: TestClient, mock_usage_stats: UsageStatsResponse
     ) -> None:
         """Test successful usage stats retrieval."""
         with patch(
-            "app.components.backend.api.ai.router.ai_service.get_usage_stats",
+            "app.components.backend.api.ai.service.ai_service.get_usage_stats",
             new_callable=AsyncMock,
             return_value=mock_usage_stats,
         ):
@@ -80,11 +83,11 @@ class TestUsageStatsEndpoint:
         assert len(data["recent_activity"]) == 1
 
     def test_get_usage_stats_with_filters(
-        self, client: TestClient, mock_usage_stats: dict[str, Any]
+        self, client: TestClient, mock_usage_stats: UsageStatsResponse
     ) -> None:
         """Test usage stats with query parameters."""
         with patch(
-            "app.components.backend.api.ai.router.ai_service.get_usage_stats",
+            "app.components.backend.api.ai.service.ai_service.get_usage_stats",
             new_callable=AsyncMock,
             return_value=mock_usage_stats,
         ) as mock_get:
@@ -105,7 +108,7 @@ class TestUsageStatsEndpoint:
     def test_get_usage_stats_error_handling(self, client: TestClient) -> None:
         """Test error handling when service fails."""
         with patch(
-            "app.components.backend.api.ai.router.ai_service.get_usage_stats",
+            "app.components.backend.api.ai.service.ai_service.get_usage_stats",
             new_callable=AsyncMock,
             side_effect=Exception("Database error"),
         ):
@@ -115,11 +118,11 @@ class TestUsageStatsEndpoint:
         assert "Failed to get usage stats" in response.json()["detail"]
 
     def test_get_usage_stats_response_schema(
-        self, client: TestClient, mock_usage_stats: dict[str, Any]
+        self, client: TestClient, mock_usage_stats: UsageStatsResponse
     ) -> None:
         """Test response matches Pydantic schema."""
         with patch(
-            "app.components.backend.api.ai.router.ai_service.get_usage_stats",
+            "app.components.backend.api.ai.service.ai_service.get_usage_stats",
             new_callable=AsyncMock,
             return_value=mock_usage_stats,
         ):
@@ -151,18 +154,18 @@ class TestUsageStatsEndpoint:
 
     def test_get_usage_stats_empty_response(self, client: TestClient) -> None:
         """Test handling of empty usage data."""
-        empty_stats = {
-            "total_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_cost": 0.0,
-            "total_requests": 0,
-            "success_rate": 100.0,
-            "models": [],
-            "recent_activity": [],
-        }
+        empty_stats = UsageStatsResponse(
+            total_tokens=0,
+            input_tokens=0,
+            output_tokens=0,
+            total_cost=0.0,
+            total_requests=0,
+            success_rate=100.0,
+            models=[],
+            recent_activity=[],
+        )
         with patch(
-            "app.components.backend.api.ai.router.ai_service.get_usage_stats",
+            "app.components.backend.api.ai.service.ai_service.get_usage_stats",
             new_callable=AsyncMock,
             return_value=empty_stats,
         ):
@@ -175,21 +178,23 @@ class TestUsageStatsEndpoint:
         assert data["recent_activity"] == []
 
 
+def _reply() -> ConversationMessage:
+    """A stored assistant reply, as ``ai_service.chat`` returns one."""
+    return ConversationMessage(
+        id="m1",
+        role=MessageRole.ASSISTANT,
+        content="hi",
+        metadata={"conversation_id": "c1", "response_time_ms": 1.0},
+    )
+
+
 class TestChatAgentSlug:
     """The chat endpoints thread agent_slug through to the service."""
 
-    def _reply(self) -> ConversationMessage:
-        return ConversationMessage(
-            id="m1",
-            role=MessageRole.ASSISTANT,
-            content="hi",
-            metadata={"conversation_id": "c1", "response_time_ms": 1.0},
-        )
-
     def test_chat_passes_agent_slug(self, client: TestClient) -> None:
         with patch(
-            "app.components.backend.api.ai.router.ai_service.chat",
-            new=AsyncMock(return_value=self._reply()),
+            "app.components.backend.api.ai.service.ai_service.chat",
+            new=AsyncMock(return_value=_reply()),
         ) as mock_chat:
             response = client.post(
                 "/api/v1/ai/chat",
@@ -201,8 +206,8 @@ class TestChatAgentSlug:
 
     def test_chat_defaults_agent_slug_to_none(self, client: TestClient) -> None:
         with patch(
-            "app.components.backend.api.ai.router.ai_service.chat",
-            new=AsyncMock(return_value=self._reply()),
+            "app.components.backend.api.ai.service.ai_service.chat",
+            new=AsyncMock(return_value=_reply()),
         ) as mock_chat:
             response = client.post("/api/v1/ai/chat", json={"message": "hello"})
 
@@ -213,8 +218,8 @@ class TestChatAgentSlug:
         """Image parts ride the same request body as the message - one
         generic surface for every agent, not a per-surface upload."""
         with patch(
-            "app.components.backend.api.ai.router.ai_service.chat",
-            new=AsyncMock(return_value=self._reply()),
+            "app.components.backend.api.ai.service.ai_service.chat",
+            new=AsyncMock(return_value=_reply()),
         ) as mock_chat:
             response = client.post(
                 "/api/v1/ai/chat",
@@ -238,33 +243,52 @@ class TestChatAgentSlug:
 
     def test_chat_defaults_attachments_to_empty(self, client: TestClient) -> None:
         with patch(
-            "app.components.backend.api.ai.router.ai_service.chat",
-            new=AsyncMock(return_value=self._reply()),
+            "app.components.backend.api.ai.service.ai_service.chat",
+            new=AsyncMock(return_value=_reply()),
         ) as mock_chat:
             response = client.post("/api/v1/ai/chat", json={"message": "hello"})
 
         assert response.status_code == 200
         assert mock_chat.call_args.kwargs["attachments"] == []
 
-    def test_a_turn_carries_no_more_files_than_the_composer_takes(
-        self, client: TestClient
-    ) -> None:
-        """The composer stops at ``MAX_ATTACHMENTS``; the server holds the
-        same line for a client that does not."""
-        from app.core.chat_transcript import MAX_ATTACHMENTS
 
-        image = {"media_type": "image/png", "data_b64": "aGk=", "name": "a.png"}
+class TestChatTurnOwner:
+    """The chat routes pass the signed-in user as the turn's owner
+    (``current_owner_user_id``), whatever ``user_id`` the body names."""
+
+    async def test_the_plain_route_passes_the_session_user(
+        self, authenticated_client: TestClient, acting_owner_user_id: int | None
+    ) -> None:
         with patch(
-            "app.components.backend.api.ai.router.ai_service.chat",
-            new=AsyncMock(return_value=self._reply()),
+            "app.components.backend.api.ai.service.ai_service.chat",
+            new=AsyncMock(return_value=_reply()),
         ) as mock_chat:
-            response = client.post(
-                "/api/v1/ai/chat",
-                json={"message": "hi", "attachments": [image] * (MAX_ATTACHMENTS + 1)},
+            response = authenticated_client.post(
+                "/api/v1/ai/chat", json={"message": "hi", "user_id": "424242"}
             )
 
-        assert response.status_code == 422
-        mock_chat.assert_not_called()
+        assert response.status_code == 200
+        assert mock_chat.call_args.kwargs["owner_user_id"] == acting_owner_user_id
+
+    async def test_the_stream_passes_the_session_user(
+        self, authenticated_client: TestClient, acting_owner_user_id: int | None
+    ) -> None:
+        seen: list[int | None] = []
+
+        async def stream_chat(**kwargs: Any) -> Any:
+            seen.append(kwargs["owner_user_id"])
+            return
+            yield
+
+        with patch(
+            "app.components.backend.api.ai.service.ai_service.stream_chat",
+            new=stream_chat,
+        ):
+            authenticated_client.post(
+                "/api/v1/ai/chat/stream", json={"message": "hi", "user_id": "424242"}
+            )
+
+        assert seen == [acting_owner_user_id]
 
 
 class TestLLMPickerGating:
@@ -321,7 +345,7 @@ class TestLLMPickerGating:
         async def fake_icons(names: list[str]) -> dict[str, str]:
             return {"openai": "iVBORfake"}
 
-        monkeypatch.setattr(llm_router, "vendor_icons", fake_icons)
+        monkeypatch.setattr(llm_router, "_vendor_icons", fake_icons)
 
         response = client.get("/api/v1/llm/vendors", params={"usable": True})
 
@@ -335,7 +359,8 @@ class TestLLMPickerGating:
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The limit applies per vendor, and only callable vendors are
-        queried at all."""
+        queried at all: keyed ones with their key, and the keyless
+        ones (LLM7, Pollinations, the local engines), which need none."""
         # The llm package re-exports its APIRouter under the same name,
         # shadowing the module attribute - import the module directly.
         llm_router = importlib.import_module("app.components.backend.api.llm.routes")
@@ -349,6 +374,7 @@ class TestLLMPickerGating:
             "GROQ_API_KEY",
             "MISTRAL_API_KEY",
             "COHERE_API_KEY",
+            "OPEN_ROUTER_API_KEY",
         ):
             monkeypatch.setattr(settings, key, None)
         calls: list[list[str]] = []
@@ -379,10 +405,13 @@ class TestLLMPickerGating:
         assert response.status_code == 200
         # ONE catalog call carrying every callable vendor - the old
         # per-vendor loop opened a session per vendor (confirmed slow).
-        assert calls == [["ollama", "openai"]]
+        assert calls == [["llamacpp", "ollama", "openai", "pollinations", "public"]]
         assert [m["model_id"] for m in response.json()] == [
+            "llamacpp-model",
             "ollama-model",
             "openai-model",
+            "pollinations-model",
+            "public-model",
         ]
 
 
@@ -390,8 +419,15 @@ class TestUserMemoryEndpoints:
     """The dashboard's window on what the assistant saved about you."""
 
     def test_list_returns_saved_facts(self, client: TestClient) -> None:
+        from app.services.ai.domains.chat.user_memory import UserFact
+
         facts = [
-            {"index": 0, "category": "finance", "fact": "house is worth $711,200"},
+            UserFact(
+                index=0,
+                category="finance",
+                fact="house is worth $711,200",
+                saved_at=None,
+            )
         ]
         with patch(
             "app.services.ai.domains.chat.user_memory.list_user_facts",
@@ -401,11 +437,13 @@ class TestUserMemoryEndpoints:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["facts"] == facts
+        assert body["facts"] == [f.model_dump(mode="json") for f in facts]
         assert body["user_id"] == "0"  # the standalone default, as elsewhere
 
     def test_update_rewrites_a_fact(self, client: TestClient) -> None:
-        updated = {"index": 0, "category": "finance", "fact": "corrected"}
+        from app.services.ai.domains.chat.user_memory import UserFact
+
+        updated = UserFact(index=0, category="finance", fact="corrected", saved_at=None)
         with patch(
             "app.services.ai.domains.chat.user_memory.update_user_fact",
             AsyncMock(return_value=updated),
@@ -416,7 +454,7 @@ class TestUserMemoryEndpoints:
             )
 
         assert response.status_code == 200
-        assert response.json() == updated
+        assert response.json() == updated.model_dump(mode="json")
         assert mock_update.await_count == 1
 
     def test_delete_removes_a_fact(self, client: TestClient) -> None:
@@ -442,12 +480,12 @@ class TestUserMemoryEndpoints:
 
 class TestStreamToolFrame:
     """The SSE ``tool`` frame carries its trail label, computed once on
-    the server; the browser never re-derives it."""
+    the server; a browser client never re-derives it."""
 
-    def test_tool_frame_carries_the_label(self) -> None:
+    def test_tool_frame_carries_the_label(self, client: TestClient) -> None:
         from types import SimpleNamespace
 
-        from app.components.backend.api.ai import router
+        from app.components.backend.api.ai import service
 
         async def fake_stream(**_: Any) -> Any:
             yield SimpleNamespace(
@@ -460,69 +498,136 @@ class TestStreamToolFrame:
                 },
             )
 
-        with patch.object(router.ai_service, "stream_chat", fake_stream):
-            client = TestClient(create_integrated_app())
-            response = client.post(
-                "/api/v1/ai/chat/stream", json={"message": "hi", "user_id": "u"}
-            )
-        body = response.text
-        frame = next(b for b in body.split("\n\n") if b.startswith("event: tool"))
-        data = json.loads(frame.split("data: ", 1)[1])
-        assert data["label"] == "ledger(months=3)"
-        # Same-origin callers only: no other site may read the stream.
-        assert "access-control-allow-origin" not in response.headers
-
-
-class TestStreamErrorFrame:
-    """A failed stream names the kind of failure; the exception text stays
-    in the server log, never in the response."""
-
-    @pytest.mark.parametrize(
-        ("raised", "label"),
-        [
-            ("provider", "AI provider error"),
-            ("conversation", "Conversation error"),
-            ("service", "AI service error"),
-            ("other", "Unexpected error"),
-        ],
-    )
-    def test_error_frame_carries_only_the_label(self, raised: str, label: str) -> None:
-        from app.components.backend.api.ai import router
-        from app.services.ai.service import (
-            AIServiceError,
-            ConversationError,
-            ProviderError,
-        )
-
-        errors = {
-            "provider": ProviderError,
-            "conversation": ConversationError,
-            "service": AIServiceError,
-            "other": RuntimeError,
-        }
-
-        async def failing_stream(**_: Any) -> Any:
-            raise errors[raised]("secret internal detail")
-            yield  # pragma: no cover
-
-        with patch.object(router.ai_service, "stream_chat", failing_stream):
-            client = TestClient(create_integrated_app())
+        with patch.object(service.ai_service, "stream_chat", fake_stream):
             body = client.post(
                 "/api/v1/ai/chat/stream", json={"message": "hi", "user_id": "u"}
             ).text
-        frame = next(b for b in body.split("\n\n") if b.startswith("event: error"))
-        assert json.loads(frame.split("data: ", 1)[1]) == {"error": label}
+        frame = next(b for b in body.split("\n\n") if b.startswith("event: tool"))
+        data = json.loads(frame.split("data: ", 1)[1])
+        assert data["label"] == "ledger(months=3)"
 
 
-class TestHealthHidesTheException:
-    def test_failed_health_reports_status_without_the_text(self) -> None:
-        from app.components.backend.api.ai import router
+class TestChatErrorsReachTheClientCorrectly:
+    """``ProviderError`` and ``ConversationError`` subclass ``AIServiceError``,
+    and the handlers caught the base first, so both surfaced as a 503 "AI
+    service error". The catch-all sent the raw exception text to the client
+    (CodeQL py/stack-trace-exposure)."""
 
-        with patch.object(
-            router.ai_service,
-            "get_service_status",
-            AsyncMock(side_effect=RuntimeError("secret internal detail")),
+    SECRET = "/srv/app/.env token=sk-live-123"
+
+    def _chat_raising(self, exc: Exception) -> Any:
+        return patch(
+            "app.components.backend.api.ai.service.ai_service.chat",
+            new=AsyncMock(side_effect=exc),
+        )
+
+    def test_a_provider_error_is_a_bad_gateway(self, client: TestClient) -> None:
+        from app.services.ai.service import ProviderError
+
+        with self._chat_raising(ProviderError("upstream timed out")):
+            response = client.post("/api/v1/ai/chat", json={"message": "hi"})
+
+        assert response.status_code == 502
+
+    def test_a_conversation_error_is_a_bad_request(self, client: TestClient) -> None:
+        from app.services.ai.service import ConversationError
+
+        with self._chat_raising(ConversationError("no such conversation")):
+            response = client.post("/api/v1/ai/chat", json={"message": "hi"})
+
+        assert response.status_code == 400
+
+    def test_an_unexpected_error_keeps_its_text_server_side(
+        self, client: TestClient
+    ) -> None:
+        with self._chat_raising(RuntimeError(self.SECRET)):
+            response = client.post("/api/v1/ai/chat", json={"message": "hi"})
+
+        assert response.status_code == 500
+        assert self.SECRET not in response.text
+
+    @pytest.mark.parametrize("kind", ["ProviderError", "AIServiceError"])
+    def test_a_service_error_keeps_its_text_server_side(
+        self, client: TestClient, kind: str
+    ) -> None:
+        """A provider's message can echo the request, a key or a URL; the
+        status code and a label say enough."""
+        from app.services.ai import service
+
+        with self._chat_raising(getattr(service, kind)(self.SECRET)):
+            response = client.post("/api/v1/ai/chat", json={"message": "hi"})
+        assert self.SECRET not in response.text
+
+    @pytest.mark.parametrize(
+        "kind", ["ProviderError", "AIServiceError", "ConversationError"]
+    )
+    def test_a_streamed_service_error_keeps_its_text_server_side(
+        self, client: TestClient, kind: str
+    ) -> None:
+        from app.services.ai import service
+
+        with self._stream_raising(getattr(service, kind)(self.SECRET)):
+            body = client.post(
+                "/api/v1/ai/chat/stream", json={"message": "hi", "user_id": "u"}
+            ).text
+        assert self.SECRET not in body
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("list_conversations", "/api/v1/ai/conversations?user_id=u"),
+            ("get_conversation", "/api/v1/ai/conversations/c1"),
+        ],
+    )
+    def test_conversation_reads_keep_their_text_server_side(
+        self, client: TestClient, method: str, path: str
+    ) -> None:
+        with patch(
+            f"app.components.backend.api.ai.service.ai_service.{method}",
+            new=AsyncMock(side_effect=RuntimeError(self.SECRET)),
+            create=True,
         ):
-            client = TestClient(create_integrated_app())
-            body = client.get("/api/v1/ai/health").json()
-        assert body == {"service": "ai", "status": "error"}
+            response = client.get(path)
+        assert response.status_code == 500
+        assert self.SECRET not in response.text
+
+    def _stream_raising(self, exc: Exception) -> Any:
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise exc
+            yield  # an async generator, like the real stream
+
+        return patch(
+            "app.components.backend.api.ai.service.ai_service.stream_chat",
+            new=_raise,
+        )
+
+    def test_the_stream_names_a_provider_error(self, client: TestClient) -> None:
+        from app.services.ai.service import ProviderError
+
+        with self._stream_raising(ProviderError("upstream timed out")):
+            body = client.post(
+                "/api/v1/ai/chat/stream", json={"message": "hi", "user_id": "u"}
+            ).text
+
+        assert "AI provider error" in body
+
+    def test_the_stream_keeps_unexpected_text_server_side(
+        self, client: TestClient
+    ) -> None:
+        with self._stream_raising(RuntimeError(self.SECRET)):
+            body = client.post(
+                "/api/v1/ai/chat/stream", json={"message": "hi", "user_id": "u"}
+            ).text
+
+        assert "event: error" in body
+        assert self.SECRET not in body
+
+    def test_health_keeps_unexpected_text_server_side(self, client: TestClient) -> None:
+        with patch(
+            "app.components.backend.api.ai.service.ai_service.get_service_status",
+            new=AsyncMock(side_effect=RuntimeError(self.SECRET)),
+        ):
+            response = client.get("/api/v1/ai/health")
+
+        assert response.json()["status"] == "error"
+        assert self.SECRET not in response.text

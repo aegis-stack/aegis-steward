@@ -66,6 +66,11 @@ def _bigint(
     )
 
 
+# A price stored at its own precision (``price_scale`` digits), as a column
+# beside it says.
+PRICE_SCALED = "Integer, scaled by price_scale (2 is cents)."
+
+
 # Ciphertext columns on FinanceConnection: encrypted in the service layer,
 # masked in __repr__. Mirror of app.services.finance.constants.ENCRYPTED_COLUMNS.
 _ENCRYPTED_COLUMNS: tuple[str, ...] = (

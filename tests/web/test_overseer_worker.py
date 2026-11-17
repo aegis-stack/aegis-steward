@@ -2,6 +2,7 @@
 well), then the Flet worker modal's task history and lifecycle."""
 
 from collections.abc import Generator
+import re
 from typing import Any
 
 from fastapi import FastAPI
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.components.web_frontend import overseer_worker
+from app.components.web_frontend.assets import STATIC_DIR
 from app.services.system import ui_worker
 from app.services.system.models import ComponentStatus
 from app.services.system.ui import get_component_title
@@ -149,6 +151,14 @@ def _get(client: TestClient, section: str = "", query: str = "") -> str:
 
 
 class TestSections:
+    def test_on_a_phone_the_sections_are_one_row_that_scrolls(
+        self, signed_in: TestClient
+    ) -> None:
+        """Stacked, they pushed the page below the first screen."""
+        nav = one(one(_get(signed_in), "#overseer-subnav"), "nav")
+        assert {"flex", "overflow-x-auto", "md:block"} <= set(nav.get("class").split())
+        assert all("hidden" in h.get("class").split() for h in select(nav, "h3"))
+
     def test_overview_then_tasks_runtime_and_lifecycle(
         self, signed_in: TestClient
     ) -> None:
@@ -502,3 +512,24 @@ class TestLifecycle:
         """The first as the overview orders them: the failing one."""
         _get(signed_in, "lifecycle")
         assert seen["lifecycle"] == "load_test"
+
+
+def test_the_queue_card_stays_compact_when_it_stacks() -> None:
+    """Below ``lg`` the stages stack: Waiting across the card, Running and
+    Done side by side under it, and the cells keep a small size rather
+    than stretch to the card's width."""
+    css = (STATIC_DIR / "input.css").read_text()
+    assert re.search(
+        r"\.worker-flow > \[data-waiting\] \{ @apply sm:col-span-2 lg:col-span-1;", css
+    )
+    assert re.search(
+        r"\.worker-flow \{ @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-", css
+    )
+    assert re.search(
+        r"\.worker-pile \{ @apply grid grid-cols-\[repeat\(20,minmax\(0,[\d.]+rem\)\)\]",
+        css,
+    )
+    assert re.search(
+        r"\.worker-slots \{ @apply grid grid-cols-\[repeat\(10,minmax\(0,[\d.]+rem\)\)\]",
+        css,
+    )

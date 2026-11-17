@@ -10,6 +10,10 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("card_tools")
+
 
 def _result_event(tool_name: str, content: Any) -> Any:
     return SimpleNamespace(
@@ -75,6 +79,17 @@ class TestProposalComponentMarker:
         record_tool_result(trace, _result_event("propose", json.dumps(result)))
 
         assert "component" not in trace[0]
+
+    def test_a_memory_write_is_a_card_too(self) -> None:
+        """A memory tool files a pending change, drawn like any other."""
+        from app.services.ai.service.trace import record_tool_result
+
+        result = {"pending_change_id": 9, "change_type": "memory.save"}
+        trace: list[dict[str, Any]] = [{"tool": "save_memory", "args": ""}]
+
+        record_tool_result(trace, _result_event("save_memory", json.dumps(result)))
+
+        assert trace[0]["component"]["pending_change_id"] == 9
 
     def test_other_tools_are_untouched(self) -> None:
         from app.services.ai.service.trace import record_tool_result
@@ -143,6 +158,27 @@ class TestPendingListingMarker:
         assert batch["kind"] == "pending_change_batch"
         assert batch["count"] == 3
 
+    def test_a_listing_draws_only_the_cards_it_nominates(self) -> None:
+        """A listing read before filing a replacement draws nothing; only
+        the cards under ``draw`` (the user asked to see them) come back."""
+        from app.services.ai.service.trace import record_tool_result
+
+        listing = self._listing() | {"draw": self._listing()["pending"][1:]}
+        trace: list[dict[str, Any]] = [{"tool": "pending", "args": ""}]
+        record_tool_result(trace, _result_event("pending", json.dumps(listing)))
+
+        (single,) = trace[0]["component"]
+        assert single["pending_change_id"] == 7
+
+    def test_a_listing_that_draws_nothing_carries_no_marker(self) -> None:
+        from app.services.ai.service.trace import record_tool_result
+
+        listing = self._listing() | {"draw": []}
+        trace: list[dict[str, Any]] = [{"tool": "pending", "args": ""}]
+        record_tool_result(trace, _result_event("pending", json.dumps(listing)))
+
+        assert "component" not in trace[0]
+
     def test_an_empty_listing_carries_no_marker(self) -> None:
         from app.services.ai.service.trace import record_tool_result
 
@@ -154,104 +190,56 @@ class TestPendingListingMarker:
         assert "component" not in trace[0]
 
 
-class TestTheToolNominatesWhatIsDrawn:
-    """Reading what you filed should not repaint the thread.
+def test_each_result_lands_on_its_own_call() -> None:
+    """Calls to one tool made at once finish in any order: each result is
+    its call's (by id), not the latest unanswered one of that name."""
+    from app.services.ai.service.trace import record_tool_call, record_tool_result
 
-    ``pending()`` used to draw everything it listed, and it lists every
-    card the agent filed inside a fourteen-day window - 34 of them on a
-    real ledger. Its own docstring tells the model to call it before
-    filing a replacement, so the blanket call is the common path. One
-    turn came back with seven cards, six of them decided weeks earlier
-    (2026-09-11).
-
-    The tool decides now, because it is the only place that knows
-    whether the user asked about something. The trace marks what it
-    nominated and infers nothing.
-    """
-
-    def _card(self, batch: str, **over: Any) -> dict[str, Any]:
-        return {
-            "batch_id": batch,
-            "pending_change_ids": [1, 2],
-            "rows": 2,
-            "change_type": "transaction.split",
-            "title": "Split a transaction",
-            **over,
-        }
-
-    def test_only_what_the_tool_nominated_is_drawn(self) -> None:
-        from app.services.ai.service.trace import record_tool_result
-
-        listing = {
-            "pending": [self._card("b-new")],
-            "decided": [self._card("b-old"), self._card("b-older")],
-            "draw": [self._card("b-new")],
-        }
-        trace: list[dict[str, Any]] = [{"tool": "pending", "args": ""}]
-        record_tool_result(trace, _result_event("pending", json.dumps(listing)))
-
-        drawn = [m["batch_id"] for m in trace[0]["component"]]
-        assert drawn == ["b-new"], "a decided card is history, not an offer"
-
-    def test_nominating_nothing_draws_nothing(self) -> None:
-        """A listing the model read but the user did not ask to see."""
-        from app.services.ai.service.trace import record_tool_result
-
-        listing = {
-            "pending": [self._card("b-1")],
-            "decided": [self._card("b-2")],
-            "draw": [],
-        }
-        trace: list[dict[str, Any]] = [{"tool": "pending", "args": ""}]
-        record_tool_result(trace, _result_event("pending", json.dumps(listing)))
-
-        assert "component" not in trace[0]
-
-    def test_a_listing_from_before_the_change_still_draws(self) -> None:
-        """Stored traces have no ``draw``; their cards must keep
-        rendering rather than vanish from old conversations."""
-        from app.services.ai.service.trace import record_tool_result
-
-        listing = {"pending": [self._card("b-1")], "decided": []}
-        trace: list[dict[str, Any]] = [{"tool": "pending", "args": ""}]
-        record_tool_result(trace, _result_event("pending", json.dumps(listing)))
-
-        assert [m["batch_id"] for m in trace[0]["component"]] == ["b-1"]
-
-
-class TestParallelCallsKeepTheirOwnResults:
-    def test_each_result_lands_on_the_call_that_made_it(self) -> None:
-        """Seven parallel propose calls finished out of order, and each
-        result was pinned to the last call of that name still waiting:
-        the trace showed paste #bc13ca02 (IMG_6618) beside IMG_6614's card
-        (#428). The call id, not the name, says whose result it is."""
-        from pydantic_ai.messages import (
-            FunctionToolCallEvent,
-            FunctionToolResultEvent,
-            ToolCallPart,
-            ToolReturnPart,
+    def call(call_id: str, node: str) -> Any:
+        part = SimpleNamespace(
+            tool_name="ontology", args={"node": node}, tool_call_id=call_id
         )
+        return SimpleNamespace(part=part)
 
-        from app.services.ai.service.trace import record_tool_call, record_tool_result
+    def answered(call_id: str, node: str) -> Any:
+        part = SimpleNamespace(
+            tool_name="ontology", content=node, metadata=None, tool_call_id=call_id
+        )
+        return SimpleNamespace(part=part)
 
-        trace: list[dict[str, Any]] = []
-        for call_id, paste in (("a", "p1"), ("b", "p2"), ("c", "p3")):
-            record_tool_call(
-                trace,
-                FunctionToolCallEvent(
-                    ToolCallPart("propose", {"paste_id": paste}, tool_call_id=call_id)
-                ),
-            )
-        for call_id, paste in (("b", "p2"), ("a", "p1"), ("c", "p3")):
-            record_tool_result(
-                trace,
-                FunctionToolResultEvent(
-                    ToolReturnPart("propose", f"filed {paste}", tool_call_id=call_id)
-                ),
-            )
+    trace: list[dict[str, Any]] = []
+    for call_id, node in (("a", "service:auth"), ("b", "service:blog")):
+        record_tool_call(trace, call(call_id, node))
+    # The one it filled, for a card drawn by it to ride (``attach_cards``).
+    assert record_tool_result(trace, answered("a", "service:auth")) is trace[0]
+    record_tool_result(trace, answered("b", "service:blog"))
 
-        assert [(json.loads(e["args"])["paste_id"], e["result"]) for e in trace] == [
-            ("p1", "filed p1"),
-            ("p2", "filed p2"),
-            ("p3", "filed p3"),
-        ]
+    assert [(json.loads(e["args"])["node"], e["result"]) for e in trace] == [
+        ("service:auth", "service:auth"),
+        ("service:blog", "service:blog"),
+    ]
+
+
+def test_each_tool_call_is_a_step_for_whoever_is_watching() -> None:
+    """A call the registry does not run, a code-mode script, is heard as
+    a step where the model asks for it (``app.core.steps``): by its first
+    comment."""
+    from app.core.steps import watching
+    from app.core.tools import register_tool, unregister_tool
+    from app.services.ai.service.trace import record_tool_call
+
+    script = {"code": "# What depends on the cache\nprint(1)"}
+    call = SimpleNamespace(part=SimpleNamespace(tool_name="run_code", args=script))
+    registered = SimpleNamespace(part=SimpleNamespace(tool_name="look_up", args={}))
+    steps: list[str] = []
+
+    register_tool("look_up", str, effect="read", doing="Looking it up")
+    try:
+        with watching(steps.append):
+            record_tool_call([], call)
+            # A registered tool is heard where it runs (``resolve_tools``).
+            record_tool_call([], registered)
+    finally:
+        unregister_tool("look_up")
+
+    assert steps == ["What depends on the cache"]

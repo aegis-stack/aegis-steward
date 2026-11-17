@@ -24,7 +24,7 @@ from app.core import series
 from app.core.concurrency import background
 from app.core.formatting import format_relative_time
 from app.core.log import logger
-from app.services.ai.service import format_context_window
+from app.core.model_picker import format_context_window
 from app.services.system.models import ComponentStatus
 
 from .overseer_live import fragment_events
@@ -36,6 +36,9 @@ SECTIONS = (
 )
 
 PARTIALS = "/partials/overseer/inference"
+# The Inference > Speech page AI > Voice links to: the template's, which
+# comes with its inference engine (#637). Until then there is none.
+SPEECH_PAGE: str | None = None
 # Capabilities worth a word in the Models table; ``completion`` is on every
 # generative model, so it separates nothing.
 CAPABILITIES = ("tools", "vision", "thinking", "embedding")

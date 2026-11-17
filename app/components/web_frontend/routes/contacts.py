@@ -27,8 +27,8 @@ from app.components.web_frontend.rendering import (
     where_from,
     with_toast,
 )
+from app.components.web_frontend.routes.partials.changes import change_url
 from app.core.db import get_async_session
-from app.services.ai.service.trace import CHANGE_MARKER
 from app.services.finance.deps import get_owner_user_id
 from app.services.matters.facts import web_address
 from app.services.matters.reach import (
@@ -177,7 +177,7 @@ async def look_up(request: Request, party_id: int) -> Response:
         request,
         "partials/contacts/looked_up.html",
         party=party,
-        marker={"kind": CHANGE_MARKER, "id": card.id},
+        card_url=change_url(card.id),
     )
 
 

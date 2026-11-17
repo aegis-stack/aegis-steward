@@ -14,8 +14,9 @@ from typing import Any, TypedDict
 
 from app.core import ownership, series
 from app.core.constants import ComponentName
-from app.core.ontology import EdgeKind, SystemModel, current
+from app.core.ontology import EdgeKind, SystemModel
 from app.core.ontology.model import parse_node_id
+from app.core.ontology.shared import twin
 from app.core.ownership import HOST
 from app.services.system import topology, ui_resources, ui_runtime
 from app.services.system.models import ComponentStatusType
@@ -34,7 +35,7 @@ from . import (
     overseer_zoom,
 )
 from .filters import health_tone, worst_tone
-from .overseer_live import chart_frames, chart_panel, fragments_events
+from .overseer_live import Drawn, chart_panel, fragments_events, live_events
 from .overseer_nav import NavItem, current_navigation, runtime_page_url
 from .rendering import fragment, with_query
 
@@ -80,13 +81,15 @@ _UNSHOWN = {
 RESTART = "/partials/overseer/runtime/restart/{name}"
 
 
-async def context(page: str, query: Mapping[str, str]) -> dict[str, Any]:
-    """The section's cards and its charts over the chosen ``window`` as last
-    sampled, so it opens full and never waits on the runtime (``PENDING``
-    before the first sample), the range chips, and where it all refreshes
-    from."""
+async def context(
+    page: str, query: Mapping[str, str], only: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """The section's cards and its charts (given ``only``, those alone) over
+    the chosen ``window`` as last sampled, so it opens full and never waits
+    on the runtime (``PENDING`` before the first sample), the range chips,
+    and where it all refreshes from."""
     seconds, offered = await ui_runtime.window_of(page, query.get("window"))
-    table, charts = await ui_runtime.section(page, seconds, wait=False)
+    table, charts = await ui_runtime.section(page, seconds, wait=False, only=only)
     return {
         "container": toned(table),
         "container_charts": chart_panel(
@@ -245,7 +248,7 @@ async def overview(
     if drawn:
         placed = await _drawn(stack, [e for e, _ in entries], state, path)
     else:
-        model = await asyncio.to_thread(current)
+        model = await twin()
         _name_causes(stack, _cause_links(model, stack))
         placed = {"overview_stack": stack}
     server = found[host]["rows"] if host in found else []
@@ -283,15 +286,15 @@ async def _drawn(
         stack.append(overseer_worker.queue_node(worker))
     _inherit(stack)
     whole = {item["key"]: item for item in stack} if path else {}  # unopened
-    model = await asyncio.to_thread(current)
+    model = await twin()
     shape, pieces, links, tones = None, [], [], {}
     if zoom == HOST:
         stack, shape = overseer_zoom.opened(stack, model)
         await overseer_zoom.name_unkeyed(stack)
         # A path's map is inert (a replay's scene, a path card): no node on
-        # it opens, so which could (every service's pieces read) is not asked.
+        # it opens, so which could is not asked.
         if not path:
-            keys = await asyncio.to_thread(overseer_zoom.openable, stack, model)
+            keys = await asyncio.to_thread(overseer_zoom.openable, stack)
             for item in stack:
                 if item["key"] in keys:
                     item["zoom"] = zoom_url(item["key"])
@@ -482,17 +485,11 @@ def events(  # noqa: ANN201 - async iterator
     max_frames: int | None = None,
     charts: tuple[str, ...] = (),
 ):
-    """The cards and each chart over SSE, each sent again only when it
-    changes (``overseer_live.chart_frames``); a long window's charts are
-    read again only when its tier moves (``series.Redraw``). Given
-    ``charts``, those alone and no cards (a page's Overview)."""
-    held: dict[str, tuple[list[str], int]] = {}
-    redraw = series.Redraw(window)
+    """The cards and each chart over SSE (``overseer_live.live_events``).
+    Given ``charts``, those alone and no cards (a page's Overview)."""
 
-    async def frame() -> dict[str, str]:
-        table, drawn = await ui_runtime.section(page, window, draw=redraw.due())
-        shown = [c for c in drawn or () if not charts or c["key"] in charts]
-        sent = {} if charts else {EVENT: render(table)}
-        return sent | chart_frames(EVENT, shown, held)
+    async def read(draw: bool) -> tuple[dict[str, str], Drawn]:
+        table, drawn = await ui_runtime.section(page, window, draw=draw, only=charts)
+        return ({} if charts else {EVENT: render(table)}), drawn
 
-    return fragments_events(frame, series.TICK_SECONDS, max_frames)
+    return live_events(EVENT, read, window, max_frames)

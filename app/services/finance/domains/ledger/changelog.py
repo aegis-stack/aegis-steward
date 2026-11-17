@@ -81,18 +81,20 @@ _QUIET = "finance_changelog_quiet"
 
 
 @contextmanager
-def acting(actor: str, *, join: bool = False) -> Iterator[str]:
+def acting(
+    actor: str, *, join: bool = False, batch: str | None = None
+) -> Iterator[str]:
     """Log what happens inside as ``actor``'s, as one action: a fresh
-    batch, restored to the outer one after (an approval inside a request
-    is the assistant's, not the request's). ``join`` keeps the outer
-    batch when the same actor already holds one: each card approved in a
-    batch is that batch's action."""
+    batch (or ``batch``, an id the action already has: a card batch's),
+    restored to the outer one after (an approval inside a request is the
+    assistant's, not the request's). ``join`` keeps the outer batch when
+    the same actor already holds one."""
     current = _batch.get()
     if join and current and _actor.get() == actor:
         yield current
         return
     actor_token = _actor.set(actor)
-    batch = str(uuid.uuid4())
+    batch = batch or str(uuid.uuid4())
     batch_token = _batch.set(batch)
     try:
         yield batch

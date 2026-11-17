@@ -14,6 +14,8 @@ RUN npm install --no-audit --no-fund
 # usage. A class that lives outside these paths is not emitted.
 COPY tailwind.config.js ./
 COPY app/core/palette.json ./app/core/palette.json
+COPY app/components/web_frontend/themes \
+     ./app/components/web_frontend/themes
 COPY app/components/web_frontend/static/input.css \
      ./app/components/web_frontend/static/input.css
 COPY app/components/web_frontend/templates \
@@ -41,6 +43,25 @@ RUN apt-get update -y && \
     && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# ---------------------------------------------------------------------------
+# Plugin hooks. These two blocks never change when a plugin comes or goes:
+# a plugin contributes DATA (docker/apt-packages.txt, docker/build.d/*.sh),
+# written by `aegis add` / `aegis remove`, so this file stays out of it.
+# ---------------------------------------------------------------------------
+
+# Packages plugins asked for. xargs, not sh -c: a package name is never
+# interpolated into a shell. ``apt-get update`` runs here because the base
+# block above ends by removing /var/lib/apt/lists.
+COPY docker/apt-packages.txt /tmp/apt-packages.txt
+RUN apt-get update -y && \
+    grep -v '^\s*#' /tmp/apt-packages.txt | xargs -r apt-get install -y --no-install-recommends && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/apt-packages.txt
+
+# Build steps plugins ship (docker/build.d/<plugin>.sh), in name order.
+COPY docker/build.d/ /tmp/build.d/
+RUN for step in $(ls /tmp/build.d/*.sh 2>/dev/null | sort); do sh "$step"; done && \
+    rm -rf /tmp/build.d
 
 # Install uv with specific version for reproducibility
 RUN pip install --no-cache-dir uv==0.10.0
@@ -97,10 +118,9 @@ ENV PORT=$PORT
 # declares its own list replaces the anchor's wholesale, and this was
 # quietly dropping to the code directory in every container.
 ENV STORAGE_ROOT=/data/storage
-# Where the nightly backup job writes (the backup-data volume in compose).
-# Here for the same reason: the job runs on the worker, and setting this
-# only on the scheduler sent the worker's backups into its own container
-# layer, gone on every deploy.
+# Where the scheduled database backup writes (the backup-data volume). The
+# scheduler enqueues it and a worker runs it, so every container needs it,
+# for the same reason as STORAGE_ROOT above.
 ENV DATABASE_BACKUP_DIR=/var/backups/app
 
 # Expose the port

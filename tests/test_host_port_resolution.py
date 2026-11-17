@@ -2,7 +2,7 @@
 
 ``make serve`` shifts only the HOST publish port when a default is taken by
 another stack; the container port never moves. These tests pin the
-behaviour of ``Settings._localhost_url`` and each ``*_effective`` property:
+behaviour of ``Settings.localhost_url`` and each ``*_effective`` property:
 the host-side branch must use the chosen ``*_HOST_PORT`` (loaded from
 ``.env.ports``) so host-side CLI commands reach the same port compose
 published, while in-Docker resolution and explicit ``*_URL_LOCAL``
@@ -31,24 +31,24 @@ def _isolate_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 class TestLocalhostUrlHelper:
     def test_swaps_docker_hostname_for_localhost(self) -> None:
-        url = Settings._localhost_url("postgresql://u:p@postgres:5432/db", {"postgres"})
+        url = Settings.localhost_url("postgresql://u:p@postgres:5432/db", {"postgres"})
         assert url == "postgresql://u:p@localhost:5432/db"
 
     def test_host_port_overrides_container_port(self) -> None:
-        url = Settings._localhost_url(
+        url = Settings.localhost_url(
             "postgresql://u:p@postgres:5432/db", {"postgres"}, 5433
         )
         assert url == "postgresql://u:p@localhost:5433/db"
 
     def test_preserves_auth_and_path(self) -> None:
-        url = Settings._localhost_url(
+        url = Settings.localhost_url(
             "postgresql://user:secret@postgres:5432/mydb", {"postgres"}, 5499
         )
         assert url == "postgresql://user:secret@localhost:5499/mydb"
 
     def test_passthrough_when_host_not_a_docker_service(self) -> None:
         # An already host-reachable URL is returned untouched, host port and all.
-        url = Settings._localhost_url(
+        url = Settings.localhost_url(
             "postgresql://u:p@db.example.com:5432/db", {"postgres"}, 5433
         )
         assert url == "postgresql://u:p@db.example.com:5432/db"

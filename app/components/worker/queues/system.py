@@ -4,6 +4,7 @@ System worker queue configuration.
 Handles system maintenance and monitoring tasks using native arq patterns.
 """
 
+from arq import func
 from arq.connections import RedisSettings
 
 from app.components.worker import arq_hooks
@@ -13,11 +14,16 @@ from app.components.worker.tasks.chat_tasks import (
     read_photo_task,
 )
 from app.components.worker.tasks.document_tasks import extract_document_task
+from app.components.worker.tasks.eval_tasks import (
+    generate_evals_task,
+    run_evals_task,
+)
 from app.components.worker.tasks.finance_tasks import (
     finance_import_task,
     finance_sync_connection_task,
 )
 from app.components.worker.tasks.mail_tasks import mail_import_task
+from app.components.worker.tasks.rag_tasks import embed_files_task
 from app.components.worker.tasks.service_jobs import service_job_tasks
 from app.components.worker.tasks.simple_system_tasks import (
     cleanup_temp_files,
@@ -25,17 +31,18 @@ from app.components.worker.tasks.simple_system_tasks import (
 )
 from app.core.config import settings
 from app.core.constants import QueueName
-from app.core.queue_workers import concurrency_for
+from app.core.discovery import present
+from app.core.queue_workers import concurrency_for, settings_for
 
 
 async def _start_on_the_picked_model() -> None:
     """Start the job on the model you picked.
 
-    The selection is a database row, switched without a restart, and this
-    process never boots through the hook that applies it: a job building
-    its model from settings alone ran the .env bootstrap model (#390).
-    Read here, before the job opens a session of its own - asked inside
-    one, the read waits on that job's write lock.
+    The selection is a database row, switched without a restart, and boot
+    applies it only once: a job building its model from what the worker
+    booted with ran a model since switched away from (#390). Read here,
+    before the job opens a session of its own - asked inside one, the read
+    waits on that job's write lock.
     """
     from app.services.ai.service import active_model
 
@@ -53,14 +60,27 @@ class WorkerSettings:
         system_health_check,
         cleanup_temp_files,
         announce_approval_task,
-        fold_conversation_task,
-        read_photo_task,
-        extract_document_task,
         finance_import_task,
         finance_sync_connection_task,
         mail_import_task,
         *service_job_tasks(),
     ]
+    # A service's task only where the service is: elsewhere it reaches nothing.
+    if present("app.services.documents"):
+        functions.append(extract_document_task)
+        # A picture shared in chat, read into its paste index.
+        if present("app.services.ai.domains.chat.pastes"):
+            functions.append(read_photo_task)
+    if present("app.services.ai.domains.chat.summary"):
+        # A long conversation's turns out of view, folded into its summary.
+        functions.append(fold_conversation_task)
+    if present("app.services.rag"):
+        # A batch waits for the one model this process embeds with.
+        functions.append(func(embed_files_task, timeout=30 * 60))
+    if present("app.services.ai.domains.evals.jobs"):
+        # A run is a model call per case, one after another.
+        functions.append(func(run_evals_task, timeout=30 * 60))
+        functions.append(func(generate_evals_task, timeout=30 * 60))
 
     # arq configuration with improved connection settings
     base_settings = RedisSettings.from_dsn(settings.redis_url_effective)
@@ -75,7 +95,7 @@ class WorkerSettings:
     )
     queue_name = "arq:queue:system"
     max_jobs = concurrency_for(QueueName.SYSTEM)  # Settings.WORKER_QUEUES
-    job_timeout = 300  # 5 minutes
+    job_timeout = settings_for(QueueName.SYSTEM).timeout_seconds
     keep_result = settings.WORKER_KEEP_RESULT_SECONDS
     max_tries = settings.WORKER_MAX_TRIES
     health_check_interval = settings.WORKER_HEALTH_CHECK_INTERVAL

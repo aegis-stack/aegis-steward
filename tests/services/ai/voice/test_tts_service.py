@@ -2,8 +2,14 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
-from app.services.ai.domains.voice.models import TTSProvider
+import pytest
+
+from app.services.ai.domains.voice.models import DEFAULT_TTS_MODEL, TTSProvider
 from app.services.ai.domains.voice.tts import TTSService
+from app.services.ai.domains.voice.tts.service import unsaid
+from tests._voice_errors import AnsweredError
+from tests._voice_packages import packages_installed
+from tests._voice_settings import voice_settings
 
 
 class TestTTSServiceInit:
@@ -11,12 +17,7 @@ class TestTTSServiceInit:
 
     def test_init_with_settings(self) -> None:
         """Test initialization with settings object."""
-        settings = MagicMock()
-        settings.TTS_PROVIDER = "openai"
-        settings.TTS_MODEL = "tts-1-hd"
-        settings.TTS_VOICE = "nova"
-        settings.TTS_SPEED = 1.5
-        settings.TTS_INSTRUCTIONS = None
+        settings = voice_settings(TTS_MODEL="tts-1-hd", TTS_VOICE="nova", TTS_SPEED=1.5)
 
         service = TTSService(settings)
 
@@ -56,7 +57,7 @@ class TestTTSServiceInit:
         service = TTSService()
 
         assert service.provider_type == TTSProvider.OPENAI
-        assert service.model == "tts-1"
+        assert service.model == DEFAULT_TTS_MODEL
         assert service.voice == "alloy"
 
 
@@ -81,7 +82,7 @@ class TestTTSServiceProperties:
         """Test model property returns provider default when not set."""
         service = TTSService()
 
-        assert service.model == "tts-1"
+        assert service.model == DEFAULT_TTS_MODEL
 
     def test_model_property_returns_explicit(self) -> None:
         """Test model property returns explicit model when set."""
@@ -125,103 +126,79 @@ class TestTTSServiceProviderManagement:
 class TestTTSServiceValidation:
     """Test TTSService validation methods."""
 
-    def test_validate_with_valid_config(self) -> None:
+    async def test_validate_with_valid_config(self) -> None:
         """Test validate returns empty list for valid config."""
-        settings = MagicMock()
-        settings.OPENAI_API_KEY = "sk-test-key"
-        settings.TTS_PROVIDER = "openai"
-        settings.TTS_MODEL = None
-        settings.TTS_VOICE = None
-        settings.TTS_SPEED = 1.0
-        settings.TTS_INSTRUCTIONS = None
+        settings = voice_settings(OPENAI_API_KEY="sk-test-key")
 
         service = TTSService(settings)
-        errors = service.validate()
+        errors = await service.validate()
 
         assert len(errors) == 0
 
-    def test_validate_with_missing_api_key(self) -> None:
+    async def test_validate_with_missing_api_key(self) -> None:
         """Test validate returns errors for missing API key."""
         settings = MagicMock(spec=[])
 
         service = TTSService(settings)
-        errors = service.validate()
+        errors = await service.validate()
 
         assert len(errors) == 1
         assert "OPENAI_API_KEY" in errors[0]
 
-    def test_is_available_true_when_valid(self) -> None:
+    async def test_is_available_true_when_valid(self) -> None:
         """Test is_available returns True when validation passes."""
-        settings = MagicMock()
-        settings.OPENAI_API_KEY = "sk-test-key"
-        settings.TTS_PROVIDER = "openai"
-        settings.TTS_MODEL = None
-        settings.TTS_VOICE = None
-        settings.TTS_SPEED = 1.0
-        settings.TTS_INSTRUCTIONS = None
+        settings = voice_settings(OPENAI_API_KEY="sk-test-key")
 
         service = TTSService(settings)
 
-        assert service.is_available() is True
+        assert await service.is_available() is True
 
-    def test_is_available_false_when_invalid(self) -> None:
+    async def test_is_available_false_when_invalid(self) -> None:
         """Test is_available returns False when validation fails."""
         settings = MagicMock(spec=[])
 
         service = TTSService(settings)
 
-        assert service.is_available() is False
+        assert await service.is_available() is False
 
 
 class TestTTSServiceStatus:
     """Test TTSService.get_status() method."""
 
-    def test_get_status_returns_dict(self) -> None:
+    async def test_get_status_returns_dict(self) -> None:
         """Test get_status returns status dictionary."""
-        settings = MagicMock()
-        settings.OPENAI_API_KEY = "sk-test-key"
-        settings.TTS_PROVIDER = "openai"
-        settings.TTS_MODEL = None
-        settings.TTS_VOICE = None
-        settings.TTS_SPEED = 1.0
-        settings.TTS_INSTRUCTIONS = None
+        settings = voice_settings(OPENAI_API_KEY="sk-test-key")
 
         service = TTSService(settings)
-        status = service.get_status()
+        status = await service.get_status()
 
         assert isinstance(status, dict)
         assert status["provider"] == "openai"
-        assert status["model"] == "tts-1"
+        assert status["model"] == DEFAULT_TTS_MODEL
         assert status["voice"] == "alloy"
         assert status["speed"] == 1.0
         assert status["initialized"] is False
         assert status["available"] is True
 
-    def test_get_status_shows_not_available(self) -> None:
+    async def test_get_status_shows_not_available(self) -> None:
         """Test get_status shows not available when invalid."""
         settings = MagicMock(spec=[])
 
         service = TTSService(settings)
-        status = service.get_status()
+        status = await service.get_status()
 
         assert status["available"] is False
         assert status["errors"] is not None
 
-    def test_get_status_shows_initialized(self) -> None:
+    async def test_get_status_shows_initialized(self) -> None:
         """Test get_status shows initialized when provider created."""
-        settings = MagicMock()
-        settings.OPENAI_API_KEY = "sk-test-key"
-        settings.TTS_PROVIDER = "openai"
-        settings.TTS_MODEL = None
-        settings.TTS_VOICE = None
-        settings.TTS_SPEED = 1.0
-        settings.TTS_INSTRUCTIONS = None
+        settings = voice_settings(OPENAI_API_KEY="sk-test-key")
 
         service = TTSService(settings)
         # Force provider creation
         service._provider_instance = MagicMock()
 
-        status = service.get_status()
+        status = await service.get_status()
 
         assert status["initialized"] is True
 
@@ -243,16 +220,9 @@ class TestStreamingRecordsUsage:
         provider = MagicMock()
         provider.synthesize_stream = _chunks
         service = TTSService(
-            MagicMock(
-                TTS_PROVIDER="openai",
-                TTS_MODEL=None,
-                TTS_VOICE=None,
-                TTS_SPEED=1.0,
-                TTS_INSTRUCTIONS=None,
-                OPENAI_API_KEY="k",
-            )
+            voice_settings(TTS_MODEL="gpt-4o-mini-tts", OPENAI_API_KEY="k")
         )
-        monkeypatch.setattr(service, "_get_provider", lambda: provider)
+        monkeypatch.setattr(service, "_get_provider", AsyncMock(return_value=provider))
         record = AsyncMock()
         monkeypatch.setattr(service, "_record_usage", record)
 
@@ -266,14 +236,13 @@ class TestStreamingRecordsUsage:
         assert got == [b"ab", b"cde"]
         kwargs = record.call_args.kwargs
         assert kwargs["user_id"] == "0"
-        assert kwargs["output_bytes"] == 5
         assert kwargs["input_characters"] == 5
         assert kwargs["success"] is True
 
 
 class TestTheConfiguredVoiceIsUsed:
     """TTS_SPEED was read into the config and never reached the provider:
-    every request carried SpeechRequest's own default of 1.0 (2026-09-25).
+    every request carried SpeechRequest's own default of 1.0.
     What a request leaves unset comes from the settings; what it sets wins."""
 
     def _service(self, monkeypatch, speed: float, instructions: str | None):  # noqa: ANN001, ANN202
@@ -289,16 +258,14 @@ class TestTheConfiguredVoiceIsUsed:
 
         provider = MagicMock()
         provider.synthesize_stream = _chunks
-        settings = MagicMock(
-            TTS_PROVIDER="openai",
-            TTS_MODEL=None,
-            TTS_VOICE=None,
+        settings = voice_settings(
+            TTS_MODEL="gpt-4o-mini-tts",  # the streamed speech endpoint
             TTS_SPEED=speed,
             TTS_INSTRUCTIONS=instructions,
             OPENAI_API_KEY="k",
         )
         service = TTSService(settings)
-        monkeypatch.setattr(service, "_get_provider", lambda: provider)
+        monkeypatch.setattr(service, "_get_provider", AsyncMock(return_value=provider))
         monkeypatch.setattr(service, "_record_usage", AsyncMock())
         return service, seen
 
@@ -319,3 +286,94 @@ class TestTheConfiguredVoiceIsUsed:
         request = SpeechRequest(text="Hi", speed=0.9, instructions="Whisper.")
         [c async for c in service.synthesize_stream(request)]
         assert (seen[0].speed, seen[0].instructions) == (0.9, "Whisper.")
+
+
+class TestWhatEachSpeaksIn:
+    """A stream's response is typed before its first byte: OpenAI's
+    realtime model and Gemini answer in WAV, OpenAI's speech endpoint in
+    MP3."""
+
+    def test_the_media_type_follows_the_provider_and_its_model(self) -> None:
+        for provider, model, media in (
+            ("openai", None, "audio/wav"),  # gpt-realtime-2.1-mini
+            ("openai", "gpt-4o-mini-tts", "audio/mpeg"),
+            ("gemini", None, "audio/wav"),
+            ("gemini", "gemini-3.8-flash-lite-tts", "audio/wav"),
+        ):
+            settings = voice_settings(TTS_PROVIDER=provider, TTS_MODEL=model)
+            assert TTSService(settings).media_type == media, (provider, model)
+
+
+class TestStreamingMeasuresTheSpeech:
+    """A streamed reply is billed like a whole one: by the second of speech
+    for gpt-4o-mini-tts, measured from what was streamed."""
+
+    async def test_the_streamed_audio_is_measured(self, monkeypatch) -> None:  # noqa: ANN001
+        from app.services.ai.domains.voice.models import SpeechRequest
+
+        frame = b"\xff\xf3\xc4\xc4" + b"\x00" * 380  # 0.024s of MP3
+
+        async def _chunks(request):  # noqa: ANN001, ANN202
+            yield frame * 20
+            yield frame * 30
+
+        provider = MagicMock()
+        provider.synthesize_stream = _chunks
+        service = TTSService(voice_settings(TTS_MODEL="gpt-4o-mini-tts"))
+        monkeypatch.setattr(service, "_get_provider", AsyncMock(return_value=provider))
+        record = AsyncMock()
+        monkeypatch.setattr(service, "_record_usage", record)
+
+        [c async for c in service.synthesize_stream(SpeechRequest(text="Hello"))]
+
+        assert record.call_args.kwargs["output_duration_seconds"] == pytest.approx(1.2)
+
+
+class TestUnsaid:
+    """Why speech failed, safe to show: what the answer means, never its text."""
+
+    @pytest.mark.parametrize(
+        ("cause", "meaning"),
+        [
+            (AnsweredError(503), "busy"),
+            (AnsweredError(429), "quota"),
+            (AnsweredError(401), "key"),
+            (AnsweredError(404), "model"),
+            (TimeoutError("Gemini did not answer"), "in time"),
+            (ConnectionRefusedError(61, "Connection refused"), "reached"),
+        ],
+    )
+    def test_says_what_the_provider_answered(
+        self, cause: BaseException, meaning: str
+    ) -> None:
+        wrapped = RuntimeError(f"Speech synthesis failed: {cause}")
+        wrapped.__cause__ = cause  # as a provider raises it
+
+        said = unsaid(wrapped)
+
+        assert meaning in said
+        assert "secret" not in said and "internal" not in said
+
+    def test_an_answer_with_no_meaning_points_at_the_log(self) -> None:
+        said = unsaid(RuntimeError("key=sk-secret"))
+
+        assert "log" in said
+        assert "secret" not in said
+
+    def test_says_a_missing_package_with_the_line_that_installs_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.services.ai.domains.voice.tts.providers import get_tts_provider
+
+        packages_installed(monkeypatch, False)
+        with pytest.raises(RuntimeError) as refused:
+            get_tts_provider(TTSProvider.KOKORO)
+
+        assert unsaid(refused.value) == str(refused.value)
+        assert "uv add" in unsaid(refused.value)
+
+    def test_a_chain_that_loops_back_on_itself_still_ends(self) -> None:
+        looped = RuntimeError("key=sk-secret")
+        looped.__cause__ = looped
+
+        assert "log" in unsaid(looped)

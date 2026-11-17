@@ -10,8 +10,6 @@ lookup lives in exactly one place.
 
 from typing import Any
 
-from sqlmodel import select
-
 from app.core import series
 from app.core.db import get_async_session
 from app.core.log import logger
@@ -37,35 +35,56 @@ def _token_count(usage: Any, *names: str) -> int:
     return 0
 
 
+def _optional_token_count(usage: Any, *names: str) -> int | None:
+    """Like ``_token_count`` but None when the provider never said.
+
+    A provider that supports caching and got no hits reports 0, which is
+    a measurement worth keeping. A provider or client version that has
+    no such attribute reported nothing at all, and folding that to 0
+    would claim a cache was offered and missed on every call.
+    """
+    for name in names:
+        value = getattr(usage, name, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
 def extract_usage(result: Any) -> dict[str, int]:
     """Token usage from a pydantic-ai run result.
 
     Handles every shape pydantic-ai has shipped: ``result.usage`` as a
-    data attribute (legacy ``Usage`` with request/response_tokens) or as
-    a method returning ``RunUsage`` (input/output_tokens). Anything
+    data attribute (legacy ``Usage`` with request/response_tokens, or
+    today's ``RunUsage``, whose deprecated call is never made) or as a
+    method returning ``RunUsage`` (input/output_tokens). Anything
     unreadable degrades to zeros rather than raising — usage tracking
     must never fail the request.
 
     Cache accounting: pydantic-ai's ``input_tokens`` AGGREGATES uncached +
     cache-read + cache-write tokens, so the cache splits ride along for
     pricing (cached reads bill at ~0.1x, writes at ~1.25x on Anthropic).
-    Zero on providers/runs without caching, which prices identically to
-    the pre-cache behavior.
+    Absent on providers/clients that report no cache counts at all,
+    which prices identically to the pre-cache behavior.
     """
     usage = getattr(result, "usage", None)
-    if callable(usage):
+    if callable(usage) and not hasattr(usage, "input_tokens"):
         try:
             usage = usage()
         except Exception:
             return {"input_tokens": 0, "output_tokens": 0}
     if usage is None:
         return {"input_tokens": 0, "output_tokens": 0}
-    return {
+    counts = {
         "input_tokens": _token_count(usage, "input_tokens", "request_tokens"),
         "output_tokens": _token_count(usage, "output_tokens", "response_tokens"),
-        "cache_read_tokens": _token_count(usage, "cache_read_tokens"),
-        "cache_write_tokens": _token_count(usage, "cache_write_tokens"),
     }
+    # Present only when the provider actually reported them, so the
+    # ledger can tell "no cache hits" from "no cache at all".
+    for key in ("cache_read_tokens", "cache_write_tokens"):
+        reported = _optional_token_count(usage, key)
+        if reported is not None:
+            counts[key] = reported
+    return counts
 
 
 async def _rates(model: str) -> llm_queries.Rates | None:
@@ -140,23 +159,28 @@ def _priced_input_cost(usage: dict[str, int], rates: llm_queries.Rates) -> float
     )
 
 
-async def _write(row: LLMUsage, what: str) -> None:
-    """One ledger row, its model named bare like every other, and its user
-    whoever it is done for where the caller names none; a failed
-    write is logged and swallowed - usage tracking must never fail the
-    calling request."""
+def stamped(row: LLMUsage) -> LLMUsage:
+    """A ledger row as every one is kept: its model named bare like every
+    other, its user whoever it is done for where the caller names none,
+    and its time now."""
     row.model_id = _bare_model_name(row.model_id)
     # Whose it is, where the caller names nobody: whoever it is being done
     # for (``acting_as``, bound once by a turn or a meeting's bot).
     owner = current_owner_user_id.get()
     row.user_id = row.user_id or (None if owner is None else str(owner))
     # Naive UTC: asyncpg rejects an aware value for a ``timestamp without
-    # time zone`` column, and the except below would swallow that as a
+    # time zone`` column, and a writer's except would swallow that as a
     # lost row.
     row.timestamp = utcnow()
+    return row
+
+
+async def _write(row: LLMUsage, what: str) -> None:
+    """One ledger row (``stamped``); a failed write is logged and swallowed
+    - usage tracking must never fail the calling request."""
     try:
         async with get_async_session() as session:
-            session.add(row)
+            session.add(stamped(row))
     except Exception as e:
         logger.error(f"Failed to record {what}", error=str(e))
 
@@ -228,46 +252,28 @@ async def record_usage(
 
 
 # --- voice -------------------------------------------------------------------
-# Voice bills by the second (a live call, a transcription), by the
-# character or second of speech, or by audio tokens (a realtime call).
-# Every rate is the catalog's (``llm_price``, synced with the model), so
-# a voice cost is priced exactly where a chat turn's is, and lands in the
-# same ledger.
+# Voice bills by the second (a transcription, a call on a model priced by
+# the minute), by the character or second of speech, or by audio tokens (a
+# realtime call). Every rate is the
+# catalog's (``llm_price``, synced with the model), so a voice cost is
+# priced exactly where a chat turn's is, and lands in the same ledger.
 
 STT_ACTION = "stt"
 TTS_ACTION = "tts"
 REALTIME_ACTION = "realtime"
-# GPT-Live's metered call (``open_live_call``).
-LIVE_ACTION = "live"
-# The ledger's voice actions, as the spend report names them: both kinds
-# of call are live calls.
+
+# The ledger's voice actions, as the spend report names them.
 VOICE_ACTIONS: dict[str, str] = {
     STT_ACTION: "Transcription",
     TTS_ACTION: "Speech",
     REALTIME_ACTION: "Live calls",
-    LIVE_ACTION: "Live calls",
 }
 
 
-def _measured_cost(
-    rates: llm_queries.Rates | None,
-    *,
-    input_seconds: float | None = None,
-    output_seconds: float | None = None,
-    characters: int | None = None,
-    tokens: Any = None,
-) -> float:
-    """Each measure times the rate the model lists for it. A model lists
-    only the measures it bills by, so the others add nothing."""
-    if not rates:
-        return 0.0
-    if tokens is not None:
-        return realtime_cost(rates, tokens)
-    return (
-        (input_seconds or 0) * _rate(rates, "input_cost_per_second")
-        + (output_seconds or 0) * _rate(rates, "output_cost_per_second")
-        + (characters or 0) * _rate(rates, "input_cost_per_character")
-    )
+def chat_action(agent_slug: str) -> str:
+    """What the ledger records an agent's chat turn as: the one spelling the
+    recorders write and a budget for that agent (``BudgetGuard``) counts."""
+    return f"chat:{agent_slug}"
 
 
 async def speech_cost(
@@ -276,14 +282,21 @@ async def speech_cost(
     input_seconds: float | None = None,
     output_seconds: float | None = None,
     characters: int | None = None,
+    tokens: Any = None,
 ) -> float:
-    """What a transcription or a spoken reply cost; 0 for a model the
-    catalog does not price."""
-    return _measured_cost(
-        await _rates(model),
-        input_seconds=input_seconds,
-        output_seconds=output_seconds,
-        characters=characters,
+    """What a transcription or a spoken reply cost: each measure times the
+    rate the model lists for it (a model lists only the measures it bills
+    by), or a realtime model's ``tokens`` priced as a call's are; 0 for a
+    model the catalog does not price."""
+    rates = await _rates(model)
+    if not rates:
+        return 0.0
+    if tokens is not None:
+        return realtime_cost(rates, tokens)
+    return (
+        (input_seconds or 0) * _rate(rates, "input_cost_per_second")
+        + (output_seconds or 0) * _rate(rates, "output_cost_per_second")
+        + (characters or 0) * _rate(rates, "input_cost_per_character")
     )
 
 
@@ -319,71 +332,6 @@ async def record_speech(
     )
 
 
-# How a call may end without anything having gone wrong.
-_CLEAN_ENDINGS = frozenset({"close_requested", "remote_hangup"})
-
-
-async def open_live_call(
-    session_id: str,
-    *,
-    model: str,
-    conversation_id: str | None = None,
-    user_id: str | None = None,
-) -> None:
-    """The call's ledger row, opened with the call and updated as it runs."""
-    await _write(
-        LLMUsage(
-            action=LIVE_ACTION,
-            model_id=model,
-            user_id=user_id,
-            input_tokens=0,
-            output_tokens=0,
-            total_cost=0.0,
-            audio_seconds=0.0,
-            session_id=session_id,
-            conversation_id=conversation_id,
-        ),
-        "a live call's usage",
-    )
-
-
-async def live_call_seconds(
-    session_id: str, seconds: float, *, reason: str | None = None
-) -> bool:
-    """The call's billed seconds so far - a running total the provider
-    reports, never summed - and, at the end, how it ended. Returns whether
-    the call was known."""
-    async with get_async_session() as session:
-        row = (
-            await session.exec(
-                select(LLMUsage).where(
-                    LLMUsage.session_id == session_id,
-                    LLMUsage.action == LIVE_ACTION,
-                )
-            )
-        ).first()
-        if row is None:
-            return False
-        billed = max(row.audio_seconds or 0.0, seconds)
-        row.audio_seconds = billed
-        row.total_cost = _measured_cost(
-            await llm_queries.price_for_model(session, row.model_id),
-            input_seconds=billed,
-        )
-        row.duration_ms = billed * 1000
-        if reason is not None:
-            row.success = reason in _CLEAN_ENDINGS
-            row.error_message = None if row.success else reason
-        session.add(row)
-    return True
-
-
-async def realtime_price(model: str) -> llm_queries.Rates | None:
-    """A realtime model's rates, read once when its call opens; None when it
-    cannot be priced (the call goes on either way)."""
-    return await _rates(model)
-
-
 def realtime_cost(rates: llm_queries.Rates | None, usage: Any) -> float:
     """A realtime call's tokens at the catalog's text, audio and cached
     rates. The totals include the audio and the cached share, so each is
@@ -407,33 +355,4 @@ def realtime_cost(rates: llm_queries.Rates | None, usage: Any) -> float:
         + cached * _cached_read_rate(rates)
         + text_out * output_rate
         + audio_out * (rates.get("output_cost_per_audio_token") or output_rate)
-    )
-
-
-async def record_realtime(
-    model: str,
-    usage: Any,
-    *,
-    seconds: float,
-    conversation_id: str | None,
-    price: llm_queries.Rates | None,
-    user_id: str | None = None,
-) -> None:
-    """A realtime call's row: its tokens, priced at the catalog's rates like
-    every other model call (``price``, read once when the call opened -
-    ``realtime_price``)."""
-    await _write(
-        LLMUsage(
-            action=REALTIME_ACTION,
-            model_id=model,
-            user_id=user_id,
-            input_tokens=_token_count(usage, "input_tokens"),
-            output_tokens=_token_count(usage, "output_tokens"),
-            total_cost=realtime_cost(price, usage),
-            audio_seconds=seconds,
-            duration_ms=seconds * 1000,
-            tool_calls=getattr(usage, "tool_calls", None),
-            conversation_id=conversation_id,
-        ),
-        "a realtime call's usage",
     )

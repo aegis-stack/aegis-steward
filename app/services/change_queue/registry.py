@@ -1,0 +1,167 @@
+"""The change-type registry: what the queue knows how to execute.
+
+One entry per mutation kind, registered by the service that owns the
+mutation: a payload contract, an executor, a describer - never new
+queue machinery. The payload model validates at propose time (a card
+the user cannot safely approve should never exist) and again at approve
+time (the world may have moved between the two), and it is also the
+contract an agent reads (``change_type_contracts``): one home for what a
+payload holds.
+
+A service registers its types in ``app/services/<service>/change_types.py``;
+``load_change_types`` imports every such module, as the model registry
+imports every ``models``, so a project adds types without editing this
+package.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic import BaseModel
+from sqlmodel import SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.discovery import import_modules_named
+from app.services.change_queue.schemas import ChangeDisplayRow, ChangeTypeContract
+
+
+@dataclass(frozen=True)
+class ChangeExecutor:
+    """One kind of proposable mutation.
+
+    ``execute`` runs the REAL service mutation and returns an audit
+    summary, a model of what changed (kept as JSON on the row);
+    ``describe`` resolves a LIST of payloads into one card body each, in
+    order - system truth from the database, never model-authored copy. It
+    takes the list so a queue of cards costs a fixed number of queries, not
+    a lookup per card. A payload whose target is gone renders in place
+    ("bill 7 (missing)") rather than raising: a ``ValueError`` makes the
+    queue describe that group a row at a time. Rows are ``ChangeDisplayRow``
+    end to end; they become plain dicts only at the freeze into the
+    audit column and at the tool-result boundary.
+    """
+
+    change_type: str
+    title: str
+    payload_model: type[BaseModel]
+    execute: Callable[[AsyncSession, Any, int | None], Awaitable[BaseModel]]
+    describe: Callable[
+        [AsyncSession, list[Any], int | None],
+        Awaitable[list[list[ChangeDisplayRow]]],
+    ]
+    # When an agent should propose it; the payload's own fields (and their
+    # ``Field(description=...)``) say what it holds.
+    description: str = ""
+    # The table it changes (the system model's ``object:<table>``).
+    object: type[SQLModel] | None = None
+    # An operator's change: filed and approved only for an admin, and
+    # named only to one.
+    admin: bool = False
+    # Whether the person answering the card may put their own words on it
+    # first (``revise``): a card read off a header names the sender as the
+    # header does, and the reader knows the name better. Off by default: a
+    # yes/no card is not a form.
+    editable: bool = False
+    # For an editable type, the only fields that may change, where not every
+    # text field is the reader's (a scanned card's page and row are its own,
+    # the name read off it is not). Empty: every text field.
+    edits: tuple[str, ...] = ()
+    # For an editable type, the fields that pick from a set rather than take
+    # free text: ``{"kind": KINDS}`` draws a select. The payload model still
+    # decides what is valid.
+    choices: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Work that needs the change COMMITTED first, run with the approval's
+    # result once it lands (a job that must find the new row): never fails
+    # an approval that already landed (``follow_ups``).
+    after_commit: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    # Where the pictures a card shows are stored: object-storage keys, in the
+    # order its ``describe`` marks rows ``scan`` (a scanned page, a photo).
+    scan: Callable[[AsyncSession, Any, int | None], Awaitable[list[str]]] | None = None
+
+
+_EXECUTORS: dict[str, ChangeExecutor] = {}
+# Whether every service's types have been imported (``_known``).
+_loaded = False
+
+
+def _known() -> dict[str, ChangeExecutor]:
+    """The registry, every service's ``change_types`` imported on the first
+    read rather than when this package is: a service whose own modules use
+    the queue's shapes would otherwise be imported half-built by its own
+    registrants."""
+    global _loaded
+    if not _loaded:
+        _loaded = True
+        load_change_types()
+    return _EXECUTORS
+
+
+def register(executor: ChangeExecutor) -> ChangeExecutor:
+    """Add one change type. Double registration is a wiring bug, not a
+    merge - two executors silently fighting over one type is exactly
+    the ambiguity a confirmation queue cannot carry."""
+    if executor.change_type in _EXECUTORS:
+        raise ValueError(f"change type {executor.change_type!r} already registered")
+    _EXECUTORS[executor.change_type] = executor
+    return executor
+
+
+def executor_for(change_type: str) -> ChangeExecutor:
+    try:
+        return _known()[change_type]
+    except KeyError:
+        raise ValueError(f"unknown change type: {change_type!r}") from None
+
+
+def known_executor(change_type: str) -> ChangeExecutor | None:
+    """``executor_for``, or None for a type no longer registered (retired,
+    or not built where the app runs) - a stored card outlives its type."""
+    return _known().get(change_type)
+
+
+def editable_fields(executor: ChangeExecutor | None) -> list[str]:
+    """The fields a person - or an agent, for them - may change on a waiting
+    card of this type: ``edits`` where it names them, else every text
+    field; none for a type that is answered, not edited."""
+    if executor is None or not executor.editable:
+        return []
+    texts = [
+        name
+        for name, info in executor.payload_model.model_fields.items()
+        if info.annotation in (str, str | None)
+    ]
+    return (
+        [name for name in texts if name in executor.edits] if executor.edits else texts
+    )
+
+
+def registered_change_types() -> tuple[str, ...]:
+    return tuple(sorted(_known()))
+
+
+def change_type_contracts(admin: bool = True) -> dict[str, ChangeTypeContract]:
+    """Every registered type as an agent reads it, its payload's schema
+    straight from the payload model; an admin's types left out unless
+    ``admin``."""
+    return {
+        name: ChangeTypeContract(
+            title=executor.title,
+            description=executor.description,
+            object=executor.object.__tablename__ if executor.object else None,
+            payload_schema=executor.payload_model.model_json_schema(),
+        )
+        for name, executor in sorted(_known().items())
+        if admin or not executor.admin
+    }
+
+
+def load_change_types() -> list[str]:
+    """Import every service's ``change_types`` module (found through
+    ``app.core.discovery``), registering its types. Returns the module
+    names imported."""
+    import app.services as services
+
+    return [m.__name__ for m in import_modules_named(services, "change_types")]

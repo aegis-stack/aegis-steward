@@ -14,6 +14,7 @@ from app.components.web_frontend import (
     overseer_map,
     overseer_zoom,
 )
+from app.core.ontology import system as ontology_system
 from app.core.ontology.model import Edge, EdgeKind, RouteNode
 from app.services.system import service_pieces
 from app.services.system.service_pieces import Piece
@@ -39,7 +40,7 @@ def _opened(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         source="service:auth", target="component:database", kind=EdgeKind.CALLS
     )
     model = model_of([route], [calling])
-    monkeypatch.setattr(overseer_container, "current", lambda: model)
+    monkeypatch.setattr(ontology_system, "current", lambda _=None: model)
     lacking = overseer_conformance.Conformance({}, {"service_auth": ["Tests"]})
     monkeypatch.setattr(overseer_conformance, "conformance", lambda: lacking)
     auth_opens(monkeypatch)
@@ -59,7 +60,15 @@ def test_only_a_service_that_opens_up_is_a_zoom() -> None:
 def test_each_service_in_the_server_opens_up(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    html = page_html(_opened(app, monkeypatch), "/overseer?view=map&zoom=backend")
+    client = _opened(app, monkeypatch)
+
+    # What opens up is its pieces alone: the lines out of each (every
+    # import, read from source, seconds cold) wait for one to be opened.
+    def lines_read(subject: str, model: object) -> None:
+        raise AssertionError(f"{subject}'s lines read to draw the Server")
+
+    monkeypatch.setattr(overseer_zoom, "pieces_of", lines_read)
+    html = page_html(client, "/overseer?view=map&zoom=backend")
     zoom = one(html, '[data-node="service_auth"] [data-zoom]')
     assert zoom.get("href") == OPENED
     none(html, '[data-node="secrets"] [data-zoom]')  # no pieces of its own
@@ -158,19 +167,15 @@ def test_a_piece_says_what_its_files_should_fix(
     assert into and all(line.get("data-tone") != "error" for line in into)
 
 
-def test_a_way_in_running_its_adapters_is_not_a_shortcut() -> None:
-    """Jobs run the providers' syncs and the collectors: a way in using
-    the service's adapters is its work, not a step past the facade; and
-    adapters sit with the domains, so reading what those know is no step
-    back (one-way use within a lane is a hint, not a line)."""
-    lane = {
-        "jobs": "entry",
-        "facade": "facade",
-        "adapters": service_pieces.LANE_OF["Adapters"],
+def test_red_past_the_facade_is_what_the_parts_rule_finds() -> None:
+    """The map draws the ``own-facade`` rule's findings, not a guess from
+    lanes: a tool into a domain is red; a way in to data it passes is not."""
+    lane = {"tools": "entry", "tags": "domains", "router": "entry", "queries": "data"}
+    links = [("tools", "tags"), ("router", "queries")]
+    tones = overseer_zoom._tones(links, lane, {k: k for k in lane}, {("tools", "tags")})
+    assert tones == {
+        ("tools", "tags"): {"tone": "error", "why": "tools skips the facade into tags"}
     }
-    links = [("jobs", "adapters"), ("facade", "adapters")]
-    assert overseer_zoom._tones(links, lane, {k: k for k in lane}) == {}
-    assert service_pieces.LANE_OF["Adapters"] == "domains"
 
 
 def test_a_service_reads_left_to_right_in_lanes() -> None:

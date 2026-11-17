@@ -308,10 +308,11 @@ async def purge_connection_accounts(
 async def _purged(
     db: AsyncSession, account_ids: list[int], owner_user_id: int | None
 ) -> int:
-    from app.services.finance.domains.writes import queue
+    from app.services import change_queue
 
-    await queue.expire_naming(
+    await change_queue.expire_naming(
         db,
+        "account_id",
         account_ids,
         owner_user_id=owner_user_id,
         note="Its account was deleted, so there is nothing for it to change.",

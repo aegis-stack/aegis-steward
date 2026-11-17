@@ -90,34 +90,10 @@ async def startup_hook() -> None:
     # Service Health Checks Registration
     # ==========================================
 
-    from app.services.system.health import register_service_health_check
+    from app.services.system import health as system_health
 
     logger.info("Registering service health checks...")
-    # Register auth service health check
-    from app.services.auth.health import check_auth_service_health
-
-    register_service_health_check("auth", check_auth_service_health)
-    logger.info("Auth service health check registered")
-    # Register AI service health check
-    from app.services.ai.health import check_ai_service_health
-
-    register_service_health_check("ai", check_ai_service_health)
-    logger.info("AI service health check registered")
-    # Register comms service health check
-    from app.services.comms.health import check_comms_service_health
-
-    register_service_health_check("comms", check_comms_service_health)
-    logger.info("Comms service health check registered")
-    # Register finance service health check
-    from app.services.finance.health import check_finance_service_health
-
-    register_service_health_check("finance", check_finance_service_health)
-    logger.info("Finance service health check registered")
-    # Register documents service health check
-    from app.services.documents.health import check_documents_service_health
-
-    register_service_health_check("documents", check_documents_service_health)
-    logger.info("Documents service health check registered")
+    system_health.register_declared_service_health()
 
     logger.info("Service health detection complete")
 

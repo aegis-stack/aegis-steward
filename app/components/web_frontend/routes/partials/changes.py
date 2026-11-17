@@ -1,0 +1,495 @@
+"""Approval cards (#1368): the change queue as htmx fragments.
+
+A card renders the stored queue row through ``change_queue.card`` (the same
+builder the JSON routes in ``api/changes.py`` use), so what the user
+approves is what runs. Approving or rejecting swaps the card for its new
+state. Everything is scoped to the signed-in user: another user's card is
+a 404 to act on (``change_queue.deps``), never a card. Shown, a card that is
+gone (or not yours, which reads the same) says so (``card_missing``).
+A type that lets the reader edit a card first opens its form in the one
+dialog (``edit``); a card that carries pictures serves them (``scan``).
+A card's first line is its subject, wearing the face a service gives it
+(``face_provider``); a line it cites from a document draws that page.
+"""
+
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import HTMLResponse, Response
+from markupsafe import Markup
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.components.web_frontend.filters import short_date
+from app.components.web_frontend.rendering import (
+    close_dialog,
+    dialog,
+    form_fields,
+    templates,
+    toast_response,
+    trigger,
+)
+from app.core.chat_transcript import CARD_STATUS, batch_outcome, proposer_line
+from app.core.db import get_async_db
+from app.core.log import logger
+from app.core.storage import get_storage
+from app.core.uploads import stored_file
+from app.services import change_queue
+from app.services.change_queue import (
+    ChangeDisplayRow,
+    ChangeExecutor,
+    PendingChange,
+)
+from app.services.change_queue.deps import (
+    found_batch,
+    found_change,
+    owned_batch,
+    owned_change,
+)
+from app.services.shared.deps import get_owner_user_id
+
+PATH = "/partials/changes"
+router = APIRouter(prefix=PATH)
+# Sent with every decision, so another copy of the queue on the page (the
+# chat's waiting list) redraws.
+RESOLVED = "change:resolved"
+# Sent when a card is revised in the dialog, with the card's URL: every copy
+# of that card on the page fetches itself again (``_refresh``).
+REVISED = "change:revised"
+# What a page behind listens for to redraw (``redraws_on_decision``).
+templates.env.globals["change_resolved"] = RESOLVED
+# What will change, marked on a card's line.
+WILL = Markup('<span data-will class="text-aegis-teal font-medium">{}</span>')
+
+# The face each card a service knows wears beside its subject: ``avatar``'s
+# arguments (``name``, ``icon_url``...) by change id, for a whole list of
+# cards in one call (``face_provider``).
+Faces = Callable[
+    [AsyncSession, list[PendingChange]], Awaitable[dict[int, dict[str, Any]]]
+]
+FACES: list[Faces] = []
+# Where a cited document opens, by its id, in an app with a reader for it;
+# without one, the cited page itself opens.
+document_reader: Callable[[int], str] | None = None
+
+
+def face_provider(provider: Faces) -> Faces:
+    """Registers ``provider`` (once): a service's faces for the cards it
+    knows."""
+    if provider not in FACES:
+        FACES.append(provider)
+    return provider
+
+
+def change_url(change_id: int | str) -> str:
+    return f"{PATH}/{change_id}"
+
+
+def edit_url(change_id: int | str) -> str:
+    return f"{change_url(change_id)}/edit"
+
+
+def batch_url(batch_id: str) -> str:
+    return f"{PATH}/batch/{batch_id}"
+
+
+def card_url(marker: dict[str, Any]) -> str | None:
+    """Where the card a trace marker names is served, or None."""
+    if marker.get("kind") == "pending_change" and marker.get("pending_change_id"):
+        return change_url(marker["pending_change_id"])
+    if marker.get("kind") == "pending_change_batch" and marker.get("batch_id"):
+        return batch_url(marker["batch_id"])
+    return None
+
+
+def card_missing(request: Request) -> Response:
+    """A card no longer there, an approval card or a drawn one (``chat_cards``):
+    the template says why it is a 200."""
+    return templates.TemplateResponse(
+        request=request, name="partials/changes/card_missing.html"
+    )
+
+
+def _linked(line: ChangeDisplayRow) -> str | Markup:
+    """A row's value, as a link when the row says where it leads: a path in
+    the app opens in place, anywhere else in a new tab."""
+    if not line.url:
+        return line.value
+    elsewhere = "" if line.url.startswith("/") else ' target="_blank" rel="noopener"'
+    return Markup(
+        '<a href="{}"{} class="text-aegis-teal hover:underline">{}</a>'
+    ).format(line.url, Markup(elsewhere), line.value)
+
+
+def _will(value: str) -> Markup:
+    """A proposed value with the part that will change marked: an arrow's
+    target, else what leads a "head · rest" line, else all of it."""
+    before, arrow, target = value.rpartition(" → ")
+    if arrow:
+        return Markup("{} → {}").format(before, WILL.format(target))
+    head, dot, tail = value.partition(" · ")
+    if dot:
+        return Markup("{} · {}").format(WILL.format(head), tail)
+    return WILL.format(value)
+
+
+def _fact(line: ChangeDisplayRow) -> str | Markup:
+    """A line after the subject: its value, marked or linked, and its note
+    under it."""
+    shown = _linked(line) if line.url else _will(line.value)
+    if not line.note:
+        return shown
+    return Markup(
+        '{}<span data-fact-note class="block text-xxs text-aegis-muted/70 break-all">{}</span>'
+    ).format(shown, line.note)
+
+
+def _cited(lines: list[ChangeDisplayRow]) -> dict[str, Any] | None:
+    """The page the first citing line was read off, and where it opens."""
+    line = next((line for line in lines if line.document_id and line.page), None)
+    if line is None or line.document_id is None:
+        return None
+    src = f"/api/v1/documents/{line.document_id}/pages/{line.page}/image"
+    return {
+        "page": line.page,
+        "src": src,
+        "reader": document_reader(line.document_id) if document_reader else None,
+    }
+
+
+def _refresh(url: str) -> Markup:
+    """The attributes of a card that redraws itself when it is revised
+    (``REVISED`` naming ``url``): every copy on the page, wherever it is."""
+    return Markup(
+        'hx-get="{0}" hx-trigger="{1}[detail.card==\'{0}\'] from:body" '
+        'hx-swap="outerHTML"'
+    ).format(url, REVISED)
+
+
+async def _views(db: AsyncSession, rows: list[PendingChange]) -> list[dict[str, Any]]:
+    """Rows as their cards show them, described together and faced
+    together."""
+    faces: dict[int, dict[str, Any]] = {}
+    for provider in FACES:
+        faces |= await provider(db, rows)
+    views = []
+    for row, card in zip(rows, await change_queue.cards(db, rows)):
+        subject, *lines = card.display or [None]
+        outcome = change_queue.outcome_of(row)
+        label, tone = CARD_STATUS[outcome]
+        url = change_url(card.id)
+        views.append(
+            card.model_dump()
+            | {
+                "subject": _linked(subject) if subject else None,
+                "amount_cents": subject.amount_cents if subject else None,
+                "at": subject.at if subject else None,
+                "face": faces.get(card.id),
+                "display": [(line.label, _fact(line)) for line in lines if line],
+                # A card's own pictures are what it files; else the page cited.
+                "cited": None if card.scans else _cited(card.display),
+                "outcome": outcome,
+                "label": label,
+                "tone": tone,
+                "url": url,
+                "by": proposer_line(card.proposed_by_agent),
+                "edit": edit_url(card.id) if card.editable else None,
+                "refresh": _refresh(url) if card.editable else "",
+                "pictures": [
+                    f"{url}/scan" + (f"?page={n}" if n else "")
+                    for n in range(card.scans)
+                ],
+            }
+        )
+    return views
+
+
+async def _view(db: AsyncSession, row: PendingChange) -> dict[str, Any]:
+    (view,) = await _views(db, [row])
+    return view
+
+
+async def _batch_view(
+    db: AsyncSession, batch_id: str, rows: list[PendingChange]
+) -> dict[str, Any]:
+    return _batch_shape(batch_id, await _views(db, rows))
+
+
+def _batch_shape(batch_id: str, views: list[dict[str, Any]]) -> dict[str, Any]:
+    """One batch as its card shows it: every row, one decision, rows that
+    say the same thing folded together (``_groups``), and once decided, its
+    outcome."""
+    pending = any(v["status"] == "pending" for v in views)
+    url = batch_url(batch_id)
+    return {
+        "batch_id": batch_id,
+        "url": url,
+        "refresh": _refresh(url) if any(v["edit"] for v in views) else "",
+        "title": views[0]["title"],
+        "by": views[0]["by"],
+        "rows": views,
+        "groups": _groups(views),
+        "pending": pending,
+        "outcome": None if pending else batch_outcome(v["outcome"] for v in views),
+    }
+
+
+def _groups(views: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A batch's rows folded into groups of the same change, in first-seen
+    order: rows whose face and lines match but for the subject (which one
+    it is about) read once, with ``shared`` those lines, what their
+    subjects' amounts come to and the dates they span. A group carries its
+    rows, so each one's skip survives behind the fold; one row is never a
+    group."""
+    found: dict[Any, list[dict[str, Any]]] = {}
+    for view in views:
+        rest = tuple((label, str(value)) for label, value in view["display"])
+        face = (view["face"] or {}).get("name")
+        found.setdefault((face, rest) if rest else view["id"], []).append(view)
+    return [_group(rows) for rows in found.values()]
+
+
+def _group(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    amounts = [row["amount_cents"] for row in rows]
+    dates = sorted(row["at"] for row in rows if row["at"])
+    return {
+        "rows": rows,
+        "shared": rows[0]["display"],
+        "face": rows[0]["face"],
+        "total": None if None in amounts else sum(amounts),
+        "span": " - ".join(dict.fromkeys(short_date(d) for d in (dates[0], dates[-1])))
+        if dates
+        else None,
+    }
+
+
+def _render(card: str, view: dict[str, Any]) -> HTMLResponse:
+    """One card macro (``change_card``, ``batch_card``) as the response."""
+    macros = templates.env.get_template("components/macros/changes.html").module
+    return HTMLResponse(str(getattr(macros, card)(view)))
+
+
+async def _resolve(
+    db: AsyncSession, row: PendingChange, action: Callable[..., Awaitable[Any]]
+) -> Response:
+    """Approve or reject, then show the card as it now stands: one already
+    resolved shows as it is; a failed run stays on the card as its error,
+    recorded like the JSON route records it."""
+    try:
+        await action(db, row)
+    except ValueError:
+        pass  # already resolved, or the run's own error
+    except Exception:
+        logger.exception(f"Resolving pending change {row.id} failed")
+    await db.commit()
+    await change_queue.after_commit(db)
+    return trigger(_render("change_card", await _view(db, row)), RESOLVED)
+
+
+async def waiting_cards(db: AsyncSession, owner: int | None) -> list[dict[str, Any]]:
+    """Every card still waiting for ``owner``, a batch as one card (every
+    batch read in one query): what ``partials/changes/review.html`` draws."""
+    rows = await change_queue.list_changes(db, owner_user_id=owner, status="pending")
+    ids = [*{row.batch_id for row in rows if row.batch_id}]
+    batches: dict[str, list[PendingChange]] = {}
+    if ids:
+        batched = await change_queue.list_changes(
+            db, owner_user_id=owner, status=None, batch_ids=ids
+        )
+        for row in reversed(batched):  # a batch reads in proposal order
+            batches.setdefault(str(row.batch_id), []).append(row)
+    groups: list[list[PendingChange]] = []
+    for row in rows:
+        if row.batch_id is None:
+            groups.append([row])
+        elif row.batch_id in batches:
+            groups.append(batches.pop(row.batch_id))
+    # Every card on the page is described in one pass.
+    views = iter(await _views(db, [row for group in groups for row in group]))
+    return [
+        _batch_shape(str(group[0].batch_id), [next(views) for _ in group])
+        if group[0].batch_id
+        else next(views)
+        for group in groups
+    ]
+
+
+@router.get("", response_class=HTMLResponse)
+async def review(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    owner: int | None = Depends(get_owner_user_id),
+) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "partials/changes/review.html",
+        {"cards": await waiting_cards(db, owner)},
+    )
+
+
+@router.get("/{change_id}", response_class=HTMLResponse)
+async def show(
+    request: Request,
+    row: PendingChange | None = Depends(found_change),
+    db: AsyncSession = Depends(get_async_db),
+) -> Response:
+    if row is None:
+        return card_missing(request)
+    return _render("change_card", await _view(db, row))
+
+
+@router.post("/{change_id}/approve", response_class=HTMLResponse)
+async def approve(
+    row: PendingChange = Depends(owned_change),
+    db: AsyncSession = Depends(get_async_db),
+) -> Response:
+    return await _resolve(db, row, change_queue.approve_row)
+
+
+@router.post("/{change_id}/reject", response_class=HTMLResponse)
+async def reject(
+    row: PendingChange = Depends(owned_change),
+    db: AsyncSession = Depends(get_async_db),
+) -> Response:
+    return await _resolve(db, row, change_queue.reject_row)
+
+
+@router.get("/batch/{batch_id}", response_class=HTMLResponse)
+async def show_batch(
+    request: Request,
+    batch_id: str,
+    rows: list[PendingChange] | None = Depends(found_batch),
+    db: AsyncSession = Depends(get_async_db),
+) -> Response:
+    if rows is None:
+        return card_missing(request)
+    return _render("batch_card", await _batch_view(db, batch_id, rows))
+
+
+@router.post("/batch/{batch_id}/approve", response_class=HTMLResponse)
+async def approve_batch(
+    request: Request,
+    batch_id: str,
+    rows: list[PendingChange] = Depends(owned_batch),
+    db: AsyncSession = Depends(get_async_db),
+) -> Response:
+    """Approve the batch's waiting rows, rejecting the ones ticked to skip;
+    the rows resolved are the rows re-shown."""
+    form = await request.form()
+    skipped = [int(v) for v in form.getlist("exclude_ids") if str(v).isdigit()]
+    await change_queue.approve_rows(db, rows, exclude_ids=skipped)
+    await db.commit()
+    await change_queue.after_commit(db)
+    card = _render("batch_card", await _batch_view(db, batch_id, rows))
+    return trigger(card, RESOLVED)
+
+
+@router.post("/batch/{batch_id}/reject", response_class=HTMLResponse)
+async def reject_batch(
+    batch_id: str,
+    rows: list[PendingChange] = Depends(owned_batch),
+    db: AsyncSession = Depends(get_async_db),
+) -> Response:
+    await change_queue.reject_rows(db, rows)
+    await db.commit()
+    card = _render("batch_card", await _batch_view(db, batch_id, rows))
+    return trigger(card, RESOLVED)
+
+
+def _edit_fields(
+    executor: ChangeExecutor, values: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The fields the reader may change, as the form draws them: free text,
+    or a select where the type names choices; filled from ``values`` (the
+    card's, or what was typed)."""
+    return [
+        {
+            "name": name,
+            "label": name.replace("_", " ").capitalize(),
+            "value": values.get(name) or "",
+            "required": executor.payload_model.model_fields[name].is_required(),
+            "options": [{"id": o, "name": o} for o in executor.choices.get(name, ())],
+        }
+        for name in change_queue.editable_fields(executor)
+    ]
+
+
+async def _editable(row: PendingChange = Depends(owned_change)) -> PendingChange:
+    """A waiting card whose type takes edits, or a 404: a decided card, or
+    one that is answered rather than edited, has no form."""
+    executor = change_queue.known_executor(row.change_type)
+    if row.status != "pending" or not change_queue.editable_fields(executor):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Nothing to edit")
+    return row
+
+
+def _edit_form(
+    request: Request,
+    row: PendingChange,
+    values: dict[str, Any],
+    status_code: int = 200,
+    errors: list[str] | None = None,
+) -> Response:
+    executor = change_queue.executor_for(row.change_type)
+    return dialog(
+        request,
+        "partials/changes/edit.html",
+        status_code,
+        title=executor.title,
+        by=proposer_line(row.proposed_by_agent),
+        post=edit_url(str(row.id)),
+        fields=_edit_fields(executor, values),
+        errors=errors or [],
+    )
+
+
+@router.get("/{change_id}/edit", response_class=HTMLResponse)
+async def edit(request: Request, row: PendingChange = Depends(_editable)) -> Response:
+    """The reader's own words on a card before approving it: its form,
+    every field prefilled with what was proposed."""
+    try:
+        values = change_queue.current_payload(
+            change_queue.executor_for(row.change_type), row
+        )
+    except ValueError:
+        values = row.payload
+    return _edit_form(request, row, values)
+
+
+@router.post("/{change_id}/edit", response_class=HTMLResponse)
+async def save_edit(
+    request: Request,
+    row: PendingChange = Depends(_editable),
+    db: AsyncSession = Depends(get_async_db),
+) -> Response:
+    """Saved: the dialog closes and the card redraws itself wherever it is
+    up; refused, the form comes back with why, as typed."""
+    typed = await form_fields(request)
+    editable = change_queue.editable_fields(change_queue.executor_for(row.change_type))
+    fields = {name: typed[name] for name in editable if name in typed}
+    try:
+        await change_queue.revise_row(db, row, fields)
+    except ValueError as exc:
+        return _edit_form(request, row, row.payload | fields, 422, [str(exc)])
+    await db.commit()
+    card = batch_url(row.batch_id) if row.batch_id else change_url(str(row.id))
+    return close_dialog(trigger(toast_response("Saved"), REVISED, {"card": card}))
+
+
+@router.get("/{change_id}/scan")
+async def scan(
+    page: int = 0,
+    row: PendingChange = Depends(owned_change),
+    db: AsyncSession = Depends(get_async_db),
+) -> Response:
+    """A picture a card carries (a scanned page, a photo), where its change
+    type says it is stored; ``page`` counts from 0."""
+    executor = change_queue.known_executor(row.change_type)
+    keys = []
+    if executor and executor.scan:
+        payload = executor.payload_model.model_validate(row.payload)
+        keys = await executor.scan(db, payload, row.owner_user_id)
+    data = await get_storage().get(keys[page]) if 0 <= page < len(keys) else None
+    if data is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No such picture")
+    return stored_file(data, f"scan-{page + 1}")

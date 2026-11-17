@@ -16,7 +16,7 @@ class LLMUsage(SQLModel, table=True):
     usage tracking from catalog lifecycle. Joins can be done on model_id.
 
     The action field accepts any string value for flexibility -
-    callers can define their own action types (e.g., "chat:<agent>",
+    callers can define their own action types (e.g., "chat", "stream_chat",
     "completion", etc.).
     """
 
@@ -48,12 +48,8 @@ class LLMUsage(SQLModel, table=True):
     cache_write_tokens: int | None = Field(default=None, ge=0)
     tool_calls: int | None = Field(default=None, ge=0)
 
-    # Voice (#270). A model that bills by the second (GPT-Live) meters
-    # ``audio_seconds``; its tokens are 0 because it reports none, not
-    # because nobody measured. ``session_id`` is the provider's call id (one
-    # row per call, updated as it runs); ``conversation_id`` ties a call and
-    # the answers given during it together, so a call costs its row plus
-    # its turns.
+    # Voice: speech and live calls meter ``audio_seconds`` (a transcription
+    # reports no tokens, so its 0 tokens are not a missed count).
+    # ``conversation_id`` ties a call and the turns taken during it together.
     conversation_id: str | None = Field(default=None, index=True, max_length=64)
-    session_id: str | None = Field(default=None, index=True, max_length=64)
     audio_seconds: float | None = Field(default=None, ge=0)

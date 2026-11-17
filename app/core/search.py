@@ -1,21 +1,21 @@
 """Web search, for the organization nobody has heard of (#173).
 
-Searching is a capability, not a fact about a contact: a payee nobody
-recognizes, a merchant behind an unattributed charge and an institution
-off a statement all want it. So it lives here, and callers decide what a
-hit means. A result is only ever a candidate: ``matters.domain_lookup``
-still fetches it and checks the name is on the page.
+Searching is a capability, not a fact: an agent's ``web_search`` tool, a
+lookup that confirms an organization's website, anything that needs a
+name found. So it lives here, and callers decide what a hit means. A
+result is only ever a candidate: a caller that verifies fetches the page
+and checks it says what the hit claimed.
 
 Off unless ``BRAVE_SEARCH_API_KEY`` is set. That is the whole setting:
 absent means off, not an error or a warning on every call.
 
 The cache and the daily budget are the privacy mechanism, not only a
-cost control. One query for a nursing home is nothing; a year of them
-reads as a profile of the household. A repeated lookup emits no new
-query, and a day can only emit so many.
+cost control. One query is nothing; a year of them reads as a profile
+of the user. A repeated lookup emits no new query, and a day can only
+emit so many.
 
-Queries name the ORGANIZATION, never the household: no person, no case
-number, no document text.
+Queries name the THING being looked for, never the user: no person, no
+case number, no document text.
 """
 
 from __future__ import annotations
@@ -159,7 +159,7 @@ async def search(query: str, *, limit: int = 5) -> list[SearchHit]:
 
 
 def candidates(hits: list[SearchHit]) -> list[str]:
-    """What ``domain_lookup.confirm`` should try: each hit's host and path,
+    """What a lookup that verifies should try: each hit's host and path,
     ``www.`` and any query dropped, in rank order, directories left out.
 
     The PAGE that matched, not only its host. Maple's page is

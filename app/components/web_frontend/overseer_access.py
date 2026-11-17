@@ -23,22 +23,14 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import (
-    Cookie,
-    Depends,
-    FastAPI,
-    HTTPException,
-    Request,
-    WebSocketException,
-    status,
-)
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocketException, status
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_async_db
 from app.core.security import SESSION_COOKIE, verify_token
 from app.models.user import User
-from app.services.auth.deps import get_optional_user, get_user_service, is_admin
+from app.services.auth.deps import get_optional_user, is_admin
 from app.services.auth.service import UserService, session_id_of
 from app.services.shared.deps import Actor, actor_of
 
@@ -65,13 +57,14 @@ class AdminOnlyError(Exception):
 
 
 def _is_page(request: Request) -> bool:
-    """A page the browser navigates to, as opposed to a fragment or stream."""
+    """A page the browser navigates to, as opposed to a fragment or stream:
+    one under /overseer, or any the browser says it is navigating to (a
+    whole page served beside its fragments: a call's stage)."""
     path = request.url.path
-    return (
-        request.method == "GET"
-        and path.startswith("/overseer")
-        and not path.startswith("/overseer/events")
-    )
+    if request.method != "GET" or path.startswith("/overseer/events"):
+        return False
+    navigating = request.headers.get("sec-fetch-dest") == "document"
+    return path.startswith("/overseer") or navigating
 
 
 async def overseer_gate(
@@ -115,14 +108,10 @@ def session_expires(request: Request) -> datetime | None:
     return datetime.fromtimestamp(expires, UTC) if isinstance(expires, int) else None
 
 
-async def overseer_socket_gate(
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-    user_service: UserService = Depends(get_user_service),
-) -> None:
+async def overseer_socket_gate(user: Viewer = Depends(viewer)) -> None:
     """The gate's rule for a socket (a live call): admins only. A socket
-    carries the session cookie, never a bearer header, and has no HTTP
-    request for ``overseer_gate`` to read."""
-    user = await get_optional_user(session, user_service)
+    has no HTTP request for ``overseer_gate`` to read; the session it
+    carries is read once for the call, by the gate and the call alike."""
     if user is None or not is_admin(user):
         raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
 

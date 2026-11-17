@@ -1,6 +1,8 @@
 """Authentication service: who the caller is, and the one way in to its
 domains (``auth.domains``) for callers outside it."""
 
+from typing import TYPE_CHECKING
+
 from fastapi import HTTPException, status
 
 from app.core.config import settings
@@ -15,6 +17,13 @@ from app.services.auth.domains.users.accounts import (
     UserService,
 )
 from app.services.auth.domains.users.hooks import register_post_user_created
+from app.services.shared import facade
+
+if TYPE_CHECKING:
+    from app.services.auth.domains.sessions.queries import by_day  # noqa: F401
+    from app.services.auth.domains.sessions.tokens import (  # noqa: F401
+        REFRESH_TOKEN_RETENTION_DAYS,
+    )
 
 # What callers outside the service use of its domains.
 __all__ = [
@@ -102,3 +111,6 @@ async def get_current_user_from_token(
     await release_lock(user_service.db)
 
     return user
+
+
+__getattr__ = facade.lazy(__name__, __file__)[0]

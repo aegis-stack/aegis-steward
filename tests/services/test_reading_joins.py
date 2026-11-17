@@ -21,8 +21,8 @@ import pytest
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.services.change_queue import PendingChange
 from app.services.documents.domains.reading.joins import propose_joins
-from app.services.finance.models.changes import FinancePendingChange
 from app.services.matters.matters import MatterService
 from app.services.matters.models.core import matter_tag
 from app.services.matters.requests import RequestService
@@ -34,7 +34,7 @@ STATEMENT = "page 1: Balance as of 09/07/26: $7,857.27"
 async def _cards(db: AsyncSession, change_type: str) -> list[Any]:
     return [
         row
-        for row in (await db.exec(select(FinancePendingChange))).all()
+        for row in (await db.exec(select(PendingChange))).all()
         if row.change_type == change_type
     ]
 
@@ -66,8 +66,8 @@ async def _statement_on(
 ) -> int:
     """A statement filed on the matter, with the figure it states already
     proposed the way ``propose_figure`` proposes it."""
+    from app.services.change_queue import propose
     from app.services.documents.service import DocumentService
-    from app.services.finance.domains.writes.queue import propose
 
     documents = DocumentService(db)
     # Distinct bytes per statement: the store dedupes by content, so two
@@ -90,6 +90,7 @@ async def _statement_on(
             "source_note": STATEMENT,
         },
         proposed_by_agent="reading",
+        owner_user_id=None,
     )
     await db.flush()
     return int(paper.id)
@@ -305,7 +306,7 @@ class TestTheGate:
     async def test_approving_the_join_answers_the_ask(
         self, async_db_session: AsyncSession
     ) -> None:
-        from app.services.finance.domains.writes.queue import approve
+        from app.services.change_queue import approve
         from app.services.matters.answers import answer_sheet
 
         db = async_db_session
@@ -320,7 +321,7 @@ class TestTheGate:
         await propose_joins(db, document_ids=[document_id], owner_user_id=None)
         for change_type in ("fact.record", "document.evidence_link"):
             for card in await _cards(db, change_type):
-                await approve(db, int(card.id))
+                await approve(db, int(card.id), owner_user_id=None)
 
         after = await answer_sheet(db, matter_id)
         [answer] = after["answers"]

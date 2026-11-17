@@ -24,13 +24,13 @@ from app.services.finance.domains.writes.filing import (
 
 async def _photo(db: AsyncSession) -> tuple[str, str, int]:
     from app.core.storage import get_storage
-    from app.services.ai.domains.chat.pastes import store_image
     from app.services.matters.matters import MatterService
+    from tests._pastes import keep_photo
 
     matter = await MatterService(db).open(title="2025 Tax Return")
     key = await get_storage().put(b"\xff\xd8\xff a 1099-INT", content_type="image/jpeg")
-    photo = await store_image("0", key, "image/jpeg", "IMG_6611.jpeg", db)
-    return photo["id"], key, int(matter.id or 0)
+    photo = await keep_photo(db, "0", key, "image/jpeg", "IMG_6611.jpeg")
+    return photo.id, key, int(matter.id or 0)
 
 
 def _named(paste_id: str, matter_id: int, **over: Any) -> FileDocumentPayload:

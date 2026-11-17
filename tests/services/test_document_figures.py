@@ -104,8 +104,8 @@ class TestItReachesTheQueue:
     async def test_a_statement_for_somebodys_account_proposes_its_balance(
         self, async_db_session
     ) -> None:
+        from app.services.change_queue import list_changes
         from app.services.documents.domains.reading.proposals import propose_reading
-        from app.services.finance.domains.writes.queue import list_changes
 
         account, party = await self._held_account(
             async_db_session, "3639", "James Testcase"
@@ -121,7 +121,9 @@ class TestItReachesTheQueue:
 
         figures = [
             change
-            for change in await list_changes(async_db_session, status="pending")
+            for change in await list_changes(
+                async_db_session, status="pending", owner_user_id=None
+            )
             if change.change_type == "fact.record"
         ]
         assert len(figures) == 1
@@ -145,8 +147,8 @@ class TestItReachesTheQueue:
         """A fact is about SOMEBODY. The household's own accounts have no
         party to be about, and a card asking whose this is would be a
         question rather than a proposal."""
+        from app.services.change_queue import list_changes
         from app.services.documents.domains.reading.proposals import propose_reading
-        from app.services.finance.domains.writes.queue import list_changes
         from app.services.finance.service import FinanceService
         from tests.services._finance_factories import seed_account
 
@@ -162,7 +164,9 @@ class TestItReachesTheQueue:
 
         assert not [
             change
-            for change in await list_changes(async_db_session, status="pending")
+            for change in await list_changes(
+                async_db_session, status="pending", owner_user_id=None
+            )
             if change.change_type == "fact.record"
         ]
 
@@ -172,8 +176,8 @@ class TestItReachesTheQueue:
     ) -> None:
         """Without the account, the figure is a number with nobody to be
         about and nothing to be the balance OF."""
+        from app.services.change_queue import list_changes
         from app.services.documents.domains.reading.proposals import propose_reading
-        from app.services.finance.domains.writes.queue import list_changes
 
         document = await self._statement(
             async_db_session, "New balance as of 08/01/26: $3,137.44"
@@ -183,6 +187,8 @@ class TestItReachesTheQueue:
 
         assert not [
             change
-            for change in await list_changes(async_db_session, status="pending")
+            for change in await list_changes(
+                async_db_session, status="pending", owner_user_id=None
+            )
             if change.change_type == "fact.record"
         ]

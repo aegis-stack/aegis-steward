@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,14 +37,9 @@ from app.components.web_frontend.main import (  # noqa: E402
     create_web_frontend_app,
 )
 from app.core import ontology  # noqa: E402
-from app.core.concurrency import background  # noqa: E402
 from app.core.config import settings  # noqa: E402
-from app.core.constants import dashboard_upload_dir  # noqa: E402
+from app.core.constants import DASHBOARD_PATH, dashboard_upload_dir  # noqa: E402
 from app.core.log import logger, setup_logging  # noqa: E402
-
-
-async def _build_model() -> None:
-    await asyncio.to_thread(ontology.current)
 
 
 @asynccontextmanager
@@ -72,7 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Every part has registered: build the system model now, off the loop,
     # so its first reader (a map, a flow card) never parses the source
     # mid-request, holding the server.
-    background(_build_model())
+    await ontology.warm()
 
     logger.info("--- Application startup complete ---")
 
@@ -158,7 +152,7 @@ def create_integrated_app() -> FastAPI:
     # /health, wrapped so its page carries our browser-side scripts: paste
     # capture (pasted images post to /api/v1/pastebox, Flet has no
     # clipboard-image API) and the light/dark mode bridge to htmx's choice.
-    app.mount("/dashboard", DashboardScriptsMiddleware(flet_app))
+    app.mount(DASHBOARD_PATH, DashboardScriptsMiddleware(flet_app))
     # Last added, so outermost: every middleware and route below it reads the
     # client the trusted proxy named.
     app.add_middleware(TrustedProxyMiddleware)

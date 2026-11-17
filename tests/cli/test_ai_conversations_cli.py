@@ -1,6 +1,6 @@
-"""``ai conversations`` lists them (#578).
+"""``ai conversations`` lists them (#1835).
 
-The asyncio.run -> await rewrite (#573) left
+The asyncio.run -> await rewrite (#1821) left
 ``await list_conversations(...)[:limit]``, which slices the coroutine
 before awaiting it, so the command died with a TypeError every time.
 """

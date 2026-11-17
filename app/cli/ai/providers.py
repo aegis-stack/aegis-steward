@@ -11,16 +11,17 @@ from app.cli.ai.shared import (
     get_provider_display_name,
 )
 from app.i18n import lazy_t, t
+from app.services.ai.service import (
+    AIProvider,
+    get_ai_config,
+    get_free_providers,
+    get_provider_capabilities,
+)
 
 from ...core import secrets
 from ...core.audit import cli_actor
 from ...core.config import settings
-from ...services.ai.domains.llm.config import get_ai_config
-from ...services.ai.models import (
-    AIProvider,
-    get_free_providers,
-    get_provider_capabilities,
-)
+from ...services.ai.service import LOCAL_PROVIDERS
 
 
 @app.command(help=lazy_t("ai.help_status"))
@@ -93,7 +94,7 @@ async def status() -> None:
 
 @app.command(help=lazy_t("ai.help_providers"))
 async def providers() -> None:
-    from app.services.ai.domains.llm.provider_management import provider_readiness
+    from app.services.ai.service import provider_readiness
 
     _yes = f"[{theme.ACCENT}]{t('ai.prov_yes')}[/{theme.ACCENT}]"
     _no = f"[{theme.ERROR}]{t('ai.prov_no')}[/{theme.ERROR}]"
@@ -112,7 +113,7 @@ async def providers() -> None:
     # One readiness answer, shared with the Overseer's Providers page.
     for row in await provider_readiness(settings):
         capabilities = row.capabilities
-        local = row.provider == AIProvider.OLLAMA
+        local = row.provider in LOCAL_PROVIDERS
         api_key_display = (
             f"[dim]{t('ai.prov_na')}[/dim]"
             if row.keyless
@@ -151,7 +152,7 @@ async def providers() -> None:
 
     console.print(table)
     console.print()
-    console.print(f"[dim]{t('ai.providers_tip', app='aidb')}[/dim]")
+    console.print(f"[dim]{t('ai.providers_tip', app='aegis-steward')}[/dim]")
 
 
 async def _save_to_store(name: str, value: str) -> None:
@@ -192,7 +193,7 @@ async def add_provider(
 ) -> None:
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
-    from app.services.ai.domains.llm.provider_management import (
+    from app.services.ai.service import (
         PROVIDER_API_KEY_URLS,
         get_env_var_name,
         get_existing_api_key,
@@ -325,7 +326,7 @@ async def add_provider(
         f"[bold {theme.ACCENT}]{t('ai.provider_added')}[/bold {theme.ACCENT}]"
     )
     console.print()
-    console.print(f"[dim]{t('ai.test_with', app='aidb')}[/dim]")
+    console.print(f"[dim]{t('ai.test_with', app='aegis-steward')}[/dim]")
 
 
 @app.command("use-provider", help=lazy_t("ai.help_use_provider"))
@@ -335,7 +336,7 @@ async def use_provider(
         help=lazy_t("ai.arg_provider_switch"),
     ),
 ) -> None:
-    from app.services.ai.domains.llm.provider_management import (
+    from app.services.ai.service import (
         check_provider_dependency_installed,
         get_env_var_name,
         get_existing_api_key,
@@ -366,7 +367,7 @@ async def use_provider(
         console.print()
         console.print(f"[{theme.WARNING}]{t('ai.run_first')}[/{theme.WARNING}]")
         console.print(
-            f"  [{theme.ACCENT}]aidb ai add-provider {provider}[/{theme.ACCENT}]"
+            f"  [{theme.ACCENT}]aegis-steward ai add-provider {provider}[/{theme.ACCENT}]"
         )
         raise typer.Exit(1)
 
@@ -386,7 +387,7 @@ async def use_provider(
                 f"[{theme.WARNING}]{t('ai.consider_running')}[/{theme.WARNING}]"
             )
             console.print(
-                f"  [{theme.ACCENT}]aidb ai add-provider {provider}[/{theme.ACCENT}]"
+                f"  [{theme.ACCENT}]aegis-steward ai add-provider {provider}[/{theme.ACCENT}]"
             )
             console.print(f"[dim]{t('ai.to_configure_key')}[/dim]")
             console.print()

@@ -9,7 +9,11 @@ what runs cannot diverge.
 
 from typing import Any
 
-from tests.components.frontend._tree import rendered, walk
+import pytest
+
+from tests.components.frontend._tree import rendered
+
+pytestmark = pytest.mark.usefixtures("card_tools")
 
 _CHANGE = {
     "id": 7,
@@ -290,6 +294,9 @@ class TestBatchCard:
 
 class TestBatchTraceExtraction:
     def test_a_propose_many_result_becomes_one_batch_card(self) -> None:
+        """A trace kept before markers names its batch; the card reads its
+        rows from the queue, as a marker's card does."""
+        import asyncio
         import json
 
         from app.components.frontend.controls.chat.components import (
@@ -302,7 +309,12 @@ class TestBatchTraceExtraction:
         cards = components_from_trace(
             trace, on_action=_noop_action, on_batch_action=_noop_batch_action
         )
-        assert len(cards) == 1
+        assert [c._batch_id for c in cards] == ["b-1"]
+
+        async def fetch(batch_id: str) -> list[dict[str, Any]]:
+            return _BATCH["items"]
+
+        asyncio.run(cards[0].refresh_from(fetch))
         assert "Approve all (2)" in rendered(cards[0])
 
 
@@ -891,69 +903,3 @@ class TestAttachmentChips:
         chip = self._chip()
         assert "order.png" in rendered(chip)
         assert any(getattr(n, "tooltip", None) == "Remove" for n in walk(chip))
-
-
-class TestDrawnCards:
-    """A card she drew (``draw_card``) draws in the Overseer chat (#630):
-    the marker names it, the API gives its kind and payload."""
-
-    _TREND = {
-        "kind": "trend",
-        "card": {
-            "title": "Spending by month",
-            "measure": "Spent",
-            "unit": "money",
-            "rows": [
-                {"date": "2026-08-01", "value": 61_250},
-                {"date": "2026-09-01", "value": 58_900},
-            ],
-        },
-    }
-
-    def _trace(self, *ids: str) -> list[dict[str, Any]]:
-        return [
-            {"tool": "run_code", "component": [{"kind": "chat_card", "id": i}]}
-            for i in ids
-        ]
-
-    def test_the_last_drawn_card_is_the_answers(self) -> None:
-        from app.components.frontend.controls.chat.components import (
-            components_from_trace,
-        )
-        from app.components.frontend.controls.chat.drawn_card import DrawnCard
-
-        async def fetch(card_id: str) -> dict[str, Any] | None:
-            return None
-
-        cards = components_from_trace(
-            self._trace("first", "fixed"), on_action=_noop_action, fetch_card=fetch
-        )
-        assert [c.card_id for c in cards if isinstance(c, DrawnCard)] == ["fixed"]
-
-    async def test_a_chart_kind_draws_and_opens_larger(self) -> None:
-        from app.components.frontend.controls.chat.drawn_card import DrawnCard
-        from app.components.frontend.dashboard.modals.modal_sections.chart_line import (
-            LineChartCard,
-        )
-
-        async def fetch(card_id: str) -> dict[str, Any] | None:
-            return self._TREND
-
-        drawn: list[bool] = []
-        card = DrawnCard("abc", fetch, lambda: drawn.append(True))
-        await card.load()
-        assert card.visible
-        assert drawn == [True]  # the thread follows it to its end
-        assert any(isinstance(c, LineChartCard) for c in walk(card))
-        assert "Spending by month" in rendered(card)
-        assert card.on_click is not None
-
-    async def test_a_kind_without_a_drawing_stays_absent(self) -> None:
-        from app.components.frontend.controls.chat.drawn_card import DrawnCard
-
-        async def fetch(card_id: str) -> dict[str, Any] | None:
-            return {"kind": "table", "card": {"title": "T"}}
-
-        card = DrawnCard("abc", fetch)
-        await card.load()
-        assert not card.visible

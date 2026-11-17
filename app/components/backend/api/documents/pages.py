@@ -26,7 +26,7 @@ from app.services.documents.domains.extraction.pages import (
 )
 from app.services.documents.domains.extraction.vision import vision_reader
 from app.services.documents.domains.reading.proposals import read_and_propose
-from app.services.documents.models import DocumentPage
+from app.services.documents.models import Document, DocumentPage
 from app.services.documents.queries import page_for, pages_for
 from app.services.documents.service import DocumentService
 from app.services.shared.deps import get_owner_user_id
@@ -146,16 +146,16 @@ async def get_page_image(
     service: DocumentService = Depends(get_document_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> Response:
-    return await page_image(
-        await _page(service, document_id, page_number, owner_user_id)
-    )
+    row = await _page(service, document_id, page_number, owner_user_id)
+    document = await service.get(document_id, owner_user_id=owner_user_id)
+    return await page_image(row, document)
 
 
-async def page_image(row: DocumentPage) -> Response:
+async def page_image(row: DocumentPage, document: Document | None) -> Response:
     """A page's stored render from the object store: a PNG, or the upload
-    itself when the page is the original image, typed by its bytes. Shared
-    with the Overseer's Documents page, which serves the same bytes to the
-    operator."""
+    itself when the page is the original image (``document``'s), typed by
+    its bytes. Shared with the Overseer's Documents page, which serves the
+    same bytes to the operator."""
     if not row.image_key:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No page image"
@@ -166,7 +166,9 @@ async def page_image(row: DocumentPage) -> Response:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Page image is not retrievable from storage",
         )
-    return stored_file(data, f"page-{row.page_number}")
+    original = document is not None and row.image_key == document.storage_key
+    claimed = document.media_type if original and document is not None else None
+    return stored_file(data, f"page-{row.page_number}", claimed=claimed)
 
 
 async def _page(

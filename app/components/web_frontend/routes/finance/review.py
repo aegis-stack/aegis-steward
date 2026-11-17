@@ -1,8 +1,8 @@
 """Review: four queues as sibling routes under one sub-nav.
 
-Approvals resolves pending changes (pattern 2) and re-sends the counts out
-of band: the sub-nav here and the Overview's banner, wherever it happens
-to be on the page. Uncategorized and No payee are the register with one
+Approvals is the change queue's own cards (``partials/changes``); a card
+decided anywhere on the page redraws the sub-nav's counts (``nav``).
+Uncategorized and No payee are the register with one
 filter fixed, so every row action and the selection bar come for free;
 Uncategorized adds the auto-categorize preview (rows out of band carrying
 a suggestion nothing has written) and No payee the payee-group
@@ -17,13 +17,6 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from starlette.responses import Response
 
 from app.components.backend.api.finance.categories import list_category_options
-from app.components.backend.api.finance.changes import (
-    approve_batch,
-    approve_change,
-    list_changes,
-    reject_batch,
-    reject_change,
-)
 from app.components.backend.api.finance.insights import dismiss_insight, list_insights
 from app.components.backend.api.finance.payees import (
     assign_payee_group,
@@ -36,7 +29,6 @@ from app.components.web_frontend.rendering import (
     close_dialog,
     dialog,
     navigate,
-    or_404,
     render,
     templates,
     with_toast,
@@ -48,13 +40,10 @@ from app.components.web_frontend.routes.finance.register import (
     rows_context,
     uncategorized_total,
 )
+from app.components.web_frontend.routes.partials.changes import waiting_cards
+from app.services import change_queue
 from app.services.finance.deps import get_finance_service, get_owner_user_id
-from app.services.finance.schemas import (
-    BatchResolveRequest,
-    PayeeGroupAssign,
-    PendingChangeResponse,
-    SuggestCategoriesRequest,
-)
+from app.services.finance.schemas import PayeeGroupAssign, SuggestCategoriesRequest
 from app.services.finance.service import (
     INSIGHT_RESOLUTIONS,
     FinanceService,
@@ -84,14 +73,12 @@ GROUP_COLUMNS = [
 
 
 async def counts(service: FinanceService, owner_user_id: int | None) -> dict[str, int]:
-    pending = await service.list_pending_changes(
-        owner_user_id=owner_user_id, status="pending"
-    )
+    pending = await change_queue.count_changes(service.db, owner_user_id=owner_user_id)
     _rows, no_payee = await service.list_transactions(
         owner_user_id=owner_user_id, without_merchant=True, page_size=1
     )
     return {
-        "approvals": len(pending),
+        "approvals": pending,
         "uncategorized": await uncategorized_total(service, owner_user_id),
         "no_payee": no_payee,
         "attention": await service.count_new_insights(owner_user_id=owner_user_id),
@@ -107,11 +94,7 @@ async def waiting(
     """The sidebar's mark: a dot while any card is waiting, nothing
     otherwise. Fetched by the nav on load, so a page that never touches
     Review still shows what mail or a reading proposed."""
-    waiting = len(
-        await service.list_pending_changes(
-            owner_user_id=owner_user_id, status="pending"
-        )
-    )
+    waiting = await change_queue.count_changes(service.db, owner_user_id=owner_user_id)
     return templates.TemplateResponse(
         request=request,
         name="partials/attention.html",
@@ -136,6 +119,9 @@ async def nav_context(
             for key, label, suffix in QUEUES
         ],
         "current_tab": current,
+        # A card decided anywhere on the page (the chat drawer, say) moves
+        # these counts: the nav redraws itself (``nav``).
+        "nav_redraw": f"{SECTION.path}/nav?tab={current}",
         "pending_count": tally["approvals"],
         "deadlines_count": 0,
         "expected_count": 0,
@@ -152,6 +138,7 @@ async def _resolved(
     """A queue item's answer once it is gone: nothing in its place, the
     counts out of band, and a word about what happened."""
     await service.db.commit()
+    await change_queue.after_commit(service.db)
     response = templates.TemplateResponse(
         request=request,
         name="partials/review/resolved.html",
@@ -163,87 +150,36 @@ async def _resolved(
 # --- approvals ------------------------------------------------------------
 
 
-def grouped(items: list[PendingChangeResponse]) -> tuple[list, list[dict[str, Any]]]:
-    """Singles stay singles; a batch proposed in one go is one card."""
-    singles = [c for c in items if not c.batch_id]
-    batches: dict[str, list[PendingChangeResponse]] = {}
-    for change in items:
-        if change.batch_id:
-            batches.setdefault(change.batch_id, []).append(change)
-    return singles, [
-        {"batch_id": batch_id, "title": rows[0].title, "items": rows}
-        for batch_id, rows in batches.items()
-    ]
-
-
 @router.get("", include_in_schema=False)
 async def approvals(
     request: Request,
     service: FinanceService = Depends(get_finance_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> Response:
-    listing = await list_changes(
-        status_filter="pending", service=service, owner_user_id=owner_user_id
-    )
-    singles, batches = grouped(listing.items)
+    """The cards waiting, the queue's own (``partials/changes``)."""
     return render(
         request,
         "pages/review/approvals.html",
         {
             "section": SECTION,
             **await nav_context(service, owner_user_id, "approvals"),
-            "singles": singles,
-            "batches": batches,
+            "cards": await waiting_cards(service.db, owner_user_id),
         },
     )
 
 
-@router.post("/changes/{change_id:int}/{verb}", include_in_schema=False)
-async def resolve_change(
+@router.get("/nav", include_in_schema=False)
+async def nav(
     request: Request,
-    change_id: int,
-    verb: str,
+    tab: str = "approvals",
     service: FinanceService = Depends(get_finance_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> Response:
-    handler = {"approve": approve_change, "reject": reject_change}.get(verb)
-    or_404(handler)
-    change = await handler(change_id, service=service, owner_user_id=owner_user_id)
-    word = "Approved" if verb == "approve" else "Rejected"
-    return await _resolved(
-        request, service, owner_user_id, "approvals", f"{word}: {change.title}."
-    )
-
-
-@router.post("/changes/batch/{batch_id}/{verb}", include_in_schema=False)
-async def resolve_batch(
-    request: Request,
-    batch_id: str,
-    verb: str,
-    exclude_ids: Annotated[list[int], Form()] = [],
-    service: FinanceService = Depends(get_finance_service),
-    owner_user_id: int | None = Depends(get_owner_user_id),
-) -> Response:
-    """Approve the batch minus the vetoed rows (they are rejected), or
-    reject the whole batch."""
-    if verb == "approve":
-        summary = await approve_batch(
-            batch_id,
-            BatchResolveRequest(exclude_ids=exclude_ids),
-            service=service,
-            owner_user_id=owner_user_id,
-        )
-    elif verb == "reject":
-        summary = await reject_batch(
-            batch_id, service=service, owner_user_id=owner_user_id
-        )
-    else:
-        raise HTTPException(status_code=404)
-    parts = [f"{summary.approved} approved", f"{summary.rejected} rejected"]
-    if summary.failed:
-        parts.append(f"{summary.failed} failed")
-    return await _resolved(
-        request, service, owner_user_id, "approvals", ", ".join(parts) + "."
+    """The sub-nav alone, its counts as they stand now."""
+    return templates.TemplateResponse(
+        request=request,
+        name="components/sub_nav.html",
+        context=await nav_context(service, owner_user_id, tab),
     )
 
 

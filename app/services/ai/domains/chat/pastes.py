@@ -1,97 +1,66 @@
-"""A pasted wall of text, stored once and read on demand.
+"""What was pasted or shared in chat, kept once and read on demand.
 
-People paste pages. An order listing, a log, a spreadsheet dump: 9,000
-to 17,000 characters at a time, and every one of them went into the
-message text. That is wrong twice over.
+A pasted page (an order listing, a log, a spreadsheet dump) used to be
+message text, and history REPLAYS: the same page rode every later turn
+until the budget pushed it out, and on screen the conversation vanished
+into it. A wall of text (``PASTE_THRESHOLD``) now goes to the object store
+(content-addressed, so pasting it twice is free) and a one-line marker
+(``chat_transcript.paste_marker``) stands where it was; the composer keeps
+one as it is pasted, and the turn lifts any it still carries (``lift_walls``).
+A line pushed out of the index takes its bytes with it, where nothing else
+names them.
 
-It is wrong on screen, where the transcript becomes the paste and the
-conversation disappears into it. And it is wrong in the model call,
-because history is REPLAYED: the same page rides every later turn until
-the budget pushes it out. Measured on one real session - twelve pasted
-pages, 144,196 characters - the pages alone accounted for 1,422,367
-characters of replayed history across 102 turns, about ten times over,
-and they still fell out of the window by the end.
+An attached PDF, where the documents service reads one, lands in the same
+index: its pages stay where extraction put them (one home) and the line
+points at the document. A picture's bytes ride one model call; on the
+worker (``read_photo_job``) it gets a line here and what it showed is read
+once and kept beside it.
 
-So a big paste stops being message text. The bytes go to the object
-store (content-addressed, so pasting the same page twice is free), a
-one-line MARKER goes in the message, and the agent reads the text back
-with ``pasted`` when it actually needs it. Twelve pages then cost twelve
-lines of history instead of 144k characters, and nothing evicts them.
-
-The index lives beside the saved facts and readings in
-``agent_user_memory``: one row per user, so a paste is still reachable
-from the next conversation - the same reason readings moved there.
-
-An ATTACHED DOCUMENT lands in the same index. A PDF is read by the
-documents service (its text layer per page, a vision model over the
-pages that have none) and the entry points at the document rather than
-at a blob, so the text has ONE home and the agent has one way to ask for
-it. The marker, the tool and the chip do not care which kind it is.
-
-A PICTURE shared in chat lands here too. Its bytes ride the one model
-call, and what it showed is read once on the worker (``read_photo``) and
-kept beside it, so ``pasted`` answers a screenshot in every later turn
-as it answers a page.
+The index is a line each in the user's ``agent_user_memory`` row, beside
+the facts and the readings, so a paste reaches the next conversation too.
+``pasted`` reads any of them back: the marker, the tool and the chip do
+not care which kind it is.
 """
 
-from __future__ import annotations
-
+import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime
-import re
-from typing import Any
 
+from pydantic import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.chat_transcript import IMAGE_TYPES, paste_ids, paste_marker
+from app.core.db import get_async_session, release_lock
+from app.core.figures import FIGURES
 from app.core.log import logger
-from app.core.storage import get_storage
-from app.core.tools import register_tool
-from app.services.ai.domains.chat.user_memory import (
-    current_user_id,
-    load_user_pastes,
-    store_user_pastes,
-)
-from app.services.documents.service import PAGE_HEADING
+from app.core.storage import get_storage, held
+from app.core.tools import current_owner_user_id, register_tool
+from app.services.ai.domains.chat.attachments import PASTE_THRESHOLD, ChatAttachment
+from app.services.ai.domains.chat.user_memory import current_user_id, get_user_memory
+from app.services.ai.models.agents import AgentUserMemory
 
-# What counts as "a wall of text" rather than a long question. Below it
-# the paste is just what someone typed and belongs in the message; above
-# it, it is a document they brought.
-PASTE_THRESHOLD = 2_000
-
-# The index is a line each; the blobs live in storage. Bounded anyway,
-# so a year of pasting cannot grow the row without limit.
+# The index is a line each; the bytes live in storage. Bounded anyway, so
+# a year of pasting cannot grow the row without limit.
 MAX_PASTES_PER_USER = 50
 
-# Short enough for a model to quote back without fumbling it, long
-# enough that two pastes will not collide.
+# Short enough for a model to quote back without fumbling it, long enough
+# that two pastes will not collide.
 ID_LENGTH = 8
 
-# Stands in the message where a wall of text was, until the paste is
-# stored and knows its own id.
-PLACEHOLDER = "\x00paste\x00"
-
-
-# The id inside a marker this module wrote.
-_MARKER_ID = re.compile(r"\[pasted text #([0-9a-f]+)")
-
-
-# What a picture's handle is for, said in its marker. Most pictures are
-# a screen to talk about, not paper to keep: filing is the exception.
-IMAGE_HINT = (
-    "file one with document.file and its paste_id only if it is paper to "
-    "keep, like a receipt, statement or letter"
-)
+# How each page of a document reads back.
+PAGE_HEADING = "--- page {number} ---\n"
 
 # What ``pasted`` says of a picture before its reading has landed. The
 # turn that carries the picture names it too, and there the bytes are
 # right beside the marker: asking again would only cost a round trip.
 PICTURE_UNREAD = (
-    "(no reading on file yet: it is read just after it is shared. If the "
-    "picture is attached to this turn, look at it directly; do not ask "
-    "for it again in this turn)"
+    "(no reading on file yet: a picture is read just after it is shared, "
+    "where a model that can see is in force. If the picture is attached to "
+    "this turn, look at it directly; do not ask for it again in this turn)"
 )
 
-# How a shared picture is read (``read_photo``), and where its usage is
-# recorded: apart from paper read for the documents service.
+# How a shared picture is read, and where its usage is recorded: apart
+# from paper read for the documents service.
 PICTURE_SURFACE = "chat:picture"
 PICTURE_READING = (
     "You are shown a picture someone shared in a conversation: a "
@@ -103,59 +72,106 @@ PICTURE_READING = (
 )
 
 
-def paste_id(key: str) -> str:
-    """The handle the agent uses, from the storage key.
+class Paste(BaseModel):
+    """A line of the paste index: a wall of text (its bytes at ``key``), a
+    read document (its pages at ``document_id``), or a picture (its bytes
+    at ``key``, what it showed at ``reading_key``)."""
 
-    The key is ``sha256/ab/cd/<64 hex>`` - 78 characters, and asking a
-    model to reproduce one exactly is asking for a hallucinated id. The
-    digest's first bytes are as unique as they need to be here.
-    """
+    model_config = FIGURES
+
+    id: str
+    title: str
+    key: str | None = None
+    media_type: str = "text/plain"
+    chars: int = 0
+    document_id: int | None = None
+    at: str = ""
+    reading_key: str | None = None
+
+    @property
+    def is_picture(self) -> bool:
+        return self.media_type in IMAGE_TYPES
+
+    @property
+    def marker(self) -> str:
+        """What stands in the message for it."""
+        return paste_marker(self.id, self.title, self.chars)
+
+
+def document_paste_id(document_id: int) -> str:
+    """The handle of a read document: its id, in the same few characters."""
+    return f"{document_id:08x}"[-ID_LENGTH:]
+
+
+def paste_id(key: str) -> str:
+    """The handle the agent uses, from the storage key: the digest's first
+    characters, since a model asked to repeat a 78-character key will
+    hallucinate one."""
     return key.rsplit("/", 1)[-1][:ID_LENGTH]
 
 
-def marker(paste: dict[str, Any]) -> str:
-    """The line that stands in for the paste in the message text.
-
-    It says what the paste IS and how to read it, because a marker the
-    agent cannot act on is just a hole in the conversation.
-    """
-    return (
-        f"[pasted text #{paste['id']}"
-        f"{': ' + paste['title'] if paste.get('title') else ''}"
-        f" - {paste['chars']:,} characters."
-        f' Read it with pasted("{paste["id"]}")]'
-    )
+async def pastes_of(session: AsyncSession, user_id: str) -> list[Paste]:
+    """What this user has on file, oldest first."""
+    row = await get_user_memory(session, user_id)
+    return [Paste(**p) for p in row.memory.get("pastes", [])] if row else []
 
 
-def ids_in(text: str) -> list[str]:
-    """The paste ids a message already names.
+async def keep_pastes(
+    session: AsyncSession, user_id: str, pastes: Sequence[Paste]
+) -> list[Paste]:
+    """Keep ``pastes`` in the user's index, newest last, one per id: the
+    same bytes again are the same line, keeping what was learned of them
+    (a picture's reading). The index's one writer; the index as kept."""
+    row = await get_user_memory(session, user_id) or AgentUserMemory(user_id=user_id)
+    index = [Paste(**p) for p in row.memory.get("pastes", [])]
+    at = datetime.now(UTC).isoformat()
+    for paste in pastes:
+        known = next((p for p in index if p.id == paste.id), None)
+        kept = paste.model_copy(
+            update={
+                "at": at,
+                "reading_key": paste.reading_key
+                or (known.reading_key if known else None),
+            }
+        )
+        index = [p for p in index if p.id != paste.id] + [kept]
+    dropped, index = index[:-MAX_PASTES_PER_USER], index[-MAX_PASTES_PER_USER:]
+    row.memory = {**row.memory, "pastes": [p.model_dump() for p in index]}
+    session.add(row)
+    if dropped:
+        await session.flush()
+        await _let_go(session, dropped)
+    return index
 
-    The composer stores a paste the moment it is pasted and puts the
-    marker in the box, so by the time a message arrives its walls are
-    already lifted. The markers are then the record of WHICH pastes the
-    message carries - the chips under it are drawn from these.
-    """
-    return _MARKER_ID.findall(text)
+
+async def keep_paste(session: AsyncSession, user_id: str, paste: Paste) -> Paste:
+    """``keep_pastes`` for one: its line, as kept."""
+    return (await keep_pastes(session, user_id, [paste]))[-1]
 
 
-async def named_pastes(user_id: str, text: str) -> list[dict[str, Any]]:
-    """The descriptors for every paste a message's markers name."""
-    wanted = ids_in(text)
-    if not wanted:
-        return []
-    index = {p["id"]: p for p in await load_user_pastes(user_id)}
-    return [index[i] for i in wanted if i in index]
+async def _let_go(session: AsyncSession, dropped: list[Paste]) -> None:
+    """Delete the bytes the lines pushed out of the index named, where no
+    row names them still (``held``): content-addressed, the same page
+    someone else pasted is the same bytes, and a picture's are its
+    message's attachment. A document's pages are the documents service's.
+
+    ponytail: one ``held`` read per key, as a paste pushes one line out
+    (batch it if a pass drops many); and before the commit, so a trim the
+    caller then rolls back keeps a line whose bytes are gone (it reads as
+    missing, never as someone else's)."""
+    storage = get_storage()
+    for key in (k for p in dropped for k in (p.key, p.reading_key) if k):
+        try:
+            if not await held(session, key):
+                await storage.delete(key)
+        except OSError as exc:
+            logger.warning(f"Could not delete a dropped paste's bytes: {exc}")
 
 
 def title_of(block: str) -> str:
-    """A name for a wall of text: its first line that says anything.
-
-    The reader has to recognise the paste in a chip, and the agent has
-    to recognise it in a marker, so the name comes from the text rather
-    than a counter. Pages open with navigation furniture - "All", "Cart",
-    "Home" - so a line of one short word is skipped, but the threshold
-    stays low enough that a real heading ("Your Orders") still wins.
-    """
+    """A name for a wall of text: its first line that says anything. Pages
+    open with navigation ("All", "Cart"), so a line of one short word is
+    skipped while a real heading ("Your Orders") still wins."""
     for line in block.splitlines():
         line = line.strip()
         if len(line) > 8:
@@ -163,225 +179,124 @@ def title_of(block: str) -> str:
     return "pasted text"
 
 
-def split_blocks(text: str) -> list[str]:
-    """The message, cut where a paste is likely to start and end.
-
-    A page almost never arrives alone: it comes with the sentence that
-    introduces it ("here is another page"), and lifting the whole
-    message would take the question with it. Blank lines are where a
-    paste joins what someone actually wrote.
-    """
-    return text.split("\n\n")
+async def _put(text: str) -> Paste:
+    """A wall of text in the store: its line, not yet kept."""
+    key = await get_storage().put(text.encode("utf-8"), content_type="text/plain")
+    return Paste(id=paste_id(key), key=key, title=title_of(text), chars=len(text))
 
 
-def lift(text: str) -> tuple[str, list[str]]:
-    """Pull the walls of text out of a message, in place.
+async def store_paste(session: AsyncSession, user_id: str, text: str) -> Paste:
+    """Keep a wall of text for this user: its line, as kept."""
+    return await keep_paste(session, user_id, await _put(text))
 
-    Returns the message with a placeholder where each wall was, and the
-    walls themselves. A message that is only a long question comes back
-    untouched with nothing lifted - the threshold is about size, but the
-    UNIT is a block, so a single paragraph someone really typed is left
-    alone unless it is itself enormous.
-    """
-    if len(text) <= PASTE_THRESHOLD:
+
+async def lift_walls(
+    session: AsyncSession, user_id: str, text: str, read: Sequence[Paste] = ()
+) -> tuple[str, list[Paste]]:
+    """``text`` with each wall of text in it kept and standing as its
+    marker, and every paste its markers name (one the composer kept as it
+    was pasted, too), once each, in order. ``read`` are lines this turn
+    read already (an attached document's), kept in the same pass.
+
+    The unit is a block (blank lines are where a paste meets what someone
+    wrote), so the sentence introducing a page stays, and a long message
+    of paragraphs someone typed is left alone. A store that refuses leaves
+    the wall in place: the paste must land somewhere, and in the message
+    is where every paste used to."""
+    blocks = text.split("\n\n")
+    walls: list[Paste] = []
+    for at, block in enumerate(blocks):
+        if len(block) <= PASTE_THRESHOLD:
+            continue
+        try:
+            walls.append(await _put(block))
+        except OSError as exc:
+            logger.warning(f"Could not store pasted text: {exc}")
+            continue
+        blocks[at] = walls[-1].marker
+    text = "\n\n".join(blocks)
+    wanted = list(dict.fromkeys(paste_ids(text)))
+    kept = [*walls, *read]
+    if not (wanted or kept):
         return text, []
-    kept: list[str] = []
-    lifted: list[str] = []
-    for block in split_blocks(text):
-        if len(block) > PASTE_THRESHOLD:
-            kept.append(PLACEHOLDER)
-            lifted.append(block)
-        else:
-            kept.append(block)
-    return "\n\n".join(kept), lifted
-
-
-async def store_document(
-    user_id: str,
-    document_id: int,
-    title: str,
-    chars: int,
-    session: Any = None,
-) -> dict[str, Any]:
-    """Index an already-read document so the agent can ask for it.
-
-    The text stays where extraction put it - one home - and the entry
-    is the handle: the same marker, the same tool, the same chip as a
-    pasted page, because from the conversation's side they are the same
-    thing.
-    """
-    return await _index(
-        user_id,
-        {
-            "id": f"{document_id:08x}"[-ID_LENGTH:],
-            "document_id": document_id,
-            "title": title,
-            "chars": chars,
-        },
-        session,
+    index = await (
+        keep_pastes(session, user_id, kept) if kept else pastes_of(session, user_id)
     )
+    found = {p.id: p for p in index}
+    return text, [found[i] for i in wanted if i in found]
 
 
-async def store_image(
-    user_id: str,
-    key: str,
-    media_type: str,
-    title: str,
-    session: Any = None,
-) -> dict[str, Any]:
-    """Index a chat photo, already in the store, so it has a handle (#285).
-
-    The bytes rode one model call and were kept (``persist_attachments``);
-    without an entry nothing could name the photo again, so a photographed
-    statement could not be filed - "I don't have a PDF, just the real
-    copy". ``document.file`` turns the entry into a document."""
-    return await _index(
-        user_id,
-        {"id": paste_id(key), "key": key, "media_type": media_type, "title": title},
-        session,
-    )
-
-
-async def _index(
-    user_id: str, entry: dict[str, Any], session: Any = None
-) -> dict[str, Any]:
-    """Keep ``entry`` in the user's index, newest last, one per id: the
-    same bytes again are the same entry, not a second row, and keep what
-    was learned of them (a picture's reading)."""
-    index = await load_user_pastes(user_id, session)
-    known = next((p for p in index if p.get("id") == entry["id"]), {})
-    entry = {**known, **entry, "at": datetime.now(UTC).isoformat()}
-    index = [p for p in index if p.get("id") != entry["id"]]
-    index.append(entry)
-    await store_user_pastes(user_id, index[-MAX_PASTES_PER_USER:], session)
-    return entry
-
-
-async def store_paste(
-    user_id: str,
-    text: str,
-    title: str | None = None,
-    session: Any = None,
-) -> dict[str, Any]:
-    """Keep the text, index it for this user, and describe it.
-
-    Returns the descriptor the message carries. Storage failing is not
-    the user losing their paste: the caller falls back to sending it as
-    message text, which is what used to happen to every paste.
-    """
-    data = text.encode("utf-8")
-    storage = get_storage()
-    key = await storage.put(data, content_type="text/plain")
-    # Re-pasting the same page is the same bytes and so the same id;
-    # ``_index`` keeps one entry rather than a row per paste of it.
-    return await _index(
-        user_id,
-        {
-            "id": paste_id(key),
-            "key": key,
-            "title": title or "pasted text",
-            "chars": len(text),
-        },
-        session,
-    )
-
-
-async def read_paste(user_id: str, paste_id: str) -> tuple[dict[str, Any], str] | None:
-    """The descriptor and the text, or None when there is no such paste.
-
-    The one lookup. ``pasted`` is the agent's door onto it and the
-    viewer route is the reader's; neither re-implements the search, and
-    neither has to know whether the text came off the clipboard or out
-    of a PDF.
-    """
-    match = await _entry(user_id, paste_id)
-    if match is None:
-        return None
-    if match.get("document_id"):
-        text = await document_text(int(match["document_id"]))
-        if text is None:
-            logger.warning("paste index points at an unread document", id=paste_id)
-            return None
-        return match, text
-    if is_picture(match):
-        reading = match.get("reading_key") and await _blob(
-            str(match["reading_key"]), paste_id
-        )
-        return match, reading or PICTURE_UNREAD
-    data = await _blob(str(match["key"]), paste_id)
-    return None if data is None else (match, data)
-
-
-async def _entry(user_id: str, paste_id: str) -> dict[str, Any] | None:
-    return next(
-        (p for p in await load_user_pastes(user_id) if p.get("id") == paste_id), None
-    )
-
-
-async def _blob(key: str, paste_id: str) -> str | None:
-    """The text a paste's key holds, or None (logged) when it is gone."""
-    data = await get_storage().get(key)
-    if data is None:
-        logger.warning("paste index points at missing bytes", paste_id=paste_id)
-        return None
-    return data.decode("utf-8", errors="replace")
-
-
-def is_picture(entry: dict[str, Any]) -> bool:
-    """Whether an index entry is a picture kept from chat: the one test,
-    for every reader of the index."""
-    return str(entry.get("media_type", "")).startswith("image/")
-
-
-async def read_photo(user_id: str, paste_id: str) -> bool:
-    """Read what a shared picture showed and keep it (``read_photo_task``).
-
-    On the worker, after the turn: the turn that carried the picture saw
-    its bytes, and every later one reads this instead. False when there
-    is nothing to read: the entry or its bytes are gone."""
+async def read_documents(
+    session: AsyncSession,
+    attached: Sequence[ChatAttachment],
+    owner_user_id: int | None = None,
+) -> list[Paste | BaseException | None]:
+    """Read attached documents into the documents service: each one's line,
+    not yet kept (``lift_walls`` keeps it), None when it gave no pages, or
+    what stopped it (a parser over uploaded bytes). Same bytes again are the
+    same document, its read pages read once. Their pages are read together,
+    on the worker where the stack has one (``extract_and_wait``), with no
+    transaction held while they are."""
     from app.services.documents import service as documents
 
-    entry = await _entry(user_id, paste_id)
-    if entry is None or not is_picture(entry):
-        return False
-    image = await get_storage().get(str(entry["key"]))
-    if image is None:
-        logger.warning("paste index points at missing bytes", paste_id=paste_id)
-        return False
-    text, _model = await documents.look(
-        image,
-        str(entry["media_type"]),
-        instructions=PICTURE_READING,
-        ask="What does this picture show?",
-        surface=PICTURE_SURFACE,
+    ingested: list[int | BaseException] = []
+    for attachment in attached:
+        try:
+            document = await documents.DocumentService(session).ingest(
+                attachment.decoded(),
+                title=attachment.name or "document",
+                media_type=attachment.media_type,
+                owner_user_id=owner_user_id,
+                source="chat",
+            )
+            ingested.append(int(document.id or 0))
+            await release_lock(session)
+        except Exception as exc:  # noqa: BLE001 - one file's failure is its own
+            await session.rollback()
+            ingested.append(exc)
+    waits = iter(
+        await asyncio.gather(
+            *(
+                documents.extract_and_wait(i, owner_user_id=owner_user_id, force=False)
+                for i in ingested
+                if isinstance(i, int)
+            ),
+            return_exceptions=True,
+        )
     )
-    await keep_reading(user_id, entry, text)
-    return True
-
-
-async def keep_reading(user_id: str, entry: dict[str, Any], text: str) -> None:
-    """Store a picture's reading and point its entry at it, through the
-    index's one writer."""
-    key = await get_storage().put(text.encode("utf-8"), content_type="text/plain")
-    await _index(user_id, {**entry, "reading_key": key})
+    found: list[Paste | BaseException | None] = []
+    for attachment, document_id in zip(attached, ingested, strict=True):
+        if isinstance(document_id, BaseException):
+            found.append(document_id)
+            continue
+        if isinstance(waited := next(waits), BaseException):
+            found.append(waited)
+            continue
+        text = await document_text(session, document_id, owner_user_id)
+        found.append(
+            Paste(
+                id=document_paste_id(document_id),
+                title=attachment.name or "document",
+                media_type=attachment.media_type,
+                chars=len(text),
+                document_id=document_id,
+            )
+            if text
+            else None
+        )
+    return found
 
 
 async def document_text(
-    document_id: int, session: AsyncSession | None = None
+    session: AsyncSession, document_id: int, owner_user_id: int | None
 ) -> str | None:
-    """Every read page of a document, in order, as one body of text.
+    """Every page of a document in order, as one text, or None when it has
+    none ``owner_user_id`` may read. A page that could not be read says so
+    with its reason: the agent must be able to tell a page that said
+    nothing from one nobody could read."""
+    from app.services.documents import service as documents
 
-    A page that could not be read is a row too, with its reason, so it
-    is named here rather than silently skipped: the agent must be able
-    to tell a page that said nothing from one nobody could read.
-    """
-    from app.services.ai.domains.chat.user_memory import session_or
-    from app.services.documents.service import pages_for
-
-    async with session_or(session) as db:
-        pages = await pages_for(db, document_id)
-    if not pages:
-        return None
+    pages = await documents.pages_for(session, document_id, owner_user_id=owner_user_id)
     parts = [
         PAGE_HEADING.format(number=page.page_number)
         + (
@@ -395,26 +310,79 @@ async def document_text(
     return "\n\n".join(parts).strip() or None
 
 
-async def pasted(paste_id: str) -> str:
-    """Read back a block of text the user pasted earlier, or what a
-    picture they shared showed.
+async def read_picture(image: bytes, media_type: str) -> str | None:
+    """What a picture shows, read with the documents service's vision, or
+    None where no model that can see is in force."""
+    from app.services.documents import service as documents
 
-    A pasted page - an order listing, a log, a statement - is stored
-    once and stands in the conversation as a one-line marker naming its
-    id, because replaying the whole page into every later turn is what
-    pushes the rest of the conversation out of your context. Call this
-    with the id from the marker the moment you need the CONTENT, and
-    call it again in a later turn rather than trying to remember it: the
-    text does not change, and the stored copy outlives the conversation
-    it was pasted into.
+    if await documents.vision_reader() is None:
+        return None
+    text, _model = await documents.look(
+        image,
+        media_type,
+        instructions=PICTURE_READING,
+        ask="What does this picture show?",
+        surface=PICTURE_SURFACE,
+    )
+    return text
+
+
+async def read_paste(
+    session: AsyncSession, user_id: str, paste_id: str, *, owner_user_id: int | None
+) -> tuple[Paste, str] | None:
+    """A paste's line and what it holds, or None when this user has no such
+    paste, its bytes are gone, or it is a document ``owner_user_id`` (the
+    turn's owner) may not read: the index is the chat user's, the pages
+    their document's owner's. The one lookup: ``pasted`` is the agent's
+    door onto it and the chip's dialog the reader's. No transaction is
+    held while the bytes are fetched."""
+    index = await pastes_of(session, user_id)
+    paste = next((p for p in index if p.id == paste_id), None)
+    pages = (
+        await document_text(session, paste.document_id, owner_user_id)
+        if paste is not None and paste.document_id is not None
+        else None
+    )
+    await release_lock(session)
+    if paste is None:
+        return None
+    if paste.document_id is not None:
+        text = pages
+    elif paste.is_picture:
+        text = await _blob(paste.reading_key) or PICTURE_UNREAD
+    else:
+        text = await _blob(paste.key)
+    if text is None:
+        logger.warning("paste index points at missing bytes", paste_id=paste_id)
+        return None
+    return paste, text
+
+
+async def _blob(key: str | None) -> str | None:
+    data = await get_storage().get(key) if key else None
+    return data.decode("utf-8", errors="replace") if data is not None else None
+
+
+async def pasted(paste_id: str) -> str:
+    """Read back a block of text the user pasted, a document they
+    attached, or what a picture they shared showed.
+
+    Each stands in the conversation as a one-line marker naming its id,
+    because replaying a whole page into every later turn is what pushes
+    the rest of the conversation out of your context. Call this with the
+    id from the marker the moment you need the content, and again in a
+    later turn rather than trying to remember it: it is kept, and outlives
+    the conversation it was shared in.
     """
     user_id = current_user_id.get()
     if not user_id:
         return "No user context available; cannot read that paste."
-    found = await read_paste(user_id, paste_id)
+    async with get_async_session() as session:
+        found = await read_paste(
+            session, user_id, paste_id, owner_user_id=current_owner_user_id.get()
+        )
     if found is None:
-        known = ", ".join(p["id"] for p in await load_user_pastes(user_id)) or "none"
-        return f"No paste with id {paste_id!r}. Pastes on file: {known}."
+        return f"No paste {paste_id!r} on file. {PICTURE_UNREAD}"
     return found[1]
 
 
@@ -423,7 +391,10 @@ async def pasted(paste_id: str) -> str:
 register_tool(
     "pasted",
     pasted,
-    description="Read back a pasted block of text, or what a shared picture showed",
+    description=(
+        "Read back a pasted block of text, an attached document, or what a "
+        "shared picture showed"
+    ),
     effect="read",
     replace=True,
 )

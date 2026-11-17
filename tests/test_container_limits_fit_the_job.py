@@ -34,12 +34,9 @@ this was scarcity. A ceiling costs nothing until it is hit; it only ever
 decides whether the process gets stopped.
 """
 
-from pathlib import Path
 import re
 
-import yaml
-
-ROOT = Path(__file__).resolve().parents[1]
+from tests._compose import load_compose
 
 # The import peaks well above the idle footprint; this is the headroom the
 # 18,618-row file needs, not a measured ceiling.
@@ -47,7 +44,7 @@ MINIMUM_WORKER_MEMORY_MB = 1024
 
 
 def _limits(service: str) -> dict[str, str]:
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text()) or {}
+    compose = load_compose("docker-compose.yml")
     spec = (compose.get("services") or {})[service]
     limits = spec["deploy"]["resources"]["limits"]
     # Check Compose defaults: overrides can vary by deployment environment.
@@ -113,7 +110,7 @@ MINIMUM_DEV_WEBSERVER_MEMORY_MB = 1536
 
 
 def test_the_dev_webserver_has_room_for_its_reloader() -> None:
-    compose = yaml.safe_load((ROOT / "docker-compose.dev.yml").read_text()) or {}
+    compose = load_compose("docker-compose.dev.yml")
     spec = compose["services"]["webserver"]
     memory = _megabytes(spec["deploy"]["resources"]["limits"]["memory"])
     assert memory >= MINIMUM_DEV_WEBSERVER_MEMORY_MB

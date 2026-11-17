@@ -11,7 +11,6 @@ include it.
 """
 
 from datetime import date
-from types import SimpleNamespace
 
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -195,10 +194,10 @@ class TestTheCard:
 
 class TestItIsProposable:
     def test_the_queue_knows_the_change_type(self) -> None:
-        from app.services.finance.domains.writes import executors  # noqa: F401
-        from app.services.finance.domains.writes.registry import (
+        from app.services.change_queue import (
             registered_change_types,
         )
+        from app.services.finance.domains.writes import executors  # noqa: F401
 
         assert "account.loan_terms" in registered_change_types()
 
@@ -386,21 +385,17 @@ class TestFilingADocumentAgainstAnAccount:
         document = await documents.ingest(
             b"%PDF-1.4 schedule", title="Amortization_Schedule.pdf"
         )
-        from app.services.ai.domains.chat.pastes import store_document
+        from tests._pastes import keep_document
 
         # The paste is the handle the conversation holds; it points at
         # the document the marker named.
-        paste = await store_document(
-            "0",
-            int(document.id),
-            "Amortization_Schedule.pdf",
-            19_105,
-            async_db_session,
+        paste = await keep_document(
+            async_db_session, "0", int(document.id), "Amortization_Schedule.pdf", 19_105
         )
 
         await file_document_execute(
             async_db_session,
-            FileDocumentPayload(paste_id=str(paste["id"]), account_id=int(account.id)),
+            FileDocumentPayload(paste_id=paste.id, account_id=int(account.id)),
             None,
         )
         await async_db_session.commit()
@@ -423,16 +418,12 @@ class TestFilingADocumentAgainstAnAccount:
         account = await seed_account(
             svc, name="Citizens", account_type="loan", classification="liability"
         )
-        paste = await store_paste(
-            "0", "a wall of pasted text", title="Orders", session=async_db_session
-        )
+        paste = await store_paste(async_db_session, "0", "a wall of pasted text")
 
         with pytest.raises(ValueError, match="not an attached document"):
             await file_document_execute(
                 async_db_session,
-                FileDocumentPayload(
-                    paste_id=str(paste["id"]), account_id=int(account.id)
-                ),
+                FileDocumentPayload(paste_id=paste.id, account_id=int(account.id)),
                 None,
             )
 
@@ -440,22 +431,22 @@ class TestFilingADocumentAgainstAnAccount:
     async def test_the_card_names_both_sides(
         self, svc: FinanceService, async_db_session: AsyncSession
     ) -> None:
-        from app.services.ai.domains.chat.pastes import store_document
         from app.services.finance.domains.writes.filing import (
             FileDocumentPayload,
             file_document_describe,
         )
+        from tests._pastes import keep_document
 
         account = await seed_account(
             svc, name="Citizens", account_type="loan", classification="liability"
         )
-        paste = await store_document(
-            "0", 7, "Amortization_Schedule.pdf", 19_105, async_db_session
+        paste = await keep_document(
+            async_db_session, "0", 7, "Amortization_Schedule.pdf", 19_105
         )
 
         rows = await file_document_describe(
             async_db_session,
-            FileDocumentPayload(paste_id=str(paste["id"]), account_id=int(account.id)),
+            FileDocumentPayload(paste_id=paste.id, account_id=int(account.id)),
             None,
         )
 
@@ -479,14 +470,14 @@ class TestFilingADocumentWithAContactOrMatter:
     insurer's paper is the insurer's."""
 
     async def _paste(self, db: AsyncSession, title: str) -> str:
-        from app.services.ai.domains.chat.pastes import store_document
         from app.services.documents.service import DocumentService
+        from tests._pastes import keep_document
 
         document = await DocumentService(db).ingest(
             b"%PDF-1.4 " + title.encode(), title=title
         )
-        paste = await store_document("0", int(document.id), title, 1_000, db)
-        return str(paste["id"])
+        paste = await keep_document(db, "0", int(document.id), title, 1_000)
+        return paste.id
 
     @pytest.mark.asyncio
     async def test_filed_with_a_contact_it_is_on_their_paper(
@@ -528,7 +519,8 @@ class TestFilingADocumentWithAContactOrMatter:
         The photo is kept from the turn it rode; filing it makes it a
         document on the shelf, read like any other, and files it."""
         from app.core.storage import get_storage
-        from app.services.ai.domains.chat.pastes import store_image
+        from app.services import change_queue
+        from app.services.change_queue import PendingChange, follow_ups
         from app.services.documents.domains.extraction import dispatch
         from app.services.documents.service import DocumentService
         from app.services.finance.domains.writes import announce as announce_module
@@ -539,6 +531,7 @@ class TestFilingADocumentWithAContactOrMatter:
         )
         from app.services.matters.matters import MatterService
         from app.services.matters.models import matter_tag
+        from tests._pastes import keep_photo
 
         async def _quietly(*_: object, **__: object) -> None:
             return None
@@ -552,10 +545,10 @@ class TestFilingADocumentWithAContactOrMatter:
         monkeypatch.setattr(dispatch, "start_extraction", start)
         matter = await MatterService(async_db_session).open(title="Medicaid")
         key = await get_storage().put(b"hvcu mini statement", content_type="image/jpeg")
-        photo = await store_image(
-            "0", key, "image/jpeg", "IMG_2041.jpg", async_db_session
+        photo = await keep_photo(
+            async_db_session, "0", key, "image/jpeg", "IMG_2041.jpg"
         )
-        payload = FileDocumentPayload(paste_id=photo["id"], matter_id=int(matter.id))
+        payload = FileDocumentPayload(paste_id=photo.id, matter_id=int(matter.id))
 
         said = {
             r.label: r.value
@@ -574,11 +567,12 @@ class TestFilingADocumentWithAContactOrMatter:
         ]
         assert started == []  # not before the approval commits
 
-        approved = SimpleNamespace(
+        approved = PendingChange(
             id=1, change_type="document.file", status="approved", result=result
         )
+        follow_ups.landed(async_db_session, approved)
         monkeypatch.setattr(announce_module, "announce_approval", _quietly)
-        await announce_module.announce(async_db_session, [approved])
+        await change_queue.after_commit(async_db_session)
 
         assert started == [result["document_id"]]  # then read like any other
 

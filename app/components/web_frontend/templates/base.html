@@ -5,10 +5,16 @@
    ``page_body`` only when a page needs to replace the whole main wrapper.
    ``#app-content`` is the element htmx swaps fragments into (see
    ``render()`` in rendering.py and the layouts under layouts/).
+
+   The one modal and the side drawer are not mounted here: steward's shell
+   mounts its own modal inside its Alpine scope (layouts/app_shell.html),
+   and the Overseer's layout mounts both (layouts/overseer.html).
 #}
+{% from "components/macros/layout.html" import appearance_head, theme_toggle, interactive_head, chat_scripts %}
 {% from "components/macros/feedback.html" import toast_region %}
+{% from "components/macros/icons.html" import sprite %}
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ appearance_choices.theme[0] }}-{{ appearance_choices.mode[0] }}-{{ appearance_choices.finish[0] }}" data-appearance-choices='{{ appearance_choices|tojson }}'>
+<html lang="en" data-theme="{{ default_theme.name }}-{{ appearance_choices.mode[0] }}-{{ appearance_choices.finish[0] }}" data-appearance-choices='{{ appearance_choices|tojson }}'>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -32,52 +38,29 @@
 
   {# Tailwind + DaisyUI, precompiled — no runtime JIT, no CDN. Built into
      static/dist by the asset pipeline; static() returns the fingerprinted
-     URL once a build exists and the raw source path before then. #}
-  {# Applies the stored theme to the document element before the
-     stylesheet paints; a sync script on purpose (see static/js/theme.js). #}
-  <script src="{{ static('js/theme.js') }}"></script>
-  <link rel="stylesheet" href="{{ static('dist/app.css') }}">
+     URL once a build exists and the raw source path before then. The
+     theme script ahead of it applies the stored theme before the
+     stylesheet paints (see static/js/theme.js). #}
+  {{ appearance_head(default_theme) }}
 
-  {# htmx. History snapshots are disabled deliberately: htmx's default
-     back-button behavior saves the live DOM to localStorage and re-injects
-     it on history navigation. This DOM is full of Alpine-expanded
-     templates (x-if/x-for clones, x-teleport copies) and script tags —
-     restoring a snapshot re-runs scripts ("identifier already declared")
-     and makes Alpine re-expand already-expanded templates, duplicating the
-     whole page once per back/forward press. historyCacheSize 0 makes every
-     restore a cache miss; refreshOnHistoryMiss turns a miss into a clean
-     full-page load instead of an AJAX restore. #}
-  {# responseHandling (first matching rule wins, RegExp.test semantics):
-     a 422 carries a re-rendered form and must swap (app.js toasts one that
-     is JSON instead); other 4xx/5xx never
-     swap and raise htmx:responseError, which app.js turns into a toast. #}
-  <meta name="htmx-config" content='{"historyCacheSize": 0, "refreshOnHistoryMiss": true, "attributesToSettle": [], "responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "422", "swap": true}, {"code": "[45]..", "swap": false, "error": true}, {"code": "...", "swap": true}]}'>
-  {# Third-party scripts are vendored under static/vendor (the version in
-     each name), never a CDN: the script policy allows this origin only. #}
-  <script src="{{ static('vendor/htmx-2.0.4.min.js') }}"></script>
-  {# SSE extension for job progress (pattern 5); registers against the
-     global htmx, so it must follow core. #}
-  <script src="{{ static('vendor/htmx-ext-sse-2.2.3.js') }}"></script>
-
-  {# Alpine.js — the collapse plugin MUST load before core so its directive
-     is registered when Alpine inits. Both deferred, plugin first. #}
-  <script src="{{ static('vendor/alpinejs-collapse-3.14.8.min.js') }}" defer></script>
-  <script src="{{ static('vendor/alpinejs-3.14.8.min.js') }}" defer></script>
-
-  {# Custom styles #}
-  <link rel="stylesheet" href="{{ static('css/app.css') }}">
+  {{ interactive_head() }}
 
   {% block head_extra %}{% endblock %}
 </head>
 <body class="min-h-dvh bg-aegis-bg text-aegis-text {% block body_class %}{% endblock %}">
   {# The bar along the top while a page or an htmx request loads (app.js). #}
   <div id="page-progress" class="aegis-page-progress" aria-hidden="true"></div>
-{% from "components/macros/icons.html" import sprite %}{{ sprite() }}
+  {{ sprite() }}
 
   {% block navbar %}
   <div class="max-w-screen-xl mx-auto px-6 lg:px-16 py-3 flex items-center justify-between border-b border-aegis-border">
     <a href="/" class="text-sm font-semibold text-aegis-teal tracking-wide">{{ project_name }}</a>
-    <a href="/dashboard" class="text-xs text-aegis-muted border border-aegis-border rounded px-3 py-1 hover:text-aegis-text hover:border-aegis-muted">Dashboard</a>
+    <div class="flex items-center gap-2">
+      {{ theme_toggle() }}
+      {% if meetings_page is defined %}<a href="{{ meetings_page }}" class="text-xs text-aegis-muted border border-aegis-border rounded px-3 py-1 hover:text-aegis-text hover:border-aegis-muted">Meetings</a>{% endif %}
+      {% if auth_enabled %}<a href="/overseer" class="text-xs text-aegis-muted border border-aegis-border rounded px-3 py-1 hover:text-aegis-text hover:border-aegis-muted">Overseer</a>{% endif %}
+      <a href="/dashboard" class="text-xs text-aegis-muted border border-aegis-border rounded px-3 py-1 hover:text-aegis-text hover:border-aegis-muted">Dashboard</a>
+    </div>
   </div>
   {% endblock %}
 
@@ -93,9 +76,7 @@
 
   <script src="{{ static('js/app.js') }}"></script>
   <script src="{{ static('js/charts.js') }}" data-chart-js="{{ static('vendor/chart.js-4.4.7.umd.js') }}"></script>
-  <script src="{{ static('js/chat.js') }}"></script>
-  <script src="{{ static('js/call-state.js') }}"></script>
-  <script src="{{ static('js/voice.js') }}"></script>
+  {% if chat_path is defined %}{{ chat_scripts() }}{% endif %}
   {% if auth_enabled %}<script src="{{ static('js/auth.js') }}"></script>{% endif %}
   {% block scripts %}{% endblock %}
 </body>

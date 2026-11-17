@@ -1,33 +1,100 @@
-"""Her voice, switched and tuned in the app (#262).
+"""The voice, switched and tuned from the chat surface.
 
 The composer carries a voice chip beside the model chip; it opens the one
 dialog, which lists the voice profiles with a preview each, switches the
 active one, makes a new one from the active, and edits one. What changes
-applies to the next thing she says, with no restart.
+applies to the next thing said, with no restart. Tested on the Overseer's
+mount; every mount gets the same routes under its own path.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.components.web_frontend.routes import chat_voices
-from app.components.web_frontend.routes.chat_voices import VOICES
+from app.components.web_frontend.overseer_ai_chat import OVERSEER
+from app.components.web_frontend.routes.partials import chat_voices
 from app.core.config import settings
 from app.services.ai.domains.voice import profiles
-from app.services.ai.models.voice.profile import VoiceProfile
-from tests.web.dom import none, one, oob, select, text
+from app.services.ai.models.voice import VoiceProfile
+from tests._voice_catalog import keep_voice_settings
+from tests.web.dom import none, one, oob, select, text, triggers
+from tests.web.overseer import AI, on_session, sign_in, status_with
+
+VOICES = f"{OVERSEER.path}/voices"
+# A realtime model a live call can run on.
+LIVE = "gemini-3.8-live"
+
+
+@pytest.fixture
+def client(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch, async_db_session: AsyncSession
+) -> TestClient:
+    """Signed in to the Overseer, on the test's own session: the routes and
+    the assertions read one database."""
+    on_session(app, async_db_session)
+    sign_in(app, monkeypatch, status_with(services=[AI]))
+    return TestClient(app)
+
+
+@pytest.fixture
+def hx(client: TestClient) -> TestClient:
+    client.headers["HX-Request"] = "true"
+    return client
 
 
 @pytest.fixture(autouse=True)
 def _restore_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Switching a profile writes the running settings; each test puts
     them back."""
-    for key in profiles.SETTINGS.values():
-        monkeypatch.setattr(settings, key, getattr(settings, key))
+    keep_voice_settings(monkeypatch)
+
+
+@pytest.fixture
+def calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The realtime models a call can reach, and what calls run on: the
+    last of these picks."""
+    from app.components.web_frontend import chat_models as models
+
+    picked: list[str] = []
+    titles = {LIVE: "Gemini Live", "gpt-realtime-2.1": "GPT Realtime 2.1"}
+
+    async def catalog(mode: str = "chat") -> list[dict[str, Any]]:
+        return [
+            {"model_id": LIVE, "title": "Gemini Live", "vendor": "google"},
+            {
+                "model_id": "gpt-realtime-2.1",
+                "title": "GPT Realtime 2.1",
+                "vendor": "openai",
+            },
+        ]
+
+    async def calling(db: Any) -> Any:
+        return (
+            SimpleNamespace(model_id=picked[-1], title=titles[picked[-1]])
+            if picked
+            else None
+        )
+
+    async def use_for_calls(model_id: str) -> str | None:
+        if model_id not in titles:
+            return f"A live call cannot run on {model_id}."
+        picked.append(model_id)
+        return None
+
+    async def icons(listed: list[dict[str, Any]]) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(models, "catalog", catalog)
+    monkeypatch.setattr(models, "calling_model", calling)
+    monkeypatch.setattr(models, "use_for_calls", use_for_calls)
+    monkeypatch.setattr(models, "vendor_icons", icons)
+    return picked
 
 
 @pytest.fixture
@@ -36,7 +103,7 @@ async def voices(async_db_session: AsyncSession) -> dict[str, VoiceProfile]:
         await async_db_session.delete(row)
     await async_db_session.commit()
     marin = VoiceProfile(
-        name="Illiana",
+        name="Marin",
         is_active=True,
         stt_model="gpt-transcribe",
         tts_model="gpt-4o-mini-tts-2025-03-20",
@@ -56,19 +123,62 @@ async def voices(async_db_session: AsyncSession) -> dict[str, VoiceProfile]:
 
 class TestTheChip:
     def test_the_composer_loads_it(self, client: TestClient) -> None:
-        loader = one(client.get("/chat").text, "#chat-composer #chat-voice")
+        page = client.get("/overseer/services/ai/chat").text
+        loader = one(page, "#chat-composer #chat-voice")
         assert loader.get("hx-get") == f"{VOICES}/chip"
         # It sits inside the composer form, whose hx-target is the thread:
-        # htmx inherits that, and the chip replaced the whole conversation
-        # (2026-09-25). A loader names its own target.
+        # htmx inherits that, and would replace the whole conversation. A
+        # loader names its own target.
         assert loader.get("hx-target") == "this"
 
     def test_it_names_the_active_voice_and_opens_the_dialog(
         self, hx: TestClient, voices: dict[str, VoiceProfile]
     ) -> None:
         chip = one(hx.get(f"{VOICES}/chip").text, "button#chat-voice")
-        assert text(chip) == "Illiana"
+        assert text(chip) == "Voice: Marin"
         assert chip.get("hx-get") == VOICES
+
+    def test_with_a_live_engine_it_names_what_calls_run_on(
+        self, hx: TestClient, voices: dict[str, VoiceProfile], calls: list[str]
+    ) -> None:
+        calls.append(LIVE)
+        chip = one(hx.get(f"{VOICES}/chip").text, "button#chat-voice")
+        assert text(chip) == "Calls: Gemini Live"
+
+
+class TestCalls:
+    """What a live call runs on is picked here, with the voice it speaks in:
+    the realtime models a call can reach, the one in use checked."""
+
+    def test_it_lists_what_a_call_can_run_on(
+        self, hx: TestClient, voices: dict[str, VoiceProfile], calls: list[str]
+    ) -> None:
+        calls.append("gpt-realtime-2.1")
+        html = hx.get(VOICES).text
+        rows = select(html, "[data-call-model]")
+        # The one in use leads: the list is long, and it is what you check.
+        assert [r.get("data-call-model") for r in rows] == ["gpt-realtime-2.1", LIVE]
+        current = one(html, "[data-call-model][aria-current=true]")
+        assert current.get("data-call-model") == "gpt-realtime-2.1"
+
+    def test_a_pick_sets_what_calls_run_on(
+        self, hx: TestClient, voices: dict[str, VoiceProfile], calls: list[str]
+    ) -> None:
+        response = hx.post(f"{VOICES}/calls", data={"model_id": "gpt-realtime-2.1"})
+
+        assert calls == ["gpt-realtime-2.1"]
+        _, siblings = oob(response.text)
+        chip = [e for e in siblings if e.get("id") == "chat-voice"]
+        assert [text(e) for e in chip] == ["Calls: GPT Realtime 2.1"]
+        current = one(response.text, "[data-call-model][aria-current=true]")
+        assert current.get("data-call-model") == "gpt-realtime-2.1"
+
+    def test_a_refused_pick_says_why(
+        self, hx: TestClient, voices: dict[str, VoiceProfile], calls: list[str]
+    ) -> None:
+        response = hx.post(f"{VOICES}/calls", data={"model_id": "nope"})
+
+        assert calls == [] and "nope" in triggers(response)["toast"]["text"]
 
 
 class TestTheDialog:
@@ -79,7 +189,7 @@ class TestTheDialog:
         none(html, "html")
         rows = select(html, "[data-voice-profile]")
         assert [text(r.cssselect("[data-name]")[0]) for r in rows] == [
-            "Illiana",
+            "Marin",
             "Nova, plain",
         ]
         active = one(html, "[data-voice-profile][aria-current=true]")
@@ -113,7 +223,7 @@ class TestTheDialog:
 
 
 class TestSwitching:
-    async def test_the_next_thing_she_says_uses_it(
+    async def test_the_next_thing_said_uses_it(
         self,
         hx: TestClient,
         voices: dict[str, VoiceProfile],
@@ -128,7 +238,7 @@ class TestSwitching:
         assert active is not None and active.name == "Nova, plain"
         primary, siblings = oob(response.text)
         chip = [e for e in siblings if e.get("id") == "chat-voice"]
-        assert [text(e) for e in chip] == ["Nova, plain"]
+        assert [text(e) for e in chip] == ["Voice: Nova, plain"]
         current = [
             e
             for root in primary
@@ -169,26 +279,30 @@ class TestMaking:
     def test_a_taken_name_is_a_422_with_the_reason(
         self, hx: TestClient, voices: dict[str, VoiceProfile]
     ) -> None:
-        response = hx.post(VOICES, data={"name": "Illiana"})
+        response = hx.post(VOICES, data={"name": "Marin"})
         assert response.status_code == 422
         one(response.text, "[role=alert]")
 
 
 class TestEditing:
-    def test_the_form_offers_the_documented_choices(
+    def test_the_form_holds_what_the_designer_does_not_and_opens_it(
         self, hx: TestClient, voices: dict[str, VoiceProfile]
     ) -> None:
+        """The voice itself (which one, its model, speed and delivery) is
+        put together in the voice designer, one place; the form keeps the
+        rest and opens the designer on this profile."""
         form = one(
             hx.get(f"{VOICES}/{voices['marin'].id}/edit").text, "form[data-voice-form]"
         )
-        voice_options = [
-            o.get("value") for o in form.cssselect("select[name=tts_voice] option")
-        ]
-        assert voice_options == list(profiles.TTS_VOICES)
-        chosen = form.cssselect("select[name=tts_voice] option[selected]")
-        assert [o.get("value") for o in chosen] == ["marin"]
-        instructions = form.cssselect("textarea[name=tts_instructions]")
-        assert [text(t) for t in instructions] == ["Voice Affect: Warm."]
+        for column in ("stt_model", "reply", "working_sound"):
+            one(form, f"select[name={column}]")
+        for column in ("tts_voice", "tts_model", "tts_speed", "tts_instructions"):
+            assert not form.cssselect(f"[name={column}]"), column
+        design = one(form, "a[data-voice-design]")
+        assert (
+            design.get("href")
+            == f"/overseer/services/ai/voice?profile={voices['marin'].id}"
+        )
 
     async def test_saving_the_active_voice_applies_it(
         self,
@@ -198,13 +312,30 @@ class TestEditing:
     ) -> None:
         response = hx.post(
             f"{VOICES}/{voices['marin'].id}",
-            data=_form(voices["marin"], tts_speed="1.35"),
+            data=_form(voices["marin"], stt_model="whisper-1"),
         )
 
         assert response.status_code == 200
-        assert settings.TTS_SPEED == 1.35
+        assert settings.STT_MODEL == "whisper-1"
         await async_db_session.refresh(voices["marin"])
-        assert voices["marin"].tts_speed == 1.35
+        assert voices["marin"].stt_model == "whisper-1"
+
+    async def test_a_hearing_model_brings_its_provider(
+        self,
+        hx: TestClient,
+        voices: dict[str, VoiceProfile],
+        async_db_session: AsyncSession,
+    ) -> None:
+        """Any hearing model can be picked, and it is heard by its own
+        provider: an OpenAI model kept beside Parakeet would be asked of
+        Parakeet."""
+        hx.post(
+            f"{VOICES}/{voices['marin'].id}",
+            data=_form(voices["marin"], stt_model="nemo-parakeet-tdt-0.6b-v3"),
+        )
+
+        await async_db_session.refresh(voices["marin"])
+        assert voices["marin"].stt_provider == "parakeet"
 
     def test_the_form_holds_the_live_dead_air_limit(
         self, hx: TestClient, voices: dict[str, VoiceProfile]
@@ -226,24 +357,24 @@ class TestEditing:
         assert response.status_code == 200
         assert settings.VOICE_LIVE_IDLE_SECONDS == 0  # 0: never
 
-    async def test_saving_another_voice_leaves_hers_alone(
+    async def test_saving_another_voice_leaves_the_active_one_alone(
         self, hx: TestClient, voices: dict[str, VoiceProfile]
     ) -> None:
-        before = settings.TTS_VOICE
+        before = settings.STT_MODEL
         hx.post(
             f"{VOICES}/{voices['nova'].id}",
-            data=_form(voices["nova"], tts_voice="coral"),
+            data=_form(voices["nova"], stt_model="whisper-1"),
         )
-        assert settings.TTS_VOICE == before
+        assert settings.STT_MODEL == before
 
-    async def test_the_live_engine_is_picked_with_her_models_not_here(
+    async def test_the_live_engine_is_picked_with_the_models_not_here(
         self,
         hx: TestClient,
         voices: dict[str, VoiceProfile],
         async_db_session: AsyncSession,
     ) -> None:
-        """One place picks what a call runs on (the Models dialog); the
-        voice form neither offers it nor loses it on a save."""
+        """One place picks what a call runs on (the dialog's Calls list);
+        the voice form neither offers it nor loses it on a save."""
         marin = voices["marin"]
         form = one(hx.get(f"{VOICES}/{marin.id}/edit").text, "form[data-voice-form]")
         assert form.cssselect("select[name=live_engine]") == []
@@ -259,9 +390,7 @@ class TestEditing:
     @pytest.mark.parametrize(
         "change",
         [
-            {"tts_speed": "9"},
-            {"tts_speed": "fast"},
-            {"tts_voice": "ghost"},
+            {"stt_model": "ghost"},
             {"name": ""},
             {"live_idle_seconds": "-1"},
             {"live_idle_seconds": "601"},
@@ -279,7 +408,27 @@ class TestEditing:
 
 
 class TestPreviewing:
-    def test_a_preview_is_that_voice_not_hers(
+    def test_a_voice_the_provider_cannot_say_is_a_503(
+        self,
+        client: TestClient,
+        voices: dict[str, VoiceProfile],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No key, no network: said plainly, as the speech API says it, not
+        a crash."""
+
+        class _Unreachable:
+            def __init__(self, voice_settings: Any) -> None:
+                pass
+
+            async def synthesize(self, request: Any) -> Any:
+                raise RuntimeError("the provider refused")
+
+        monkeypatch.setattr(chat_voices, "TTSService", _Unreachable)
+        response = client.get(f"{VOICES}/{voices['marin'].id}/preview")
+        assert response.status_code == 503
+
+    def test_a_preview_is_that_voice_not_the_active_one(
         self,
         client: TestClient,
         voices: dict[str, VoiceProfile],
@@ -291,14 +440,12 @@ class TestPreviewing:
             def __init__(self, voice_settings: Any) -> None:
                 heard.append(voice_settings)
 
-            async def synthesize_stream(
-                self, request: Any, user_id: str | None = None
-            ) -> Any:
+            async def synthesize(self, request: Any) -> Any:
                 heard.append(request)
-                yield b"ID3"
+                return SimpleNamespace(audio=b"ID3", media_type="audio/mpeg")
 
         monkeypatch.setattr(chat_voices, "TTSService", _TTS)
-        hers = settings.TTS_VOICE
+        active = settings.TTS_VOICE
         response = client.get(f"{VOICES}/{voices['nova'].id}/preview")
 
         assert response.status_code == 200
@@ -308,72 +455,116 @@ class TestPreviewing:
             "nova",
             "gpt-4o-mini-tts",
         )
-        assert request.text == chat_voices.PREVIEW_TEXT
-        assert settings.TTS_VOICE == hers  # previewing does not switch her
-
-
-class TestPreviewingUnsavedChanges:
-    """The form's preview speaks what is in the form, not what was saved:
-    changing the voice and pressing preview kept playing the old one."""
-
-    def test_the_form_preview_reads_the_form(
-        self, hx: TestClient, voices: dict[str, VoiceProfile]
-    ) -> None:
-        form = one(
-            hx.get(f"{VOICES}/{voices['marin'].id}/edit").text, "form[data-voice-form]"
-        )
-        button = form.cssselect("button[data-speak]")[0]
-        assert button.get("data-speak") == f"{VOICES}/{voices['marin'].id}/preview"
-        assert button.get("data-speak-form") is not None
-
-    def test_values_in_the_query_are_spoken_unsaved(
-        self,
-        client: TestClient,
-        voices: dict[str, VoiceProfile],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        heard: list[Any] = []
-
-        class _TTS:
-            def __init__(self, voice_settings: Any) -> None:
-                heard.append(voice_settings)
-
-            async def synthesize_stream(
-                self, request: Any, user_id: str | None = None
-            ) -> Any:
-                yield b"ID3"
-
-        monkeypatch.setattr(chat_voices, "TTSService", _TTS)
-        response = client.get(
-            f"{VOICES}/{voices['marin'].id}/preview",
-            params=_form(voices["marin"], tts_voice="coral", tts_speed="1.5"),
-        )
-
-        assert response.status_code == 200
-        assert (heard[0].TTS_VOICE, heard[0].TTS_SPEED) == ("coral", 1.5)
-        assert voices["marin"].tts_voice == "marin"  # nothing saved
-
-    def test_nonsense_in_the_query_is_a_422(
-        self, client: TestClient, voices: dict[str, VoiceProfile]
-    ) -> None:
-        response = client.get(
-            f"{VOICES}/{voices['marin'].id}/preview",
-            params=_form(voices["marin"], tts_voice="ghost"),
-        )
-        assert response.status_code == 422
+        assert request.text == chat_voices.design.PREVIEW_TEXT
+        assert settings.TTS_VOICE == active  # previewing does not switch
 
 
 def _form(profile: VoiceProfile, **changes: str) -> dict[str, str]:
     values = {
         "name": profile.name,
         "stt_model": profile.stt_model or "",
-        "tts_model": profile.tts_model or "",
-        "tts_voice": profile.tts_voice or "",
-        "tts_speed": str(profile.tts_speed),
-        "tts_instructions": profile.tts_instructions or "",
         "reply": profile.reply,
         "working_sound": profile.working_sound,
         "live_idle_seconds": str(profile.live_idle_seconds),
     }
     values.update(changes)
     return values
+
+
+# Each test saves, then reads the list back as the next turn does, so the
+# same reads repeat by construction.
+@pytest.mark.queryspy(allow_n_plus_one=True)
+class TestPronunciation:
+    """How terms are said, edited beside the voices: a row saved here is
+    said its way on the next turn, by every voice, with no restart."""
+
+    SAID = f"{VOICES}/pronunciation"
+
+    @pytest.fixture(autouse=True)
+    def _fresh_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.ai.domains.voice import spoken
+
+        monkeypatch.setattr(spoken, "_saved", {})
+
+    def _said(self, html: str) -> dict[str, str]:
+        rows = select(html, "#voice-pronunciation tbody tr")
+        return {text(row[0]): text(row[1]) for row in rows}
+
+    def test_the_dialog_opens_on_the_list(
+        self, hx: TestClient, voices: dict[str, VoiceProfile]
+    ) -> None:
+        opener = one(hx.get(VOICES).text, "[data-pronunciations]")
+        assert opener.get("hx-get") == self.SAID
+        assert self._said(hx.get(self.SAID).text)["Traefik"] == "traffic"
+
+    async def test_a_saved_term_is_said_its_way_from_the_next_turn(
+        self, hx: TestClient, async_db_session: AsyncSession
+    ) -> None:
+        from app.services.ai.domains.voice import pronunciations, spoken
+
+        response = hx.post(self.SAID, data={"term": "Illiana", "say": "ill-ee-ah-na"})
+
+        assert response.status_code == 200
+        assert self._said(response.text)["Illiana"] == "ill-ee-ah-na"
+        assert spoken.pronounced("Hi Illiana") == "Hi ill-ee-ah-na"
+        rows = await pronunciations.saved(async_db_session)
+        assert [(r.term, r.say) for r in rows] == [("Illiana", "ill-ee-ah-na")]
+
+    async def test_saving_a_listed_term_again_changes_how_it_is_said(
+        self, hx: TestClient, async_db_session: AsyncSession
+    ) -> None:
+        from app.services.ai.domains.voice import pronunciations, spoken
+
+        hx.post(self.SAID, data={"term": "redis", "say": "ree-dis"})
+        hx.post(self.SAID, data={"term": "Redis", "say": "red-dis"})
+
+        assert spoken.pronounced("Redis") == "red-dis"
+        assert len(await pronunciations.saved(async_db_session)) == 1
+
+    async def test_removing_a_saved_term_brings_back_the_default(
+        self, hx: TestClient, async_db_session: AsyncSession
+    ) -> None:
+        from app.services.ai.domains.voice import pronunciations, spoken
+
+        hx.post(self.SAID, data={"term": "Traefik", "say": "tray-fik"})
+        listed = hx.get(self.SAID).text
+        (remove,) = select(listed, "#voice-pronunciation tbody button[hx-post]")
+        assert remove.get("hx-vals") == '{"term": "Traefik"}'
+
+        response = hx.post(f"{self.SAID}/delete", data={"term": "Traefik"})
+
+        assert self._said(response.text)["Traefik"] == "traffic"
+        assert await pronunciations.saved(async_db_session) == []
+        assert spoken.pronounced("Traefik") == "traffic"
+
+    def test_a_term_needs_how_it_is_said(self, hx: TestClient) -> None:
+        response = hx.post(self.SAID, data={"term": "Illiana", "say": " "})
+
+        assert response.status_code == 422
+        assert "Illiana" not in self._said(response.text)
+
+    async def test_the_app_starts_with_the_saved_list(
+        self, async_db_session: AsyncSession
+    ) -> None:
+        from app.services.ai.domains.voice import pronunciations, spoken
+
+        await pronunciations.save(async_db_session, "Steward", "stew-ard")
+        spoken.use_saved([])
+
+        await profiles.load_active(async_db_session, settings, SimpleNamespace())
+
+        assert spoken.pronounced("Steward") == "stew-ard"
+
+    async def test_a_voice_outside_the_webserver_says_the_saved_list(
+        self, async_db_session: AsyncSession
+    ) -> None:
+        """The meeting bot and the CLI read the voice themselves
+        (``active_settings``); the saved list comes with it."""
+        from app.services.ai.domains.voice import pronunciations, spoken
+
+        await pronunciations.save(async_db_session, "Steward", "stew-ard")
+        spoken.use_saved([])
+
+        await profiles.active_settings(async_db_session, settings)
+
+        assert spoken.pronounced("Steward") == "stew-ard"

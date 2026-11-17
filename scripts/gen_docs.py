@@ -27,3 +27,11 @@ with (
     mkdocs_gen_files.open("images/brand-mark.png", "wb") as dst,
 ):
     dst.write(src.read())
+
+# What the app is made of, read from its code at build time
+# (``ontology export``): its components and services, each with what it
+# holds. Built with the app, never a database or Redis.
+from app.core.ontology import exports, with_app  # noqa: E402
+
+with mkdocs_gen_files.open("stack.md", "w") as stack:
+    stack.write(exports.markdown(with_app()))

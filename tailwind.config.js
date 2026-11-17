@@ -9,41 +9,21 @@
 //
 // THEMES: the single rebrand point.
 //
-// Three axes. A MODE is a color palette (dark, light). A THEME is a voice
-// and a shape (aegis: operational, uppercase micro-labels, tight radius;
-// steward: personal, sentence case, softer radius, a touch larger). A
-// FINISH is how surfaces are lit (matte, lustre). The eight DaisyUI themes
-// below are generated from those tables, named `<theme>-<mode>-<finish>`,
-// and applied as `<html data-theme>` by static/js/theme.js.
+// Three axes. A MODE is a color palette (dark, light). A THEME is a voice,
+// a shape and a type: a file under app/components/web_frontend/themes/
+// (its shape, type and tints), read here and by the server. A FINISH is how
+// surfaces are lit (matte, lustre). The DaisyUI themes below are generated
+// from those, named `<theme>-<mode>-<finish>`, and applied as
+// `<html data-theme>` by static/js/theme.js. See
+// docs/components/web-frontend/styling.md.
 //
 // Every `aegis-*` color name reads a DaisyUI variable, so `bg-aegis-card`
 // follows whatever theme is on <html> and no value is written twice. Charts
-// read the same variables (see charts.js). Colors live in
-// app/core/palette.json, shapes here, nowhere else; tests/web/test_theme.py
-// holds the four themes to parity.
+// read the same variables (see charts.js).
 
 // The palette is a JSON file so Overseer (Flet) builds its light and dark
 // schemes from the same values (app/components/frontend/theme.py).
 const PALETTES = require("./app/core/palette.json");
-
-const SHAPES = {
-  aegis: {
-    "--rounded-box": "0.5rem", // cards, menus, dialogs (rounded-lg)
-    "--rounded-btn": "0.25rem", // controls, chips, rows (rounded)
-    "--rounded-badge": "0.25rem",
-    "--aegis-label-case": "uppercase", // micro-labels: ASSETS, 5 GROUPS
-    "--aegis-label-tracking": "0.05em",
-    "--aegis-scale": "100%", // root font size; every rem follows
-  },
-  steward: {
-    "--rounded-box": "0.75rem",
-    "--rounded-btn": "0.5rem",
-    "--rounded-badge": "1rem",
-    "--aegis-label-case": "none",
-    "--aegis-label-tracking": "0",
-    "--aegis-scale": "106.25%", // 17px
-  },
-};
 
 // A FINISH is how surfaces are lit, read by `.raised` and `.floating` in
 // input.css. matte switches each effect off with a value that is still
@@ -89,27 +69,28 @@ const FINISHES = {
   },
 };
 
-// Where a theme wants a different tint of a mode's palette: steward's
-// light mode is warmer and its borders quieter, so it reads as a personal
-// product rather than a console.
-const TINTS = {
-  steward: {
-    light: {
-      primary: "#0F8A7E",
-      "base-200": "#FAF9F7",
-      "base-300": "#E8E5E0",
-      neutral: "#66707C",
-    },
-  },
-};
+const fs = require("fs");
+const path = require("path");
 
-const themes = Object.entries(SHAPES).flatMap(([theme, shape]) =>
+const THEMES_DIR = path.join(__dirname, "app/components/web_frontend/themes");
+const THEMES = fs
+  .readdirSync(THEMES_DIR)
+  .filter((file) => file.endsWith(".json"))
+  .sort()
+  .map((file) => ({
+    name: path.basename(file, ".json"),
+    ...JSON.parse(fs.readFileSync(path.join(THEMES_DIR, file), "utf8")),
+  }));
+
+const themes = THEMES.flatMap((theme) =>
   Object.entries(PALETTES).flatMap(([mode, palette]) =>
     Object.entries(FINISHES).map(([finish, lit]) => ({
-      [`${theme}-${mode}-${finish}`]: {
+      [`${theme.name}-${mode}-${finish}`]: {
         ...palette,
-        ...(TINTS[theme]?.[mode] ?? {}),
-        ...shape,
+        ...(theme.tints?.[mode] ?? {}),
+        ...theme.shape,
+        "--aegis-font-display": theme.type.display,
+        "--aegis-font-body": theme.type.body,
         ...MATTE,
         ...lit[mode],
       },
@@ -145,10 +126,16 @@ module.exports = {
         DEFAULT: "var(--rounded-btn)",
         lg: "var(--rounded-box)",
       },
+      // A theme's type: `font-display` for titles, `font-body` for the rest
+      // (the body's default); never a family name in a template.
+      fontFamily: {
+        display: "var(--aegis-font-display)",
+        body: "var(--aegis-font-body)",
+      },
       fontSize: {
         xxs: ["0.625rem", "0.875rem"],
       },
-      // The mic's "speaking" equalizer (partials/chat/surface.html).
+      // A voice control's "speaking" equalizer (components/macros/chat.html).
       keyframes: {
         "voice-bar": {
           "0%, 100%": { transform: "scaleY(0.3)" },

@@ -10,8 +10,9 @@ from typing import Any
 
 import pytest
 
+from app.services.system import job_store
 from app.services.system.job_store import RedisJobStore
-from app.services.system.jobs import JobRunner
+from app.services.system.jobs import JobRunner, get_job_runner, unwatched
 from tests._fake_redis import FakeRedis
 
 
@@ -202,9 +203,9 @@ class TestAStoreThatIsDown:
 class TestOneWayToNarrate:
     """Long work should not learn which lane it is running in. Both places
     a label can live hand out the same ``SetLabel``, so a job takes one
-    callable and the SSE follower renders whichever wrote it. Written when
-    the finance import needed progress and the alternative was a wrapper
-    closure per lane, which is two homes for one idea."""
+    callable and whoever is following renders whichever wrote it. The
+    alternative is a wrapper closure per lane, which is two homes for one
+    idea - and the second home is the one that goes stale."""
 
     def test_a_job_names_the_run_whose_log_to_read(self, store) -> None:
         """Its own id until the worker's task id is known: the run log is
@@ -234,13 +235,13 @@ class TestOneWayToNarrate:
         seen: list[str] = []
 
         async def work(handle) -> dict[str, Any]:
-            # The point of the exercise: work takes a SetLabel, not a handle
-            # and not a store, and cannot tell which one it got.
+            # The point of the exercise: work takes a SetLabel, not a
+            # handle and not a store, and cannot tell which one it got.
             await _narrate(handle.label_writer())
             return {}
 
         async def _narrate(write) -> None:
-            await write("Checking 18,607 rows against your ledger...")
+            await write("Checking 18,607 rows...")
             seen.append(runner.get(job_id).label)  # type: ignore[union-attr]
 
         async def main() -> None:
@@ -253,4 +254,124 @@ class TestOneWayToNarrate:
 
         job_id = ""
         asyncio.run(main())
-        assert seen == ["Checking 18,607 rows against your ledger..."]
+        assert seen == ["Checking 18,607 rows..."]
+
+    def test_nobody_watching_is_a_writer_too(self) -> None:
+        # So work that reports progress needs no ``if`` around every line
+        # and no optional argument threaded through every caller.
+        asyncio.run(unwatched("said to no one"))
+
+
+@pytest.fixture
+def shared(monkeypatch: pytest.MonkeyPatch) -> RedisJobStore:
+    """The store a job's helpers open, held open so a test can read it after
+    they close theirs."""
+    fake = RedisJobStore(FakeRedis())
+
+    async def kept_open() -> None:
+        return None
+
+    monkeypatch.setattr(fake, "aclose", kept_open)
+    monkeypatch.setattr(RedisJobStore, "shared", classmethod(lambda cls: fake))
+    return fake
+
+
+class TestStartingAJob:
+    """``start_job``: the worker where the stack has one, else this process;
+    ``queue_job`` and ``narrate`` are the worker's two halves."""
+
+    async def test_with_a_worker_the_job_is_queued_naming_its_task(
+        self, shared: RedisJobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        handed: list[tuple[Any, ...]] = []
+
+        async def enqueue(task: str, *args: Any) -> str:
+            handed.append((task, *args))
+            return "task-42"
+
+        monkeypatch.setattr(job_store, "present", lambda module: True)
+        monkeypatch.setattr(job_store, "_enqueue", enqueue)
+
+        job_id = await job_store.start_job("x:1", "some_task", (1, "a"), _never)
+
+        assert handed == [("some_task", job_id, 1, "a")]
+        snapshot = await shared.get(job_id)
+        assert snapshot is not None
+        # The worker binds its task id as the run: that is where the log is.
+        assert (snapshot.name, snapshot.run_id) == ("x:1", "task-42")
+
+    async def test_without_one_the_work_runs_here(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(job_store, "present", lambda module: False)
+
+        async def work(report: Any) -> dict[str, Any]:
+            report("halfway")
+            return {"done": True}
+
+        job_id = await job_store.start_job("x:1", "some_task", (), work)
+
+        snapshot = await get_job_runner().wait(job_id)
+        assert (snapshot.status, snapshot.result) == ("done", {"done": True})
+
+    async def test_a_hand_off_that_fails_is_written_into_the_record(
+        self, shared: RedisJobStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nobody is watching this process's logs: the record outlives it."""
+
+        async def no_broker(task: str, *args: Any) -> str:
+            raise ConnectionError("no broker")
+
+        monkeypatch.setattr(job_store, "_enqueue", no_broker)
+
+        with pytest.raises(ConnectionError):
+            await job_store.queue_job("x:1", "some_task")
+
+        [snapshot] = await shared.list_jobs()
+        assert snapshot.status == "failed"
+        assert "no broker" in (snapshot.error or "")
+
+    async def test_the_worker_narrates_then_finishes_with_every_label_landed(
+        self, shared: RedisJobStore
+    ) -> None:
+        """Labels are written without waiting; they still have to land."""
+        await shared.create("j1", "x:1", "Queued...")
+        written: list[str] = []
+        set_label = shared.set_label
+
+        async def noting(job_id: str, label: str) -> None:
+            written.append(label)
+            await set_label(job_id, label)
+
+        shared.set_label = noting  # type: ignore[method-assign]
+
+        async def work(report: Any) -> dict[str, Any]:
+            report("1 of 2")
+            report("2 of 2")
+            return {"read": 2}
+
+        assert await job_store.narrate("j1", work) == {"read": 2}
+
+        snapshot = await shared.get("j1")
+        assert snapshot is not None
+        assert (snapshot.status, snapshot.result) == ("done", {"read": 2})
+        assert written == ["1 of 2", "2 of 2"]
+
+    async def test_work_that_fails_fails_the_record(
+        self, shared: RedisJobStore
+    ) -> None:
+        await shared.create("j1", "x:1", "Queued...")
+
+        async def work(report: Any) -> dict[str, Any]:
+            raise RuntimeError("model down")
+
+        with pytest.raises(RuntimeError):
+            await job_store.narrate("j1", work)
+
+        snapshot = await shared.get("j1")
+        assert snapshot is not None
+        assert (snapshot.status, snapshot.error) == ("failed", "model down")
+
+
+async def _never(report: Any) -> dict[str, Any]:
+    raise AssertionError("queued work does not run here")

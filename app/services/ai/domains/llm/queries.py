@@ -2,7 +2,7 @@
 selection, and the usage ledger.
 
 Sync and async both live here because the callers do: the CLI, the
-usage rollups and the catalog context run on a plain ``Session``;
+usage rollups run on a plain ``Session``;
 request paths on an ``AsyncSession``. The annotation on each function
 says which. Statement builders only - no business logic, no writes.
 """
@@ -14,7 +14,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import Integer, case, func
-from sqlalchemy.orm import contains_eager, selectinload
+from sqlalchemy.orm import selectinload
 from sqlmodel import col, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -197,8 +197,8 @@ async def catalog_models(
     stmt = (
         select(LargeLanguageModel)
         .join(LLMOrg, LargeLanguageModel.served_by_org_id == LLMOrg.id)
-        .options(  # the serving org loads from the join above
-            contains_eager(LargeLanguageModel.served_by),
+        .options(
+            selectinload(LargeLanguageModel.served_by),
             selectinload(LargeLanguageModel.made_by),
         )
     )
@@ -209,6 +209,8 @@ async def catalog_models(
                 LargeLanguageModel.title.ilike(f"%{pattern}%"),
             )
         )
+    if mode:
+        stmt = stmt.where(LargeLanguageModel.mode == mode)
     if vendor:
         stmt = stmt.where(LLMOrg.name.ilike(f"%{vendor}%"))
     if vendors is not None:
@@ -221,8 +223,6 @@ async def catalog_models(
         stmt = stmt.where(col(LargeLanguageModel.released_on) >= released_after)
     if not include_disabled:
         stmt = stmt.where(LargeLanguageModel.enabled == True)  # noqa: E712
-    if mode is not None:
-        stmt = stmt.where(LargeLanguageModel.mode == mode)
     stmt = stmt.order_by(
         LargeLanguageModel.released_on.desc().nulls_last(),
         LargeLanguageModel.model_id,
@@ -281,31 +281,6 @@ async def modality_model_counts(session: AsyncSession) -> Sequence[tuple[str, in
         .order_by(LLMModality.modality)
     )
     return result.all()
-
-
-async def orgs_named(session: AsyncSession, names: Iterable[str]) -> Sequence[LLMOrg]:
-    return (
-        await session.exec(select(LLMOrg).where(LLMOrg.name.in_(list(names))))
-    ).all()
-
-
-async def models_served_by(
-    session: AsyncSession, org_ids: Iterable[int]
-) -> Sequence[LargeLanguageModel]:
-    """Every chat model the given orgs serve, with prices, deployments and
-    modalities loaded - the catalog context's one fetch."""
-    return (
-        await session.exec(
-            select(LargeLanguageModel)
-            .where(LargeLanguageModel.served_by_org_id.in_(list(org_ids)))
-            .where(LargeLanguageModel.mode == "chat")
-            .options(
-                selectinload(LargeLanguageModel.llm_prices),
-                selectinload(LargeLanguageModel.deployments),
-                selectinload(LargeLanguageModel.modalities),
-            )
-        )
-    ).all()
 
 
 # --- Active selection --------------------------------------------------
@@ -367,6 +342,19 @@ async def usage_totals(
     ).first()
 
 
+# Who served a ledger row's model: its catalog vendor, ``unknown`` for a
+# model no longer in the catalog (``with_vendor`` joins it, left, so those
+# rows still count).
+VENDOR = func.coalesce(LLMOrg.name, "unknown")
+
+
+def with_vendor(stmt: Any) -> Any:
+    """``stmt`` over the ledger, joined to each row's vendor (``VENDOR``)."""
+    return stmt.outerjoin(
+        LargeLanguageModel, LLMUsage.model_id == LargeLanguageModel.model_id
+    ).outerjoin(LLMOrg, LargeLanguageModel.served_by_org_id == LLMOrg.id)
+
+
 async def usage_by_model(
     session: AsyncSession,
     *,
@@ -377,20 +365,19 @@ async def usage_by_model(
     """Per-model rows (model_id, title, vendor, vendor_color, requests,
     tokens, cost), busiest first. LEFT-joined so ledger rows for models
     no longer in the catalog still count."""
+    stmt = select(
+        LLMUsage.model_id,
+        func.coalesce(LargeLanguageModel.title, LLMUsage.model_id).label("title"),
+        VENDOR.label("vendor"),
+        func.coalesce(LLMOrg.color, "#808080").label("vendor_color"),
+        func.count(LLMUsage.id).label("requests"),
+        func.coalesce(
+            func.sum(LLMUsage.input_tokens + LLMUsage.output_tokens), 0
+        ).label("tokens"),
+        func.coalesce(func.sum(LLMUsage.total_cost), 0.0).label("cost"),
+    )
     stmt = (
-        select(
-            LLMUsage.model_id,
-            func.coalesce(LargeLanguageModel.title, LLMUsage.model_id).label("title"),
-            func.coalesce(LLMOrg.name, "unknown").label("vendor"),
-            func.coalesce(LLMOrg.color, "#808080").label("vendor_color"),
-            func.count(LLMUsage.id).label("requests"),
-            func.coalesce(
-                func.sum(LLMUsage.input_tokens + LLMUsage.output_tokens), 0
-            ).label("tokens"),
-            func.coalesce(func.sum(LLMUsage.total_cost), 0.0).label("cost"),
-        )
-        .outerjoin(LargeLanguageModel, LLMUsage.model_id == LargeLanguageModel.model_id)
-        .outerjoin(LLMOrg, LargeLanguageModel.served_by_org_id == LLMOrg.id)
+        with_vendor(stmt)
         .group_by(
             LLMUsage.model_id,
             LargeLanguageModel.title,
@@ -454,72 +441,21 @@ async def recent_usage(
 async def spend_since(
     session: AsyncSession, *, user_id: str, action_prefix: str, since: datetime
 ) -> float:
-    """Ledgered cost for one user's action family since ``since``."""
+    """Ledgered cost for one user's actions since ``since``: a family by its
+    prefix ending in ``:`` (``chat:``), else that one action (``chat_action``
+    of one agent, never the agents whose slugs begin with it)."""
+    family = action_prefix.endswith(":")
     row = await session.exec(
         select(func.coalesce(func.sum(LLMUsage.total_cost), 0.0))
         .where(LLMUsage.user_id == user_id)
-        .where(LLMUsage.action.like(f"{action_prefix}%"))  # type: ignore[attr-defined]
+        .where(
+            col(LLMUsage.action).startswith(action_prefix, autoescape=True)
+            if family
+            else LLMUsage.action == action_prefix
+        )
         .where(LLMUsage.timestamp >= since)
     )
     return float(row.one())
-
-
-# --- the usage report (#270) --------------------------------------------------
-
-
-async def usage_by_action_and_model(
-    session: AsyncSession, since: datetime
-) -> list[Any]:
-    """Cost, uses, audio seconds and tokens per (action, model) since
-    ``since`` (naive UTC, as stored). One grouped statement."""
-    stmt = (
-        select(
-            LLMUsage.action,
-            LLMUsage.model_id,
-            func.count(LLMUsage.id).label("uses"),
-            func.coalesce(func.sum(LLMUsage.total_cost), 0.0).label("cost"),
-            func.coalesce(func.sum(LLMUsage.audio_seconds), 0.0).label("seconds"),
-            func.coalesce(
-                func.sum(LLMUsage.input_tokens + LLMUsage.output_tokens), 0
-            ).label("tokens"),
-        )
-        .where(LLMUsage.timestamp >= since)
-        .group_by(LLMUsage.action, LLMUsage.model_id)
-    )
-    return list((await session.exec(stmt)).all())
-
-
-async def live_call_rows(
-    session: AsyncSession, since: datetime, actions: tuple[str, ...], limit: int
-) -> list[LLMUsage]:
-    """The live calls since ``since``, newest first."""
-    stmt = (
-        select(LLMUsage)
-        .where(LLMUsage.action.in_(actions), LLMUsage.timestamp >= since)
-        .order_by(LLMUsage.timestamp.desc())
-        .limit(limit)
-    )
-    return list((await session.exec(stmt)).all())
-
-
-async def turns_in_conversations(
-    session: AsyncSession,
-    conversation_ids: set[str],
-    since: datetime,
-    call_actions: tuple[str, ...],
-) -> list[Any]:
-    """(conversation_id, timestamp, cost) of every other ledger row in
-    those conversations since ``since`` - one statement for all calls."""
-    if not conversation_ids:
-        return []
-    stmt = select(
-        LLMUsage.conversation_id, LLMUsage.timestamp, LLMUsage.total_cost
-    ).where(
-        LLMUsage.conversation_id.in_(conversation_ids),
-        LLMUsage.timestamp >= since,
-        LLMUsage.action.not_in(call_actions),
-    )
-    return list((await session.exec(stmt)).all())
 
 
 async def org_icons(session: AsyncSession, keys: Iterable[str]) -> dict[str, str]:
@@ -545,7 +481,7 @@ async def org_icons(session: AsyncSession, keys: Iterable[str]) -> dict[str, str
 
 async def recent_model_ids(session: AsyncSession, limit: int) -> list[str]:
     """The models most recently used, newest first, each once: from the
-    usage ledger, so chat turns and live calls alike."""
+    usage ledger."""
     last = func.max(LLMUsage.timestamp)
     rows = await session.exec(
         select(LLMUsage.model_id)
