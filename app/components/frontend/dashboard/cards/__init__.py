@@ -7,8 +7,8 @@ from app.components.frontend.dashboard.cards.documents_card import DocumentsCard
 from app.components.frontend.dashboard.cards.finance_card import FinanceCard
 
 from .database_card import DatabaseCard
+from .inference_card import InferenceCard
 from .ingress_card import IngressCard
-from .ollama_card import OllamaCard
 from .redis_card import RedisCard
 from .scheduler_card import SchedulerCard
 from .secrets_card import SecretsCard
@@ -27,7 +27,7 @@ __all__ = [
     "DatabaseCard",
     "IngressCard",
     "SecretsCard",
-    "OllamaCard",
+    "InferenceCard",
     "RedisCard",
     "SchedulerCard",
     "WorkerCard",

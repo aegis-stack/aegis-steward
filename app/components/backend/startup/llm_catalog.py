@@ -10,6 +10,7 @@ failed boot.
 
 from sqlmodel import Session
 
+from app.core.config import settings
 from app.core.db import engine
 from app.core.log import logger
 from app.services.ai.service import (
@@ -22,8 +23,8 @@ async def seed_llm_catalog() -> None:
     """Sync whatever the picker would otherwise be missing."""
     with Session(engine) as session:
         # A fresh local stack's picker is empty without this (why:
-        # ``local_models_present``).
-        if local_models_present(session):
+        # ``local_models_present``), and so is a switched engine's.
+        if local_models_present(session, engine=settings.INFERENCE_ENGINE):
             logger.info("Local models already in the catalog")
             return
         result = await sync_llm_catalog(session, mode="chat", source="local")

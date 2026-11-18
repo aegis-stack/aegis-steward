@@ -7,63 +7,69 @@ register_health_check machinery.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
-from app.core.config import settings
 from app.core.constants import ComponentName
 from app.core.log import logger
 
+from .health_speech import check_speech_health
 from .models import ComponentStatus, ComponentStatusType
 
 if TYPE_CHECKING:
-    from app.components.inference.ollama import OllamaServerStatus
+    from app.components.inference.engine import InferenceServerStatus
 
 
 async def check_ollama_health() -> ComponentStatus:
-    """
-    Check Ollama server health and running models.
+    """Ollama's health and running models, with the speech server the
+    component tracks as a sub-component, read beside it: one of the two
+    failing leaves the other's reading."""
+    status, speech = await asyncio.gather(_ollama_health(), check_speech_health())
+    if speech is not None:
+        status.sub_components[speech.name] = speech
+    return status
 
-    Returns:
-        ComponentStatus indicating Ollama infrastructure health with model info
-    """
+
+async def _ollama_health() -> ComponentStatus:
     try:
-        from app.components.inference.ollama import OllamaClient
+        from app.components.inference import get_inference_engine
 
-        # Get Ollama URL from settings (uses effective URL for Docker/local auto-detection)
-        ollama_url = settings.ollama_base_url_effective
-
-        client = OllamaClient(base_url=ollama_url)
-        return ollama_status(await client.get_server_status(), ollama_url)
+        engine = get_inference_engine()
+        return ollama_status(await engine.get_server_status(), engine.base_url)
 
     except ImportError:
         return ComponentStatus(
             name=ComponentName.OLLAMA,
             status=ComponentStatusType.UNHEALTHY,
-            message="Ollama client not available",
+            message="Inference client not available",
             response_time_ms=None,
-            metadata={"error": "OllamaClient not installed"},
+            metadata={"error": "inference component not installed"},
         )
     except Exception as e:
-        logger.error(f"Ollama health check failed: {e}")
+        logger.error(f"Inference health check failed: {e}")
         return ComponentStatus(
             name=ComponentName.OLLAMA,
             status=ComponentStatusType.UNHEALTHY,
-            message=f"Ollama health check failed: {str(e)}",
+            message=f"Inference health check failed: {str(e)}",
             response_time_ms=None,
             metadata={"error": str(e)},
         )
 
 
 def ollama_status(
-    server_status: OllamaServerStatus, ollama_url: str
+    server_status: InferenceServerStatus, ollama_url: str
 ) -> ComponentStatus:
     """A server reading as a health status: the check's, and the Flet
-    modal's from the inference sampler's last reading."""
+    modal's from the inference sampler's last reading. Named for the app's
+    engine, and saying whether it loads and frees models on request."""
+    from app.components.inference import inference_engine_class
+
+    engine = inference_engine_class()
     if not server_status.available:
         return ComponentStatus(
             name=ComponentName.OLLAMA,
             status=ComponentStatusType.UNHEALTHY,
-            message="Ollama server not reachable",
+            message=f"{engine.LABEL} server not reachable",
             response_time_ms=None,
             metadata={
                 "available": False,
@@ -99,15 +105,18 @@ def ollama_status(
     if server_status.running_models:
         status = ComponentStatusType.HEALTHY
         primary_model = server_status.running_models[0]
+        vram = primary_model.size_vram_gb
         message = (
-            f"{primary_model.name} • {primary_model.size_vram_gb:.1f}GB VRAM • warm"
+            f"{primary_model.name} • {vram:.1f}GB VRAM • warm"
+            if vram
+            else f"{primary_model.name} • warm"
         )
     elif server_status.installed_models_count > 0:
         status = ComponentStatusType.INFO
-        message = f"Ollama ready • {server_status.installed_models_count} models installed • none loaded"
+        message = f"{engine.LABEL} ready • {server_status.installed_models_count} models installed • none loaded"
     else:
         status = ComponentStatusType.WARNING
-        message = "Ollama running but no models installed"
+        message = f"{engine.LABEL} running but no models installed"
 
     return ComponentStatus(
         name=ComponentName.OLLAMA,
@@ -123,5 +132,6 @@ def ollama_status(
             "installed_models": installed_models_info,
             "installed_models_count": server_status.installed_models_count,
             "total_vram_gb": round(server_status.total_vram_gb, 2),
+            "can_load_unload": server_status.can_load_unload,
         },
     )

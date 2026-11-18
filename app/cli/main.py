@@ -58,6 +58,7 @@ GROUPS: dict[str, tuple[str, str]] = {
     "meetings": ("app.cli.meetings", "app"),
     "rag": ("app.cli.rag", "app"),
     "llm": ("app.cli.llm", "app"),
+    "inference": ("app.cli.inference", "app"),
     "agents": ("app.cli.agents", "app"),
     "context-modules": ("app.cli.agents", "modules_app"),
 }

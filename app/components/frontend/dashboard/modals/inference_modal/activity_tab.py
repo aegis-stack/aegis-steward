@@ -22,7 +22,7 @@ from app.components.frontend.controls.data_table import (
 )
 from app.components.frontend.controls.table import TableNameText
 from app.components.frontend.theme import AegisTheme as Theme
-from app.components.inference.activity import get_ollama_activity
+from app.components.inference.activity import get_inference_activity
 
 from ...activity_feed import format_relative_time
 from .columns import ACTIVITY_COLUMNS
@@ -56,7 +56,7 @@ class ActivitySection(ft.Container):
         # in place on each poll tick without rebuilding the table.
         self._time_cells: list[tuple[SecondaryText, datetime]] = []
 
-        events = get_ollama_activity().events()
+        events = get_inference_activity().events()
         if not events:
             self.content = ft.Column(
                 [
@@ -100,7 +100,7 @@ class ActivitySection(ft.Container):
                         color=ACTIVITY_EVENT_COLORS[event.action],
                     ),
                     NumericText(vram_display, color=ft.Colors.ON_SURFACE_VARIANT),
-                    SecondaryText("Ollama" if event.detected else "App"),
+                    SecondaryText("Server" if event.detected else "App"),
                     when_text,
                 ]
             )

@@ -24,6 +24,6 @@
       {"key": "size", "label": "Size", "align": "right"},
       {"key": "modified", "label": "Modified"},
       {"key": "state", "label": "State", "kind": "status"},
-    ], models, actions=row_actions, empty="No models installed. Pull one with ollama pull.") }}
+    ], models, actions=row_actions if can_move else none, empty="No models installed. Add one with " ~ engine.ADD_MODEL ~ ".") }}
   {% endcall %}
 </div>

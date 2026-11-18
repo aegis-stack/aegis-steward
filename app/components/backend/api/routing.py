@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from app.components.backend.api import (
     changes,
     health,
+    inference,
     jobs,
     kept_requests,
     load_test_api,
@@ -41,6 +42,7 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(task_history.router, prefix="/api/v1")
     app.include_router(worker_events.router, prefix="/events", tags=["events"])
     app.include_router(scheduler.router, prefix="/api/v1")
+    app.include_router(inference.router, prefix="/api/v1")
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(ai_router, prefix="/api/v1")
     app.include_router(voice_router, prefix="/api/v1")

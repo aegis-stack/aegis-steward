@@ -21,8 +21,7 @@ from app.components.frontend.controls.data_table import (
     style_cell,
 )
 from app.components.frontend.controls.text import NumericText
-from app.components.frontend.dashboard.modals.modal_constants import ModalLayout
-from app.components.frontend.dashboard.modals.ollama_modal import (
+from app.components.frontend.dashboard.modals.inference_modal import (
     CAPABILITIES,
     MODEL_COLUMNS,
     MODEL_TABLE_WIDTH,
@@ -33,6 +32,7 @@ from app.components.frontend.dashboard.modals.ollama_modal import (
     model_cell,
     table_width,
 )
+from app.components.frontend.dashboard.modals.modal_constants import ModalLayout
 from app.components.frontend.theme import AegisTheme as Theme
 
 
@@ -216,7 +216,7 @@ class TestTheModifiedColumn:
     reason DataTable reads ``.data`` ahead of ``.value``."""
 
     def test_it_stamps_an_iso_sort_key_behind_the_relative_text(self) -> None:
-        from app.components.frontend.dashboard.modals.ollama_modal import (
+        from app.components.frontend.dashboard.modals.inference_modal import (
             build_modified_cell,
         )
 
@@ -233,7 +233,7 @@ class TestTheModifiedColumn:
     def test_a_months_old_model_reads_in_months(self) -> None:
         """What ``ollama list`` prints, and the reason the coarse mode
         exists - every installed model is months old."""
-        from app.components.frontend.dashboard.modals.ollama_modal import (
+        from app.components.frontend.dashboard.modals.inference_modal import (
             build_modified_cell,
         )
 
@@ -243,7 +243,7 @@ class TestTheModifiedColumn:
     def test_relative_text_alone_would_sort_wrong(self) -> None:
         """Guards the property, not the format: two timestamps whose
         pretty text collates backwards must still order by real time."""
-        from app.components.frontend.dashboard.modals.ollama_modal import (
+        from app.components.frontend.dashboard.modals.inference_modal import (
             build_modified_cell,
         )
 
@@ -254,7 +254,7 @@ class TestTheModifiedColumn:
         assert older.data < newer.data
 
     def test_a_missing_timestamp_reads_as_no_value(self) -> None:
-        from app.components.frontend.dashboard.modals.ollama_modal import (
+        from app.components.frontend.dashboard.modals.inference_modal import (
             build_modified_cell,
         )
 
@@ -288,7 +288,6 @@ class TestTheActionButton:
         return ModelActionButton(
             model_name="llama3:8b",
             page=SimpleNamespace(update=lambda: None),
-            ollama_url="http://localhost:11434",
             action=action,
         )
 
