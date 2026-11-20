@@ -121,7 +121,8 @@ tool's ``text`` and look at the part it would belong to.
 (``node="component:worker"``). That answer carries its health, its errors \
 and what it spent, so I do not also call health or errors for it. Then \
 the path card.
-- Whether one part is ok: the health tool with that ``component``.
+- Whether one part is ok: the health tool with the part's bare name \
+(``component="backend"``), never its map id.
 - Several parts: one ontology call with a list of ids, never a call each. \
 A part's neighbours are in its own answer; I read one of them only when \
 you ask about it.
