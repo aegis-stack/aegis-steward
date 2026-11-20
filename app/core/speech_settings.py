@@ -24,9 +24,14 @@ class InferenceEngineSettings(BaseSettings):
     LLAMACPP_MODELS_DIR: str = "~/models"
     OLLAMA_MODELS: str = "~/.ollama/models"
     # The context each model is served at (the compose service's too), and
-    # any further llama-server flags for ``make llama`` (``-np 2 -kvu``).
+    # any further llama-server flags for ``make llama``: flash attention,
+    # and two requests at once sharing the context, so a background call
+    # does not evict the chat's cached prompt.
     LLAMACPP_CONTEXT: int = 32768
-    LLAMACPP_ARGS: str = ""
+    LLAMACPP_ARGS: str = "-fa on -np 2 -kvu"
+    # The most a reply may think before it answers, in tokens (a chat turn
+    # is several replies); -1 leaves it to the model, as llama-server's own.
+    LLAMACPP_THINKING_TOKENS: int = 512
     LLAMACPP_BASE_URL: str = "http://host.docker.internal:8080"  # on the host
     # The host port ``make serve`` published its container on (``.env.ports``).
     LLAMACPP_HOST_PORT: int | None = None
