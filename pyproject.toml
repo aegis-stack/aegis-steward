@@ -78,6 +78,7 @@ dependencies = [
     # Web push (VAPID + aes128gcm) to the home-screen app and browsers.
     "pywebpush>=2.5,<3",
     "openpyxl>=3.1.5",
+    "onnxruntime>=1.32.0",
 ]
 
 [project.scripts]

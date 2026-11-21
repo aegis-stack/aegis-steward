@@ -102,7 +102,8 @@ async def list_models(
     """
     if vendors is not None and not vendors:
         return []
-    async with get_async_session() as session:
+    # A read: no write lock, so a caller holding one does not wait on it.
+    async with get_async_session(read_only=True) as session:
         models = await queries.catalog_models(
             session,
             pattern=pattern,

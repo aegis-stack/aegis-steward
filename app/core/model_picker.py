@@ -84,10 +84,11 @@ def _usd(value: float) -> str:
 
 def is_local_model(model: dict[str, Any]) -> bool:
     """Does this model run on this machine. Reads either spelling: a catalog
-    row calls it ``vendor``, a finished message's metadata ``provider``.
-    Ollama is the only local vendor the catalog carries."""
+    row calls it ``vendor``, a finished message's metadata ``provider``."""
+    from app.services.ai.service import LOCAL_PROVIDERS
+
     named = model.get("vendor") or model.get("provider") or ""
-    return str(named).casefold() == "ollama"
+    return str(named).casefold() in LOCAL_PROVIDERS
 
 
 def format_price(
