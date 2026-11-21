@@ -10,7 +10,7 @@ from fastapi import (
     Depends,
 )
 
-from app.components.backend.api.ai import analytics, chat, speech, status
+from app.components.backend.api.ai import analytics, cards, chat, speech, status
 from app.components.backend.api.ai import memory as memory_routes
 from app.core.config import settings
 
@@ -46,4 +46,5 @@ router.include_router(memory_routes.router, tags=["ai: memory"])
 router.include_router(chat.router)
 router.include_router(status.router)
 router.include_router(analytics.router)
+router.include_router(cards.router)
 router.include_router(speech.router)

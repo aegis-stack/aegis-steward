@@ -107,6 +107,11 @@ async def get_owner_user_id(
 get_optional_owner_user_id = get_owner_user_id
 
 
+# Whose a token a machine shows the app is, to whoever makes or revokes
+# one (an MCP client's, a runner's): the signed-in person's own.
+get_token_holder = get_owner_user_id
+
+
 async def owner_is_admin(session: AsyncSession, owner_user_id: int | None) -> bool:
     """Whether what is done for ``owner_user_id`` is done for an admin: the
     user by ``is_admin``. Where sign-in is off, everyone is one; nobody

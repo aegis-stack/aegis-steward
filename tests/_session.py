@@ -1,4 +1,5 @@
-"""The one way a test hands the app's session openers its own session."""
+"""The one way a test hands the app's session openers its own session, and
+reads back what landed in it."""
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager

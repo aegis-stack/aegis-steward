@@ -1,84 +1,90 @@
-"""Where a mail import runs: the worker when the stack has one, else here.
-
-The same two lanes the finance import takes, for the same reason - an
-export of ten thousand messages outlives any request, and a restart
-landing on it must not kill it. The bytes travel through storage; the
-queue carries the key.
-"""
+"""Where a mail import runs: on the worker where the stack has one
+(``start_job``), else as a task here. The bytes travel through storage;
+the queue carries the key."""
 
 from __future__ import annotations
 
+import importlib.util
+from typing import Any
+
 import pytest
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.storage import FilesystemStorage
+from app.services.mail import jobs
+from app.services.system import job_store
+from tests._mbox import mbox_bytes, message
+from tests._session import opens
+
+pytestmark = pytest.mark.usefixtures("no_mail_hooks")
+
+WORKER = importlib.util.find_spec("app.components.worker") is not None
 
 
-class TestTheTwoLanes:
-    @pytest.mark.asyncio
-    async def test_it_goes_to_the_worker_with_the_key_not_the_bytes(
+class TestTheImportIsAJob:
+    async def test_the_job_reads_the_file_from_storage(
+        self,
+        async_db_session: AsyncSession,
+        files: FilesystemStorage,
+        dispatched: list[int],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(jobs, "get_async_session", opens(async_db_session))
+        key = await files.put(mbox_bytes([message(body="one"), message(body="two")]))
+        said: list[str] = []
+
+        done = await jobs.run_mail_import(
+            key, file_name="export.mbox", owner_user_id=None, report=said.append
+        )
+
+        assert (done["messages_new"], done["letters_filed"]) == (2, 2)
+        assert said
+
+    @pytest.mark.skipif(not WORKER, reason="no worker in this stack")
+    async def test_it_is_queued_as_its_task(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from app.services.mail import jobs
+        queued: list[tuple[Any, ...]] = []
 
-        sent: dict[str, object] = {}
+        async def queue_job(*args: Any) -> str:
+            queued.append(args)
+            return "job-1"
 
-        async def _enqueue(job_id, storage_key, file_name, owner):
-            sent.update(job_id=job_id, storage_key=storage_key, file_name=file_name)
-
-        class _Store:
-            async def create(self, *a, **k) -> None: ...
-            async def fail(self, *a, **k) -> None: ...
-            async def aclose(self) -> None: ...
-
-        monkeypatch.setattr(jobs, "_enqueue", _enqueue)
-        monkeypatch.setattr(
-            "app.services.system.job_store.RedisJobStore.from_url", lambda url: _Store()
-        )
+        monkeypatch.setattr(job_store, "queue_job", queue_job)
 
         job_id = await jobs.start_mail_import(
-            "store/abc123", file_name="export.mbox", owner_user_id=None
+            "sha256/abc", file_name="export.mbox", owner_user_id=None
         )
 
-        assert sent["job_id"] == job_id
-        assert sent["storage_key"] == "store/abc123"
-        assert sent["file_name"] == "export.mbox"
+        assert job_id == "job-1"
+        assert queued == [
+            (
+                "mail-import:export.mbox",
+                "mail_import_task",
+                "sha256/abc",
+                "export.mbox",
+                None,
+            )
+        ]
 
-    @pytest.mark.asyncio
-    async def test_no_worker_still_imports_here(
+    @pytest.mark.skipif(not WORKER, reason="no worker in this stack")
+    async def test_the_worker_narrates_into_the_job(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from app.services.mail import jobs
+        labels: list[str] = []
 
-        async def _no_worker(*a, **k):
-            raise RuntimeError("no redis here")
+        async def narrate(job_id: str, work: Any) -> dict[str, Any]:
+            return await work(labels.append)
 
-        started: dict[str, object] = {}
+        async def run(
+            storage_key: str, *, file_name: str, owner_user_id: int | None, report: Any
+        ) -> dict[str, int]:
+            report("Read 1 of 1")
+            return {"messages_new": 1}
 
-        def _in_process(storage_key, **kwargs):
-            started.update(storage_key=storage_key, **kwargs)
-            return "local-job"
+        monkeypatch.setattr(jobs, "narrate", narrate)
+        monkeypatch.setattr(jobs, "run_mail_import", run)
 
-        monkeypatch.setattr(jobs, "_hand_to_worker", _no_worker)
-        monkeypatch.setattr(jobs, "start_mail_import_in_process", _in_process)
+        result = await jobs.run_mail_import_job("job", "sha256/abc", "x.mbox", None)
 
-        job_id = await jobs.start_mail_import(
-            "store/abc123", file_name="export.mbox", owner_user_id=None
-        )
-
-        assert job_id == "local-job"
-        assert started["storage_key"] == "store/abc123"
-
-    def test_the_job_is_named_so_the_follower_can_tell_it_apart(self) -> None:
-        """``partials/jobs/status.html`` renders a terminal frame per kind
-        of job (trap 3.2 in the handoff): the import's frame took a
-        finished document READ to Accounts. This one has to be tellable
-        from both."""
-        from app.services.mail import jobs
-
-        assert jobs.job_name("export.mbox").startswith("mail-import:")
-
-
-class TestTheWorkerTask:
-    def test_it_is_registered_on_the_system_queue(self) -> None:
-        from app.components.worker.queues.system import WorkerSettings
-        from app.components.worker.tasks.mail_tasks import mail_import_task
-
-        assert mail_import_task in WorkerSettings.functions
+        assert result == {"messages_new": 1} and labels == ["Read 1 of 1"]

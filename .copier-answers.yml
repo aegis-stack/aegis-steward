@@ -1,4 +1,3 @@
-# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
 project_name: aegis-steward
 project_description: A production-ready async Python application built with Aegis
   Stack
@@ -60,12 +59,13 @@ insights_per_user: false
 include_finance: true
 finance_plaid: true
 finance_snaptrade: true
-_commit: 7a02faf7c13483140c13dceb82f475c0815e1b5c
-_src_path: gh:lbedner/aegis-stack
-_template_version: 0.20.0.post43+g7a02faf7c
+_commit: ddda3c5055e5b9a953b458c58b3c5b951e6e91ee
+_src_path: git+file:///Users/leonardbedner/Workspace/worktrees/aegis-stack/update-src
+_template_version: 0.20.0.post62+gddda3c505
 ai_with_persistence: true
 finance_import: true
 include_auth_org: false
 include_auth_rbac: false
 project_slug: aegis-steward
 scheduler_with_persistence: true
+include_runner: false

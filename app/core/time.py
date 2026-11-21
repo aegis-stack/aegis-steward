@@ -81,7 +81,7 @@ def shift_month(anchor: date, delta: int) -> date:
     return date(index // 12, index % 12 + 1, 1)
 
 
-# ``short_date`` takes a ``today`` of its own (a pinned clock, in tests).
+# ``short_date``'s own ``today`` argument shadows the function.
 _today = today
 
 

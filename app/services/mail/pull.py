@@ -1,10 +1,10 @@
 """Mail pulls itself: IMAP with an app password.
 
-The Gmail API was ruled out for its OAuth client, consent screen and
-seven-day tokens. IMAP needs none of that: a host, an address, a folder
-(a Gmail label is one), and an app password - a secret in the encrypted
-store like any other, verified by one sign-in at the paste. Every
-provider speaks it.
+A provider's own mail API means an OAuth client, a consent screen and
+expiring tokens. IMAP needs none of that: a host, an address, a folder
+(a provider's label is one), and an app password - a secret in the
+encrypted store like any other, verified by one sign-in at the paste.
+Every provider speaks it.
 
 Read-only, always: the folder is EXAMINEd, bodies are PEEKed, nothing
 is flagged, moved or deleted. From now on, not from the beginning: the

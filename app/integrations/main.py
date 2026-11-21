@@ -148,10 +148,12 @@ def create_integrated_app() -> FastAPI:
         max_upload_size=settings.IMPORT_MAX_BYTES,
         secret_key=settings.SECRET_KEY,
     )
-    # Mount Flet at /dashboard to avoid intercepting FastAPI routes like
-    # /health, wrapped so its page carries our browser-side scripts: paste
-    # capture (pasted images post to /api/v1/pastebox, Flet has no
-    # clipboard-image API) and the light/dark mode bridge to htmx's choice.
+    # Mount Flet at /dashboard to avoid intercepting FastAPI routes like /health
+
+    # Mounted under DASHBOARD_PATH, wrapped so its page carries our
+    # browser-side scripts: paste capture (pasted images post to
+    # /api/v1/pastebox, Flet has no clipboard-image API) and the light/dark
+    # mode bridge to the web pages' stored choice.
     app.mount(DASHBOARD_PATH, DashboardScriptsMiddleware(flet_app))
     # Last added, so outermost: every middleware and route below it reads the
     # client the trusted proxy named.

@@ -1,4 +1,4 @@
-"""Reading a mailbox export: what a message is, once it is not on Google.
+"""Reading a mailbox export: what a message is, once it is out of the inbox.
 
 Pure - bytes in, messages out, no database. Everything the pipeline
 downstream needs comes off the headers and the parts, and the stdlib
@@ -7,7 +7,7 @@ already knows how to read both an mbox and an .eml.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -17,11 +17,12 @@ from tests._mbox import PDF, eml_bytes, mbox_bytes, message
 
 
 class TestWhatAFileIs:
-    def test_takeout_and_a_single_message_are_both_mail(self) -> None:
+    def test_an_export_and_a_single_message_are_both_mail(self) -> None:
         assert parse.is_mail_export("All mail Including Spam and Trash.mbox")
         assert parse.is_mail_export("Your claim.eml")
         assert not parse.is_mail_export("statement.pdf")
         assert not parse.is_mail_export("export.csv")
+        assert not parse.is_mail_export(None)
 
     def test_an_mbox_yields_every_message(self) -> None:
         data = mbox_bytes([message(subject="one"), message(subject="two")])
@@ -48,36 +49,38 @@ class TestWhatAFileIs:
 class TestWhatAMessageCarries:
     def test_the_sender_is_split_into_who_and_where(self) -> None:
         [read] = parse.messages(
-            mbox_bytes([message(sender="Delta Dental <Claims@DeltaDentalIns.com>")]),
+            mbox_bytes([message(sender="Example Insurer <Claims@Insurer.Example>")]),
             "x.mbox",
         )
-        assert read.from_name == "Delta Dental"
+        assert read.from_name == "Example Insurer"
         # Lower-cased at the edge, once: an address is matched, never shown
         # back with somebody else's capitalisation.
-        assert read.from_address == "claims@deltadentalins.com"
+        assert read.from_address == "claims@insurer.example"
 
     def test_the_message_id_is_the_identity(self) -> None:
         """RFC 5322 makes it unique per message; a re-export of an
         overlapping range must dedupe on it, not on subject or date."""
         [read] = parse.messages(
-            mbox_bytes([message(message_id="<abc123@mail.gmail.com>")]), "x.mbox"
+            mbox_bytes([message(message_id="<abc123@mail.example.com>")]), "x.mbox"
         )
-        assert read.message_id == "<abc123@mail.gmail.com>"
+        assert read.message_id == "<abc123@mail.example.com>"
 
     def test_a_message_with_no_id_gets_a_stable_one(self) -> None:
         """Some senders omit it. Two imports of the same file must still
         agree it is one message, so the fallback is derived from the
-        bytes, not minted fresh each time."""
+        headers, not minted fresh each time."""
         one = message()
         del one["Message-ID"]
         first = parse.messages(eml_bytes(one), "x.eml")[0].message_id
         again = parse.messages(eml_bytes(one), "x.eml")[0].message_id
         assert first == again and first
 
-    def test_the_date_is_when_it_was_sent_in_utc(self) -> None:
-        sent = datetime(2026, 8, 27, 9, 5, tzinfo=UTC)
+    def test_the_date_is_when_it_was_sent_as_stored(self) -> None:
+        """Naive UTC, the timestamp columns' clock: Postgres refuses an
+        aware value for them (a real import, 2026-11-20)."""
+        sent = datetime(2026, 8, 27, 4, 5, tzinfo=timezone(timedelta(hours=-5)))
         [read] = parse.messages(mbox_bytes([message(sent=sent)]), "x.mbox")
-        assert read.sent_at == sent
+        assert read.sent_at == datetime(2026, 8, 27, 9, 5)
 
     def test_attachments_come_off_as_files(self) -> None:
         [read] = parse.messages(
@@ -109,11 +112,9 @@ class TestWhatAMessageCarries:
 
 
 class TestWhatIsNotPaper:
-    """The first real email through the door was Optum's "Your HSA
-    Statement is Now Available". The statement was not in it - it is a
-    link to log in - and the two files the reader filed were the Optum
-    logo and an orange banner, 12 KB and 1 KB of email chrome, each of
-    which the shelf then spent a model call reading (2026-09-20)."""
+    """A notification that only links to a statement carries no paper:
+    what it carries is a logo and a banner embedded in the HTML, email
+    chrome that must not be filed (and then paid for to read)."""
 
     def test_images_embedded_in_the_body_are_not_attachments(self) -> None:
         chrome = message(
@@ -132,10 +133,10 @@ class TestWhatIsNotPaper:
 
 
 class TestTheBodyIsTheLetter:
-    """Half of what an agency sends has no attachment: the county emails
-    the renewal reminder in the body, the insurer emails the EOB as text.
-    That mail IS the letter (MI-05). No HTML rendering, no remote content:
-    the text part is the letter, and an HTML-only mail is flattened."""
+    """Much of what an agency sends has no attachment: the reminder or the
+    explanation of benefits is the body. That mail IS the letter. No HTML
+    rendering, no remote content: the text part is the letter, and an
+    HTML-only mail is flattened."""
 
     def test_a_plain_body_is_kept_as_written(self) -> None:
         [read] = parse.messages(
@@ -157,13 +158,12 @@ class TestTheBodyIsTheLetter:
         mail = message()
         mail.set_content(
             "<html><head><style>.x{color:red}</style></head>"
-            "<body><script>track()</script><p>Sign in at optumfinancial.com</p>"
-            "<p>844-555-0167</p></body></html>",
+            "<body><script>track()</script><p>Sign in at provider.example</p>"
+            "<p>800-555-0167</p></body></html>",
             subtype="html",
         )
         [read] = parse.messages(eml_bytes(mail), "x.eml")
         assert "color:red" not in read.body_text and "track()" not in read.body_text
-        assert "Sign in at optumfinancial.com" in read.body_text
-        # Block tags become line breaks, so a phone stays on its own line
-        # for the identity rules, which read a page line by line.
-        assert "844-555-0167" in read.body_text.splitlines()
+        assert "Sign in at provider.example" in read.body_text
+        # Block tags become line breaks, so a phone stays on its own line.
+        assert "800-555-0167" in read.body_text.splitlines()

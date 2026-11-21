@@ -1233,7 +1233,7 @@ class TestTheValueWindow:
 
         chart = json.loads(text(one(page, "#chart-valuations-data")))
         assert len(chart["labels"]) == 2
-        assert len(table_rows(page, "#card-value-history")) == 2
+        assert len(table_rows(page, "#card-value-history table")) == 2
 
     @pytest.mark.asyncio
     async def test_all_keeps_the_whole_history(

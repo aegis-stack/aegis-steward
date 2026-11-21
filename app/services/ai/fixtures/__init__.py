@@ -9,6 +9,7 @@ from sqlmodel import Session
 from app.services.ai.fixtures.agent_fixtures import load_agent_fixtures
 from app.services.ai.fixtures.llm_fixtures import load_all_llm_fixtures
 from app.services.finance.service import load_finance_agent_fixtures
+from app.services.mail.tools import load_mail_agent_fixtures
 
 
 def load_agent_registry_fixtures(session: Session) -> dict[str, int]:
@@ -23,6 +24,8 @@ def load_agent_registry_fixtures(session: Session) -> dict[str, int]:
     # Service-owned agents seed alongside the default one: a project that has
     # the finance service gets its analyst without a second seeding step.
     counts.update(load_finance_agent_fixtures(session))
+
+    counts.update(load_mail_agent_fixtures(session))
 
     return counts
 

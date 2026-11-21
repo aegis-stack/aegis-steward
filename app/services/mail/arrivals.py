@@ -1,41 +1,41 @@
-"""What came in: one answer for the page and for the chat (MI-06).
+"""What came in: one answer for the page and for the chat.
 
-The approvals queue says what is WAITING; this says what ARRIVED and
-what each message became - a letter, its attachments, a card - and,
-when nothing, why. "Nothing happened" with no reason is
-indistinguishable from a broken import. One set of rows, read by the
-intake page and by the assistant's ``arrivals`` tool, so the two
-cannot disagree.
+What is waiting is a queue's question; this says what ARRIVED and what
+each message became - a letter, its attachments - and, when nothing,
+why. "Nothing happened" with no reason is indistinguishable from a
+broken import. One set of rows, read by the Mail page and by the
+assistant's ``arrivals`` tool, so the two cannot disagree.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
-from sqlmodel import col, select
+from pydantic import BaseModel, Field
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.mail.ingest import cards_by_address
+from app.core.figures import FIGURES
+from app.core.formatting import counted
+from app.services.mail import queries
 from app.services.mail.models import (
     SOURCE_IMAP,
-    MailAttachment,
     MailBatch,
     MailMessage,
 )
-from app.services.matters.models.core import Party
 
 
-@dataclass(frozen=True)
-class Paper:
+class Paper(BaseModel):
+    model_config = FIGURES
+
     document_id: int
     filename: str
 
 
-@dataclass(frozen=True)
-class Arrival:
+class Arrival(BaseModel):
     """One message and what it became."""
+
+    model_config = FIGURES
 
     id: int
     received_at: datetime
@@ -43,134 +43,77 @@ class Arrival:
     sender: str  # the display name, else the address
     address: str
     subject: str
-    party: dict[str, Any] | None  # {id, name} when filed under someone
     letter_id: int | None
     attachments: list[Paper]
-    card: str | None  # the contact.create card's status for this address
+    # Steward: the contact it was filed under, and its sender's card.
+    party: dict[str, Any] | None = None
+    card: str | None = None
     became: str  # one sentence a person can read
     via: str  # the file it was dropped in, or the mailbox it was pulled from
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "received_at": self.received_at.isoformat(),
-            "sent_at": self.sent_at.isoformat() if self.sent_at else None,
-            "sender": self.sender,
-            "address": self.address,
-            "subject": self.subject,
-            "party": self.party,
-            "letter_id": self.letter_id,
-            "attachment_ids": [a.document_id for a in self.attachments],
-            "card": self.card,
-            "became": self.became,
-            "via": self.via,
-        }
 
+class Day(BaseModel):
+    model_config = FIGURES
 
-@dataclass
-class Day:
     date: date
-    messages: list[Arrival] = field(default_factory=list)
+    messages: list[Arrival] = Field(default_factory=list)
 
 
 async def arrivals(
     db: AsyncSession, *, owner_user_id: int | None, limit: int = 500
 ) -> list[Day]:
     """Everything that came in, grouped by the day it arrived, newest
-    first. Four queries for the whole listing, never one per row."""
-    query = (
-        select(MailMessage, MailBatch)
-        .join(MailBatch, col(MailBatch.id) == col(MailMessage.batch_id))
-        .where(MailMessage.owner_user_id == owner_user_id)
-        .order_by(col(MailMessage.created_at).desc(), col(MailMessage.id).desc())
-        .limit(limit)
+    first. Two queries for the whole listing, never one per row."""
+    pairs = await queries.messages_with_batches(
+        db, owner_user_id=owner_user_id, limit=limit
     )
-    pairs = list((await db.exec(query)).all())
     if not pairs:
         return []
-    ids = [int(row.id) for row, _ in pairs]
+    ids = [int(row.id or 0) for row, _ in pairs]
     papers: dict[int, list[Paper]] = {}
-    for link in (
-        await db.exec(
-            select(MailAttachment).where(col(MailAttachment.message_id).in_(ids))
-        )
-    ).all():
+    for link in await queries.attachments_of(db, ids):
         papers.setdefault(link.message_id, []).append(
-            Paper(link.document_id, link.filename)
+            Paper(document_id=link.document_id, filename=link.filename)
         )
-    party_ids = {row.party_id for row, _ in pairs if row.party_id is not None}
-    names = (
-        {
-            int(p.id): p.name
-            for p in (
-                await db.exec(select(Party).where(col(Party.id).in_(party_ids)))
-            ).all()
-        }
-        if party_ids
-        else {}
-    )
-    cards = await cards_by_address(db)
 
+    # Steward: who each sender is (matters' mail hook).
+    from app.services.matters.mail_hooks import senders_of, told
+
+    names, cards = await senders_of(db, [row for row, _ in pairs])
     days: dict[date, Day] = {}
     for row, batch in pairs:
-        arrival = _arrival(row, papers.get(int(row.id), []), names, cards, batch)
+        arrival = told(
+            _arrival(row, papers.get(int(row.id or 0), []), batch), row, names, cards
+        )
         days.setdefault(
-            arrival.received_at.date(), Day(arrival.received_at.date())
+            arrival.received_at.date(), Day(date=arrival.received_at.date())
         ).messages.append(arrival)
     return [days[d] for d in sorted(days, reverse=True)]
 
 
-def _arrival(
-    row: MailMessage,
-    papers: list[Paper],
-    names: dict[int, str],
-    cards: dict[str, str],
-    batch: MailBatch,
-) -> Arrival:
-    party = (
-        {"id": row.party_id, "name": names.get(row.party_id, "")}
-        if row.party_id is not None
-        else None
-    )
-    sender = row.from_name or row.from_address
+def _arrival(row: MailMessage, papers: list[Paper], batch: MailBatch) -> Arrival:
     return Arrival(
-        id=int(row.id),
+        id=int(row.id or 0),
         received_at=row.created_at,
         sent_at=row.sent_at,
-        sender=sender,
+        sender=row.from_name or row.from_address,
         address=row.from_address,
         subject=row.subject or "(no subject)",
-        party=party,
         letter_id=row.document_id,
         attachments=papers,
-        card=cards.get(row.from_address),
-        became=_became(row, papers, party, cards.get(row.from_address), sender),
+        became=_became(row, papers),
         via=f"pulled from {batch.file_name}"
         if batch.source == SOURCE_IMAP
         else batch.file_name,
     )
 
 
-def _became(
-    row: MailMessage,
-    papers: list[Paper],
-    party: dict[str, Any] | None,
-    card: str | None,
-    sender: str,
-) -> str:
+def _became(row: MailMessage, papers: list[Paper]) -> str:
     """What the message turned into, said once. A message that produced
     nothing says why: with no reason it reads as a broken import."""
     if row.document_id is None and not papers:
         return "nothing: empty message, no attachments"
     parts = ["letter"] if row.document_id is not None else []
     if papers:
-        n = len(papers)
-        parts.append(f"{n} attachment{'s' if n != 1 else ''}")
-    what = " + ".join(parts)
-    if party is not None:
-        return f"{what}, filed under {party['name']}"
-    if card == "pending":
-        return f"{what}; a card offers to add {sender}"
-    if card == "rejected":
-        return f"{what}; {sender} was declined as a contact"
-    return what
+        parts.append(counted(len(papers), "attachment"))
+    return " + ".join(parts)

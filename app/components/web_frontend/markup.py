@@ -6,20 +6,30 @@ from functools import cache
 import html
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from markupsafe import Markup
 
-
-# A settled assistant message is markdown from a model. marko renders it
-# (GFM: tables, strikethrough, autolinks); raw HTML in the source is
+# A settled assistant message is markdown written by a model. marko renders
+# it (GFM: tables, strikethrough, autolinks); raw HTML in the source is
 # escaped rather than passed through, so the model can format but never
-# inject markup. The mixin is registered LAST so it sits first in the
-# renderer's MRO, ahead of GFM's own tag filter.
+# inject markup, and a link leads to a page or a mailbox or nowhere: a
+# ``javascript:`` address would run as whoever clicks it. The mixin is
+# registered LAST so it sits first in the renderer's MRO, ahead of GFM's
+# own tag filter.
 #
 # Fenced code is highlighted by ``highlight``. marko's own codehilite
 # extension is not used: it passes ``key=value`` pairs from the fence line to
 # Pygments' formatter, which lets model markdown turn on ``full`` or
 # ``cssfile``. The formatter here takes no options from the text.
+#
+# Built once at import: marko compiles its parser and renderer per
+# ``Markdown()``, and a chat thread renders one of these per message.
+# Where a link in model markdown may lead: a page (its own site's, with no
+# scheme, or the web's) or a mailbox.
+LINK_SCHEMES = frozenset({"", "http", "https", "mailto"})
+
+
 def _safe_markdown() -> Any:
     from marko import Markdown
     from marko.ext.gfm import GFM
@@ -31,6 +41,17 @@ def _safe_markdown() -> Any:
 
         def render_inline_html(self, element: Any) -> str:
             return html.escape(element.children)
+
+        def escape_url(self, raw: str) -> str:
+            """Every destination marko writes (a link's, an image's, an
+            autolink's) goes through here."""
+            try:
+                scheme = urlsplit(raw.strip()).scheme.lower()
+            except ValueError:  # not an address at all
+                return ""
+            if scheme not in LINK_SCHEMES:
+                return ""
+            return super().escape_url(raw)  # type: ignore[misc,no-any-return]
 
     class Highlight:
         def render_fenced_code(self, element: Any) -> str:
@@ -84,7 +105,7 @@ def highlight(
     ``lang`` (``pytb`` a Python traceback), or for ``filename``, or a guess.
     ``lines`` numbers them, each at its own address (``#L-<n>``); without
     ``wrap`` it is the spans alone, for a ``<pre>`` the caller draws. The
-    one highlighter."""
+    one highlighter: markdown's fenced code, and a source on its own."""
     from pygments import highlight as render
     from pygments.formatters import HtmlFormatter
     from pygments.lexers import get_lexer_by_name, get_lexer_for_filename, guess_lexer
@@ -111,7 +132,13 @@ _MARKDOWN = _safe_markdown()
 
 
 def markdown(text: str | None) -> Markup:
-    """Model markdown as HTML, with any raw HTML in it escaped."""
+    """Model markdown as HTML, with any raw HTML in it escaped.
+
+    The one renderer for anything a model wrote: chat replies, generated
+    reports, long-form fields. Rendering markdown in the browser instead
+    means a second, weaker implementation drifting from this one, and the
+    escaping has to be re-earned there.
+    """
     return Markup(_MARKDOWN.convert(text or ""))
 
 

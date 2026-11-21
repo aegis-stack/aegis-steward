@@ -1,47 +1,71 @@
-"""A file of mail becomes rows, and its paper lands on the shelf.
+"""A file of mail becomes rows, and its paper becomes documents.
 
-Three short holds on the database, never one long one: the batch and
-the senders on file; then each message in its own transaction; then the
-counts. The parse happens before the first and the extraction dispatch
-after the last, holding nothing - a file of ten thousand messages is
-slow, and SQLite's single writer must not wait on it (#210).
+Short holds on the database, never one long one: the batch; then the
+messages, a chunk per transaction; then the counts. The parse happens
+before the first and the extraction dispatch after the last, holding
+nothing - a file of ten thousand messages is slow, and SQLite's single
+writer must not wait on it.
+
+THE SEAM: who a sender is belongs to whatever consumes the messages, not
+to the import. A contacts service plugs in here, with
+``register_messages_filed``: after a batch's messages are filed, each hook
+is handed the batch's NEW ``MailMessage`` rows (``from_address`` is the
+sender to match) in a session of its own. The template registers nothing.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import hashlib
 
-from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.db import OpenSession
+from app.core.discovery import import_modules_named
 from app.core.log import logger
 from app.core.time import utcnow
-from app.services.change_queue import PendingChange, propose
 from app.services.documents.domains.extraction.dispatch import read_quietly
-from app.services.documents.domains.reading.identity import parties_by_email
 from app.services.documents.models import DocumentPage
 from app.services.documents.service import DocumentService
-from app.services.mail import parse
+from app.services.mail import parse, queries
 from app.services.mail.models import (
     SOURCE_FILE,
     MailAttachment,
     MailBatch,
     MailMessage,
 )
-from app.services.matters.models.core import party_tag
-from app.services.system.jobs import SetLabel, unwatched
+from app.services.system.jobs import Report
 
-# A heartbeat per this many messages. Messages are heavier than ledger
-# rows - each may carry paper the shelf has to hash and store - so the
-# cadence is shorter than the import's 2000.
+# A consumer of what a batch filed: (its session, the new messages, the
+# owner). Stage writes on the session; it commits when the hook returns.
+MessagesFiled = Callable[[AsyncSession, list[MailMessage], int | None], Awaitable[None]]
+_filed_hooks: list[MessagesFiled] = []
+
+
+def register_messages_filed(hook: MessagesFiled) -> None:
+    """Hand every batch's new messages to ``hook``, after they are filed.
+
+    Call it from your service's ``mail_hooks.py``: ingest imports every
+    such module before it tells anyone, so the hook is there in each
+    process that files mail, the worker's included.
+
+    Each hook runs in its own session, in registration order. One that
+    raises is rolled back and logged, never the import's failure: the
+    messages are filed by then. A message is new once, so a hook sees it
+    once however often the file is read again.
+    """
+    _filed_hooks.append(hook)
+
+
+# A heartbeat per this many messages. Each may carry paper to hash and
+# store, so the cadence is short.
 PROGRESS_EVERY = 200
 # Messages per transaction. A commit is an fsync; one per message on a
-# 3,000-message export is 3,000 fsyncs for no isolation anybody wanted -
-# a message is idempotent on its Message-ID, so a re-run after a crash
-# mid-chunk files the rest and skips what landed. The lock is still held
-# for one chunk's milliseconds, never across the file (#210).
+# 3,000-message export is 3,000 fsyncs for no isolation anybody wanted - a
+# message is idempotent on its Message-ID, so a re-run after a crash
+# mid-chunk files the rest and skips what landed. The lock is held for
+# one chunk's milliseconds, never across the file.
 COMMIT_EVERY = 100
 
 
@@ -54,7 +78,7 @@ class MailImportResult:
     letters_filed: int = 0
     attachments_filed: int = 0
     attachments_duplicate: int = 0
-    # Paper that was NEW to the shelf, and so gets read.
+    # Paper that was NEW to documents, and so gets read.
     document_ids: list[int] = field(default_factory=list)
 
     def as_payload(self) -> dict[str, int]:
@@ -69,15 +93,19 @@ class MailImportResult:
         }
 
 
+def _unheard(label: str) -> None:
+    """Where progress goes when nobody is watching."""
+
+
 async def ingest_mail(
     open_session: OpenSession,
     *,
     data: bytes,
     file_name: str,
     owner_user_id: int | None = None,
-    on_label: SetLabel | None = None,
+    report: Report = _unheard,
 ) -> MailImportResult:
-    """Read a mailbox export into the shelf. Returns what it did.
+    """Read a mailbox export into documents. Returns what it did.
 
     Idempotent twice over: the same bytes are answered with the batch
     that already read them, and a message already filed - by Message-ID,
@@ -91,7 +119,7 @@ async def ingest_mail(
         file_name=file_name,
         sha=hashlib.sha256(data).hexdigest(),
         owner_user_id=owner_user_id,
-        on_label=on_label,
+        report=report,
     )
 
 
@@ -103,55 +131,86 @@ async def ingest_messages(
     sha: str,
     source: str = SOURCE_FILE,
     owner_user_id: int | None = None,
-    on_label: SetLabel | None = None,
+    report: Report = _unheard,
 ) -> MailImportResult:
-    """Messages already parsed - from a file or a mailbox pull - into the
-    shelf. ``file_name`` is what the batch is called (the file, or the
+    """Messages already parsed - from a file or a mailbox pull - into
+    documents. ``file_name`` is what the batch is called (the file, or the
     mailbox); ``sha`` is over the bytes they came from, so the same bytes
-    are answered with the batch that already read them."""
-    say = on_label or unwatched
+    are answered with the batch that already read them - unless that run
+    stopped, when the same batch is picked back up (what it filed counts
+    as already filed)."""
     async with open_session() as db:
-        already = (
-            await db.exec(select(MailBatch).where(MailBatch.file_sha256 == sha))
-        ).first()
-        if already is not None:
+        batch = await queries.mail_batch_by_sha(db, sha)
+        if batch is not None and batch.status != "failed":
             logger.info(
                 "mail.import.identical_reupload",
                 file_name=file_name,
-                batch_id=already.id,
+                batch_id=batch.id,
             )
-            return _result_of(already)
-        batch = MailBatch(
-            owner_user_id=owner_user_id,
-            file_name=file_name,
-            file_sha256=sha,
-            source=source,
-            messages_total=len(messages),
-        )
+            return _result_of(batch)
+        if batch is None:
+            batch = MailBatch(
+                owner_user_id=owner_user_id,
+                file_name=file_name,
+                file_sha256=sha,
+                source=source,
+                messages_total=len(messages),
+            )
+        batch.status, batch.error = "processing", None
         db.add(batch)
         await db.flush()
-        batch_id = int(batch.id)
-        senders = await parties_by_email(db)
-        offered = await _strangers_already_offered(db)
+        batch_id = int(batch.id or 0)
 
-    await say(f"Reading {len(messages):,} messages...")
+    try:
+        result, filed = await _file_all(
+            open_session, messages, batch_id, owner_user_id, report
+        )
+    except Exception as exc:
+        async with open_session() as db:
+            await queries.mark_batch_failed(
+                db, batch_id, f"The import stopped partway ({type(exc).__name__})."
+            )
+        raise
+
+    await _tell_filed(open_session, filed, owner_user_id)
+    # Holding nothing: each read is a job of its own on the worker.
+    for document_id in result.document_ids:
+        await read_quietly(document_id, owner_user_id=owner_user_id)
+
+    logger.info("mail.import.finished", file_name=file_name, **result.as_payload())
+    return result
+
+
+async def _file_all(
+    open_session: OpenSession,
+    messages: list[parse.ParsedMessage],
+    batch_id: int,
+    owner_user_id: int | None,
+    report: Report,
+) -> tuple[MailImportResult, list[MailMessage]]:
+    """The messages filed in chunks, then the batch's counts written."""
+
+    report(f"Reading {len(messages):,} messages...")
     result = MailImportResult(batch_id=batch_id, messages_total=len(messages))
+    filed: list[MailMessage] = []
 
     for start in range(0, len(messages), COMMIT_EVERY):
+        chunk = messages[start : start + COMMIT_EVERY]
         async with open_session() as db:
-            for message in messages[start : start + COMMIT_EVERY]:
-                await _file_one(
-                    db,
-                    message,
-                    result,
-                    senders=senders,
-                    offered=offered,
-                    owner_user_id=owner_user_id,
+            seen = await queries.filed_message_ids(db, [m.message_id for m in chunk])
+            for message in chunk:
+                if message.message_id in seen:
+                    result.messages_duplicate += 1
+                    continue
+                # The same message twice in one file is one message too.
+                seen.add(message.message_id)
+                filed.append(
+                    await _file_one(db, message, result, owner_user_id=owner_user_id)
                 )
-        done = min(start + COMMIT_EVERY, len(messages))
+        done = start + len(chunk)
         if done % PROGRESS_EVERY == 0 or done == len(messages):
-            await say(
-                f"Read {done:,} of {len(messages):,} - "
+            report(
+                f"Read {done:,} of {len(messages):,} messages - "
                 f"{result.attachments_filed:,} attachments filed"
             )
 
@@ -167,13 +226,26 @@ async def ingest_messages(
         batch.finished_at = utcnow()
         db.add(batch)
         await db.flush()
+    return result, filed
 
-    # Holding nothing: each read is a job of its own on the worker.
-    for document_id in result.document_ids:
-        await read_quietly(document_id, owner_user_id=owner_user_id)
 
-    logger.info("mail.import.finished", file_name=file_name, **result.as_payload())
-    return result
+async def _tell_filed(
+    open_session: OpenSession, rows: list[MailMessage], owner_user_id: int | None
+) -> None:
+    """The seam: each registered hook, given the batch's new messages."""
+    if not rows:
+        return
+    import app.services as services
+
+    # Found on disk, as tools and change types are; importing twice is a
+    # no-op.
+    import_modules_named(services, "mail_hooks")
+    for hook in _filed_hooks:
+        try:
+            async with open_session() as db:
+                await hook(db, rows, owner_user_id)
+        except Exception:
+            logger.exception("mail.import.hook_failed", hook=hook.__qualname__)
 
 
 async def _file_one(
@@ -181,21 +253,9 @@ async def _file_one(
     message: parse.ParsedMessage,
     result: MailImportResult,
     *,
-    senders: dict[str, int],
-    offered: set[str],
     owner_user_id: int | None,
-) -> None:
-    """One message: the row, its paper onto the shelf, and - when nobody
-    on file wrote it - a card offering to add them."""
-    seen = (
-        await db.exec(
-            select(MailMessage.id).where(MailMessage.message_id == message.message_id)
-        )
-    ).first()
-    if seen is not None:
-        result.messages_duplicate += 1
-        return
-
+) -> MailMessage:
+    """One new message: the row, its letter, and its paper."""
     row = MailMessage(
         owner_user_id=owner_user_id,
         batch_id=result.batch_id,
@@ -204,20 +264,17 @@ async def _file_one(
         from_name=message.from_name or None,
         subject=message.subject or None,
         sent_at=message.sent_at,
-        party_id=senders.get(message.from_address),
     )
     db.add(row)
     await db.flush()
     result.messages_new += 1
 
-    if row.party_id is None and message.from_address:
-        await _offer_contact(db, message, offered=offered, owner_user_id=owner_user_id)
-
     documents = DocumentService(db)
-    # The message as a letter. Half of what an agency sends has no
-    # attachment; the body is the letter, and it is read the way a
-    # scanned one is - by writing its page as already read, so extraction
-    # skips straight to proposing what it says about itself (MI-05).
+    # The letter's own date, not the day it was imported.
+    dated = message.sent_at.date() if message.sent_at else None
+    # The message as a letter: much of what arrives has no attachment, and
+    # the body is the letter. Its page is written as already read - the
+    # mail IS text - so there is nothing to hand a reader.
     letter = letter_text(message)
     if letter:
         paper, created = await documents.store(
@@ -226,7 +283,7 @@ async def _file_one(
             kind="letter",
             media_type="text/plain",
             owner_user_id=owner_user_id,
-            document_date=message.sent_at.date() if message.sent_at else None,
+            document_date=dated,
             source="mail",
             channel="email",
             page_count=1,
@@ -234,7 +291,7 @@ async def _file_one(
         if created:
             db.add(
                 DocumentPage(
-                    document_id=int(paper.id),
+                    document_id=int(paper.id or 0),
                     page_number=1,
                     status="read",
                     method="mail",
@@ -242,10 +299,8 @@ async def _file_one(
                 )
             )
             result.letters_filed += 1
-            result.document_ids.append(int(paper.id))
-        row.document_id = int(paper.id)
+        row.document_id = paper.id
         db.add(row)
-        await _file_under(documents, int(paper.id), row.party_id)
 
     linked: set[int] = set()
     for attachment in message.attachments:
@@ -256,81 +311,34 @@ async def _file_one(
             title=attachment.filename,
             media_type=attachment.media_type,
             owner_user_id=owner_user_id,
-            # The letter's own date, not the day it was imported.
-            document_date=message.sent_at.date() if message.sent_at else None,
+            document_date=dated,
             source="mail",
             channel="email",
         )
+        paper_id = int(paper.id or 0)
         if created:
             result.attachments_filed += 1
-            result.document_ids.append(int(paper.id))
+            result.document_ids.append(paper_id)
         else:
             result.attachments_duplicate += 1
         # The same file attached twice to one message is one link.
-        if paper.id in linked:
+        if paper_id in linked:
             continue
-        linked.add(int(paper.id))
+        linked.add(paper_id)
         db.add(
             MailAttachment(
-                message_id=int(row.id),
-                document_id=int(paper.id),
+                message_id=int(row.id or 0),
+                document_id=paper_id,
                 filename=attachment.filename,
             )
         )
-        await _file_under(documents, int(paper.id), row.party_id)
     await db.flush()
-
-
-async def _file_under(
-    documents: DocumentService, document_id: int, party_id: int | None
-) -> None:
-    """Paper from a known sender sits with them: the same party tag an
-    approved letterhead filing writes, so Contacts shows it and nothing
-    learns a second way of filing. A stranger's paper waits for the card."""
-    if party_id is not None:
-        await documents.tag(document_id, party_tag(party_id))
-
-
-async def papers_of(db: AsyncSession, row: MailMessage) -> list[int]:
-    """The letter and every attachment a message put on the shelf."""
-    links = (
-        await db.exec(
-            select(MailAttachment.document_id).where(
-                MailAttachment.message_id == row.id
-            )
-        )
-    ).all()
-    return ([row.document_id] if row.document_id else []) + [int(d) for d in links]
-
-
-async def adopt_sender(db: AsyncSession, party_id: int, address: str | None) -> int:
-    """A stranger's card was approved: everything they already sent is
-    theirs now - the message rows name them, and their letters and
-    attachments are filed under them the way a known sender's are on
-    ingest. Returns how many messages were adopted."""
-    if not address:
-        return 0
-    documents = DocumentService(db)
-    rows = (
-        await db.exec(
-            select(MailMessage).where(
-                MailMessage.from_address == address.lower(),
-                MailMessage.party_id.is_(None),
-            )
-        )
-    ).all()
-    for row in rows:
-        row.party_id = party_id
-        db.add(row)
-        for document_id in await papers_of(db, row):
-            await _file_under(documents, document_id, party_id)
-    await db.flush()
-    return len(rows)
+    return row
 
 
 def _result_of(batch: MailBatch) -> MailImportResult:
     return MailImportResult(
-        batch_id=int(batch.id),
+        batch_id=int(batch.id or 0),
         messages_total=batch.messages_total,
         messages_new=0,
         messages_duplicate=batch.messages_total,
@@ -342,11 +350,10 @@ def _result_of(batch: MailBatch) -> MailImportResult:
 def letter_text(message: parse.ParsedMessage) -> str:
     """The message as a page of text, or "" when the body said nothing.
 
-    The header is the letterhead. A printed letter carries the sender's
-    address at the top and the identity rules read it there; this puts
-    the From, Subject and Date on the first lines for the same reason,
-    so the address names the sender through the same rule a phone or a
-    website does, with no second path for "it came from a header."
+    The header is the letterhead. A printed letter carries the sender at
+    the top; this puts the From, Subject and Date on the first lines for
+    the same reason, so whatever reads a page for who sent it reads this
+    one the same way.
     """
     body = (message.body_text or "").strip()
     if not body:
@@ -360,84 +367,3 @@ def letter_text(message: parse.ParsedMessage) -> str:
     if message.sent_at:
         head.append(f"Date: {message.sent_at.date().isoformat()}")
     return "\n".join([*head, "", body])
-
-
-async def cards_by_address(db: AsyncSession) -> dict[str, str]:
-    """The status of the contact.create card offering each address, by
-    the latest card for it.
-
-    One home, because two questions are the same question: ingest asks
-    "have we already offered this stranger?" and the intake page asks
-    "what happened to the card for this message?". Not filtered by who
-    proposed it - a card the letterhead reader raised off a PDF is
-    still an unanswered question about this address, and asking it
-    again from mail is asking twice.
-    """
-    rows = (
-        await db.exec(
-            select(PendingChange)
-            .where(PendingChange.change_type == "contact.create")
-            .order_by(col(PendingChange.id))
-        )
-    ).all()
-    return {
-        str(row.payload["email"]).lower(): row.status
-        for row in rows
-        if row.payload.get("email")
-    }
-
-
-async def _strangers_already_offered(db: AsyncSession) -> set[str]:
-    """Addresses nobody needs asked about again: a card is waiting, or a
-    rejected one already answered - no means no."""
-    return {
-        address
-        for address, status in (await cards_by_address(db)).items()
-        if status in ("pending", "rejected")
-    }
-
-
-def _domain_name(address: str) -> str:
-    """``of-service@of.optum.com`` -> ``Optum``: the label before the TLD,
-    when the header gave no name. ponytail: a two-part public suffix
-    (``bank.co.uk`` -> ``Co``) is wrong; the card is where it is fixed."""
-    labels = address.rpartition("@")[2].split(".")
-    return (labels[-2] if len(labels) >= 2 else labels[0]).capitalize() or address
-
-
-async def _offer_contact(
-    db: AsyncSession,
-    message: parse.ParsedMessage,
-    *,
-    offered: set[str],
-    owner_user_id: int | None,
-) -> None:
-    """A stranger wrote. Offer to add them - never add them.
-
-    The letterhead rule refuses to guess a sender off a printed line,
-    because that is how a second address book starts. A From header is
-    not a guess: the sender asserted a name and an address. Still a card
-    (ST-08: extraction proposes, never writes), once per address.
-
-    ``kind`` is the one guess. A header cannot tell a county caseworker
-    from a claims robot, so it says organization and the card is where
-    that gets corrected - not a name-shape rule, which is the kind of
-    rule this codebase keeps having to take back.
-    """
-    address = message.from_address
-    if address in offered:
-        return
-    offered.add(address)
-    when = message.sent_at.date().isoformat() if message.sent_at else "an unknown date"
-    await propose(
-        db,
-        "contact.create",
-        {
-            "name": message.from_name or _domain_name(address),
-            "kind": "organization",
-            "email": address,
-            "note": f"Wrote on {when}: {message.subject or '(no subject)'}",
-        },
-        owner_user_id=owner_user_id,
-        proposed_by_agent="mail",
-    )

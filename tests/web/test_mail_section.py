@@ -24,7 +24,7 @@ from tests._secret_settings import secret_settings
 from tests.web.dom import none, one, table_rows, text
 
 # An address only this module uses. The app-owned database lives for the
-# whole run and other modules file "Delta Dental" under ``_mbox``'s
+# whole run and other modules file "Example Dental" under ``_mbox``'s
 # default address, so a shared one matches THEIR party and the From cell
 # links somewhere else - under xdist, depending on who ran first.
 KNOWN = "claims@mail-section.example"
@@ -47,10 +47,10 @@ async def shelf(bare: None, dispatched: list[int]) -> int:
     engine, which is what the page reads."""
     async with get_async_session() as db:
         # Reused, never re-created: ``parties_by_email`` keeps the FIRST
-        # contact holding an address, so a second "Delta Dental" here
+        # contact holding an address, so a second "Example Dental" here
         # would leave the page linking to the one an earlier test made.
         service = PartyService(db)
-        delta = next(
+        dental = next(
             (
                 p
                 for p in await service.find()
@@ -58,14 +58,14 @@ async def shelf(bare: None, dispatched: list[int]) -> int:
             ),
             None,
         ) or await service.create(
-            name="Delta Dental", kind="organization", contact={"email": KNOWN}
+            name="Example Dental", kind="organization", contact={"email": KNOWN}
         )
         await db.commit()
-        party_id = int(delta.id)
+        party_id = int(dental.id)
     data = mbox_bytes(
         [
             message(
-                sender=f"Delta Dental <{KNOWN}>",
+                sender=f"Example Dental <{KNOWN}>",
                 subject="Your statement",
                 attachments=[("statement.pdf", "application/pdf", PDF)],
             ),
@@ -107,8 +107,9 @@ class TestWhatCameIn:
             r for r in table_rows(page) if text(r["Subject"]) == "Your statement"
         )
         link = one(row["From"], f'a[href="/contacts/{shelf}"]')
-        assert text(link) == "Delta Dental"
+        assert text(link) == "Example Dental"
 
+    @pytest.mark.queryspy(allow_n_plus_one=True)
     async def test_the_subject_opens_the_letter(
         self, client: TestClient, shelf: int
     ) -> None:
@@ -122,6 +123,7 @@ class TestWhatCameIn:
         paper = one(row["Attachments"], "[data-open]")
         assert paper.get("hx-get") == f"/documents/{arrived.attachments[0].document_id}"
 
+    @pytest.mark.queryspy(allow_n_plus_one=True)
     async def test_became_is_the_rows_own_sentence(
         self, client: TestClient, shelf: int
     ) -> None:

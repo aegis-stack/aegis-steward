@@ -1,7 +1,7 @@
 """Mail pulls itself: IMAP with an app password.
 
 The connection is stdlib's ``imaplib`` behind one name, so a fake
-mailbox stands in for Gmail here: a dict of UID to raw message. What
+mailbox stands in for a provider's here: a dict of UID to raw message. What
 the tests hold: each message lands once (the UID watermark, then the
 Message-ID), it starts from now and leaves history in the mailbox, it
 is only ever read, a refused sign-in is one line on the mailbox row and
@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.db import OpenSession
 from app.core.schedule import service_jobs
 from app.core.secrets import SecretRejectedError, SecretUncheckedError
 from app.services.mail import pull
@@ -30,8 +31,11 @@ from tests._session import rows_of
 PASSWORD = "abcd efgh ijkl mnop"
 # Most tests pull several times: once to note where the folder ends,
 # then for what arrived after.
-pytestmark = pytest.mark.queryspy(threshold=5)
-BOX = pull.Mailbox("imap.example.com", "sam@example.com", "Steward", PASSWORD)
+pytestmark = [
+    pytest.mark.queryspy(threshold=5),
+    pytest.mark.usefixtures("no_mail_hooks"),
+]
+BOX = pull.Mailbox("imap.example.com", "sam@example.com", "Receipts", PASSWORD)
 
 
 class FakeIMAP:
@@ -97,7 +101,7 @@ def imap(monkeypatch: pytest.MonkeyPatch) -> type[FakeIMAP]:
     return FakeIMAP
 
 
-async def primed(open_session: Any, imap: type[FakeIMAP]) -> None:
+async def primed(open_session: OpenSession, imap: type[FakeIMAP]) -> None:
     """The folder seen once, then two messages arrive."""
     await pull.pull_mailbox(open_session, BOX)
     imap.arrives(5, "order")
@@ -105,16 +109,15 @@ async def primed(open_session: Any, imap: type[FakeIMAP]) -> None:
 
 
 class TestEachMessageLandsOnce:
-    @pytest.mark.asyncio
     async def test_the_first_sight_only_notes_where_the_folder_ends(
         self,
         async_db_session: AsyncSession,
-        open_session: Any,
+        open_session: OpenSession,
         imap: type[FakeIMAP],
         dispatched: list[int],
     ) -> None:
         """History stays in the mailbox: a folder of years is not a day
-        of model calls and a hundred contact cards."""
+        of model calls."""
         imap.arrives(5, "old order")
         imap.arrives(7, "old receipt")
 
@@ -126,11 +129,10 @@ class TestEachMessageLandsOnce:
         assert (box.uidvalidity, box.uid_last) == (100, 7)
         assert box.last_pulled_at is not None
 
-    @pytest.mark.asyncio
     async def test_new_messages_become_rows_and_the_watermark_moves(
         self,
         async_db_session: AsyncSession,
-        open_session: Any,
+        open_session: OpenSession,
         imap: type[FakeIMAP],
         dispatched: list[int],
     ) -> None:
@@ -148,11 +150,10 @@ class TestEachMessageLandsOnce:
         assert (box.uidvalidity, box.uid_last) == (100, 7)
         assert box.last_pulled_at is not None and box.last_error is None
 
-    @pytest.mark.asyncio
     async def test_a_second_pull_fetches_nothing_already_seen(
         self,
         async_db_session: AsyncSession,
-        open_session: Any,
+        open_session: OpenSession,
         imap: type[FakeIMAP],
         dispatched: list[int],
     ) -> None:
@@ -166,15 +167,14 @@ class TestEachMessageLandsOnce:
         assert len(await rows_of(async_db_session, MailMessage)) == 2
         assert len(await rows_of(async_db_session, MailBatch)) == 1
 
-    @pytest.mark.asyncio
     async def test_a_new_uidvalidity_starts_from_now_again(
         self,
         async_db_session: AsyncSession,
-        open_session: Any,
+        open_session: OpenSession,
         imap: type[FakeIMAP],
         dispatched: list[int],
     ) -> None:
-        """The server renumbered (a Gmail label recreated): UIDs mean
+        """The server renumbered (a label recreated): UIDs mean
         nothing any more, so the pull notes the new end and reads what
         arrives after it; what was read stays read."""
         await primed(open_session, imap)
@@ -191,11 +191,10 @@ class TestEachMessageLandsOnce:
         [box] = await rows_of(async_db_session, MailMailbox)
         assert (box.uidvalidity, box.uid_last) == (101, 3)
 
-    @pytest.mark.asyncio
     async def test_the_rows_say_they_were_pulled_and_from_where(
         self,
         async_db_session: AsyncSession,
-        open_session: Any,
+        open_session: OpenSession,
         imap: type[FakeIMAP],
         dispatched: list[int],
     ) -> None:
@@ -203,20 +202,17 @@ class TestEachMessageLandsOnce:
         await pull.pull_mailbox(open_session, BOX)
 
         [day] = await arrivals(async_db_session, owner_user_id=None)
-        assert {m.as_dict()["via"] for m in day.messages} == {
-            f"pulled from {BOX.label}"
-        }
+        assert {m.via for m in day.messages} == {f"pulled from {BOX.label}"}
 
 
 class TestTheMailboxIsOnlyRead:
-    @pytest.mark.asyncio
     async def test_examine_and_peek_never_a_write(
-        self, open_session: Any, imap: type[FakeIMAP], dispatched: list[int]
+        self, open_session: OpenSession, imap: type[FakeIMAP], dispatched: list[int]
     ) -> None:
         await primed(open_session, imap)
         await pull.pull_mailbox(open_session, BOX)
 
-        assert ("SELECT", "Steward", True) in imap.calls
+        assert ("SELECT", "Receipts", True) in imap.calls
         fetches = [c for c in imap.calls if c[0] == "FETCH"]
         assert fetches and all(c[2] == "(BODY.PEEK[])" for c in fetches)
         assert not [c for c in imap.calls if c[0] in ("STORE", "COPY", "EXPUNGE")]
@@ -224,9 +220,11 @@ class TestTheMailboxIsOnlyRead:
 
 
 class TestWhenTheMailboxSaysNo:
-    @pytest.mark.asyncio
     async def test_a_refused_sign_in_is_one_line_on_the_row_never_the_password(
-        self, async_db_session: AsyncSession, open_session: Any, imap: type[FakeIMAP]
+        self,
+        async_db_session: AsyncSession,
+        open_session: OpenSession,
+        imap: type[FakeIMAP],
     ) -> None:
         wrong = pull.Mailbox(BOX.host, BOX.user, BOX.folder, "nope nope nope nope")
 
@@ -238,11 +236,10 @@ class TestWhenTheMailboxSaysNo:
         assert box.last_pulled_at is None
         assert not await rows_of(async_db_session, MailBatch)
 
-    @pytest.mark.asyncio
     async def test_an_unreachable_host_says_so_and_a_good_pull_clears_it(
         self,
         async_db_session: AsyncSession,
-        open_session: Any,
+        open_session: OpenSession,
         imap: type[FakeIMAP],
         dispatched: list[int],
     ) -> None:
@@ -264,21 +261,18 @@ class TestTheAppPassword:
             s.MAIL_IMAP_HOST, s.MAIL_IMAP_USER = BOX.host, BOX.user
             yield
 
-    @pytest.mark.asyncio
     async def test_a_password_the_server_takes_passes(
         self, imap: type[FakeIMAP], named: None
     ) -> None:
         await pull.verify_password(PASSWORD)
         assert ("LOGOUT",) in imap.calls
 
-    @pytest.mark.asyncio
     async def test_a_refused_password_is_rejected_at_the_paste(
         self, imap: type[FakeIMAP], named: None
     ) -> None:
         with pytest.raises(SecretRejectedError):
             await pull.verify_password("nope nope nope nope")
 
-    @pytest.mark.asyncio
     async def test_an_unreachable_server_cannot_say(
         self, imap: type[FakeIMAP], named: None
     ) -> None:
@@ -286,7 +280,6 @@ class TestTheAppPassword:
         with pytest.raises(SecretUncheckedError):
             await pull.verify_password(PASSWORD)
 
-    @pytest.mark.asyncio
     async def test_host_and_user_come_first(self, imap: type[FakeIMAP]) -> None:
         with secret_settings(pull.HOST, pull.USER, pull.PASSWORD):
             with pytest.raises(SecretUncheckedError):
@@ -297,11 +290,10 @@ class TestTheAppPassword:
 class TestTheJob:
     def test_it_is_scheduled_and_not_held_to_the_server(self) -> None:
         """A dev stack pulls too: a second reader of a read-only mailbox
-        costs nobody anything, unlike a second SimpleFIN sync."""
+        costs nobody anything."""
         job = next(j for j in service_jobs() if j.id == "mail_pull")
         assert job.func is pull.mail_pull_job and not job.server_only
 
-    @pytest.mark.asyncio
     async def test_without_a_mailbox_it_does_nothing(
         self, imap: type[FakeIMAP], monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -312,7 +304,6 @@ class TestTheJob:
         await pull.mail_pull_job()
         assert not imap.calls
 
-    @pytest.mark.asyncio
     async def test_the_mailbox_is_read_from_the_secrets(self) -> None:
         with secret_settings(pull.HOST, pull.USER, pull.FOLDER, pull.PASSWORD) as s:
             s.MAIL_IMAP_HOST, s.MAIL_IMAP_USER = BOX.host, BOX.user

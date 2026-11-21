@@ -2,9 +2,9 @@
 Database health check dispatcher for aegis-steward.
 
 Runs the check for the configured engine (SQLite or PostgreSQL) and adds
-what ``app.core.db_activity`` recorded: slow transactions and lock waits,
-which the Database pages show; each table's first count today is kept for
-Tables (``db_trend``).
+what ``app.core.db_activity`` recorded in the last hour, by the code behind
+it (its ``summary``: what Illiana reads; the Database page reads the rows);
+each table's first count today is kept for Tables (``db_trend``).
 """
 
 from app.core import db_activity
@@ -18,9 +18,11 @@ __all__ = ["check_database_health"]
 
 
 async def check_database_health() -> ComponentStatus:
-    """The engine's check, with the recent database activity."""
+    """The engine's check, with the last hour's slow and locked by code."""
     status = await _check_engine()
-    status.metadata = (status.metadata or {}) | {"activity": await db_activity.recent()}
+    status.metadata = (status.metadata or {}) | {
+        "activity": await db_activity.summary()
+    }
     await db_trend.note(
         {t["name"]: t["rows"] for t in status.metadata.get("tables", [])}
     )

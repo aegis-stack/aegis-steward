@@ -192,11 +192,12 @@ def test_interval_jobs_keep_their_times_across_restarts(
 def test_a_job_that_runs_at_start_runs_as_the_scheduler_starts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deploy's change shows at once, not at the job's next hour (#542):
-    the job runs as the scheduler starts, then on its own schedule."""
+    """A deploy's change shows at once, not at the job's next hour: the
+    job runs as the scheduler starts, then on its own schedule."""
     from datetime import UTC, datetime, timedelta
 
     import app.components.scheduler.main as scheduler_main
+    from app.core.schedule import ServiceJob
 
     async def nightly() -> None:
         """A nightly chore."""
