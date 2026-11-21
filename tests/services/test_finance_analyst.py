@@ -771,6 +771,9 @@ class TestFixtures:
         # The memory write: facts the user states (a property value, a bill
         # the ledger cannot see) outlive the conversation they were said in.
         assert "save_memory" in {t.name for t in chat_agent.tools}
+        # Mail: the web chat is this agent, so the template's grant to the
+        # default assistant never reached her.
+        assert "arrivals" in {t.name for t in chat_agent.tools}
 
     def test_a_bare_seed_process_registers_the_chat_tools(self) -> None:
         """Same trap as the ai built-ins: a seeding process imports the

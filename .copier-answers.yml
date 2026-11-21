@@ -1,3 +1,4 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
 project_name: aegis-steward
 project_description: A production-ready async Python application built with Aegis
   Stack
@@ -21,7 +22,7 @@ include_observability: false
 include_inference: true
 inference_engine: llamacpp
 inference_placement: host
-inference_speech: none
+inference_speech: kokoro_fastapi
 include_secrets: true
 secrets_backend: database
 include_deploy: true
@@ -29,6 +30,7 @@ deploy_target: compose
 include_mcp: false
 include_storage: false
 include_browser: false
+include_runner: false
 ingress_tls: true
 ingress_domain: ''
 scheduler_backend: sqlite
@@ -68,4 +70,3 @@ include_auth_org: false
 include_auth_rbac: false
 project_slug: aegis-steward
 scheduler_with_persistence: true
-include_runner: false

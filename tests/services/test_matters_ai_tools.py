@@ -431,6 +431,29 @@ async def test_a_matters_documents_are_listed_by_the_matter_not_by_their_names(
     assert case["documents"] == 2
 
 
+async def test_a_contacts_documents_are_listed_by_the_contact(
+    async_db_session: AsyncSession,
+) -> None:
+    """Asked what the school sent, she has the school's contact; its paper
+    is found by it, never by guessing titles."""
+    from app.services.documents.service import DocumentService
+    from app.services.matters.models import party_tag
+
+    db = async_db_session
+    school = await PartyService(db).create(name="Example School", kind="organization")
+    documents = DocumentService(db)
+    theirs = await documents.ingest(
+        b"trot", title="Turkey Trot", media_type="text/plain"
+    )
+    await documents.tag(int(theirs.id or 0), party_tag(int(school.id or 0)))
+    await documents.ingest(b"other", title="Electric bill", media_type="text/plain")
+    await db.commit()
+
+    listed = await ai_tools.documents(party_id=int(school.id or 0))
+
+    assert [d["id"] for d in listed["documents"]] == [theirs.id]
+
+
 async def test_a_documents_figures_come_back_with_it(
     async_db_session: AsyncSession,
 ) -> None:

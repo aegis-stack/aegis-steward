@@ -70,7 +70,7 @@ def _domain(value: str) -> str:
     return said.removeprefix("www.").split("/", 1)[0].strip()
 
 
-def _addresses(contact: dict[str, Any]) -> list[str]:
+def addresses_of(contact: dict[str, Any]) -> list[str]:
     """Every email address a contact block carries, lower-cased once."""
     from app.services.matters.reach import reach_lines
 
@@ -90,10 +90,18 @@ async def parties_by_email(db: Any) -> dict[str, int]:
 
     known: dict[str, int] = {}
     for party in await PartyService(db).find():
-        for address in _addresses(party.contact or {}):
+        for address in addresses_of(party.contact or {}):
             if party.id is not None:
                 known.setdefault(address, party.id)
     return known
+
+
+def sender_of(known: dict[str, int], address: str) -> int | None:
+    """The contact an address is, from ``parties_by_email``: the address
+    itself, else the contact claiming its whole domain (``@school.example``
+    - a platform that writes from one address per teacher)."""
+    address = address.lower()
+    return known.get(address) or known.get("@" + address.rpartition("@")[2])
 
 
 def _hit(known: Known, line: str) -> bool:
@@ -188,7 +196,7 @@ async def known_strings(db: Any) -> list[Known]:
         # address as readily as its main one (MI-05).
         known.extend(
             Known("party", party.id, "email", address)
-            for address in _addresses(contact)
+            for address in addresses_of(contact)
         )
         # The main number AND the labelled ones: a county office prints
         # its caseworker's direct line as readily as its switchboard.

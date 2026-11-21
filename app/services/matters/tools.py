@@ -54,7 +54,10 @@ async def parties() -> dict[str, Any]:
     Returns a dict with key 'parties': a list of entries carrying 'id',
     'name', 'kind' ("person" or "organization"), 'sort_name', 'contact',
     'document_ids' - the paper filed against them (a pension fund's
-    statements, an agency's letters), each readable with `paper` - and
+    statements, an agency's letters, their mail), each readable with
+    `paper`; "what has X sent?" is this list, titled and dated by
+    `documents(party_id=...)`, never only the last few days of `arrivals`
+    - and
     'policy_ids' (what an insurer wrote) / 'covered_by_policy_ids' (what
     covers a person), each readable with `policies`, and 'transactions':
     the charges filed with them ('items', 'total_cents' signed - "what
@@ -299,7 +302,10 @@ async def facts(
 async def paper(document_id: int) -> dict[str, Any]:
     """The text of one document on file, page by page - the letter a
     request came from, a statement attached to an ask, a fact's source.
-    The ids come from `matters`, `requests` and `facts` ('document_id').
+    The ids come from `matters`, `requests` and `facts` ('document_id'),
+    `documents` ('id'), and mail: `arrivals` gives each message's
+    'letter_id' and its attachments' 'document_id'. Asked what a message
+    or a sender SAYS, read it here; a subject line is not its contents.
 
     A document already read comes straight back. One never read is
     handed to the worker to read (a scanned page with no text layer goes
@@ -346,6 +352,7 @@ async def documents(
     kind: str | None = None,
     unattributed: bool = False,
     matter_id: int | None = None,
+    party_id: int | None = None,
 ) -> dict[str, Any]:
     """What is on the shelf, by NAME rather than id: {'documents': [...]},
     newest first, each with 'id', 'title', 'kind', 'form_type', 'tax_year',
@@ -353,13 +360,17 @@ async def documents(
     the title - "county letter", "delta invoice" - which is what a person
     has to go on; 'kind' is one of {kinds}; 'matter_id' is what is filed on
     that matter, the way to see a case's paper (never match titles);
+    'party_id' is what is filed under that contact - their letters, mail
+    included, the way to answer "what has the school sent?" (find the
+    contact with `parties` first);
     'unattributed=True' is the working queue - documents NOBODY is tagged
     on, whose letterhead nothing can read. Then `paper` reads one, and
     document.metadata says what it is and who sent it.
     """
     from app.services.documents.domains.shelf import shelf
 
-    tag = matter_tag(matter_id) if matter_id is not None else None
+    tag = party_tag(party_id) if party_id is not None else None
+    tag = matter_tag(matter_id) if matter_id is not None else tag
     async with get_async_session() as db:
         found = await shelf(db, q=q, kind=kind, tag=tag, unattributed=unattributed)
     return {"documents": found}
