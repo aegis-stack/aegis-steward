@@ -66,7 +66,7 @@ class SelectionCheckbox(ft.Checkbox):
 
 _SELECTION_CELL_WIDTH = 36
 # A row's tint under the pointer.
-HOVER_TINT = ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE)
+HOVER_TINT = Theme.Colors.SURFACE_3
 # What a row may hold that its hover tint must not repaint: repainting the
 # row rebuilds it, so an open menu closes and a field loses its place.
 _FIELDS = (ft.Dropdown, ft.TextField)

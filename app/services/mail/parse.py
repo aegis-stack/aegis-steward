@@ -1,6 +1,6 @@
 """Bytes to messages. Pure: no database, no network, nothing stored.
 
-Both shapes Gmail hands out are stdlib: Google Takeout writes an
+Both shapes a mail provider hands out are stdlib: a mailbox export is an
 ``.mbox``, "Download message" saves an ``.eml``, and ``mailbox`` and
 ``email`` read them. Everything downstream needs is on the headers and
 the parts, so this is the whole reader.
@@ -9,7 +9,7 @@ the parts, so this is the whole reader.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import parseaddr, parsedate_to_datetime
@@ -22,6 +22,7 @@ import tempfile
 from app.core.config import settings
 from app.core.html_text import flatten
 from app.core.log import logger
+from app.core.time import as_stored
 
 MAIL_SUFFIXES = (".mbox", ".eml")
 
@@ -43,9 +44,7 @@ class ParsedMessage:
 
     ``message_id`` is the identity - RFC 5322 makes it unique per
     message, so a re-export of an overlapping range dedupes on it and
-    nothing else. ``from_address`` is lower-cased once, here: it is
-    matched against contacts, never shown back with somebody else's
-    capitalisation.
+    nothing else. ``from_address`` is lower-cased once, here.
     """
 
     message_id: str
@@ -55,12 +54,13 @@ class ParsedMessage:
     sent_at: datetime | None
     # The text part, or the HTML part flattened to text. No rendering, no
     # remote content: a document that phones home when opened is a
-    # tracking pixel with a filename (MI-05).
+    # tracking pixel with a filename.
     body_text: str = ""
     attachments: list[Attachment] = field(default_factory=list)
 
 
 def is_mail_export(filename: str | None) -> bool:
+    """Whether the file is a mailbox export or a saved message, by name."""
     return bool(filename) and str(filename).lower().endswith(MAIL_SUFFIXES)
 
 
@@ -122,11 +122,11 @@ def _is_paper(part: EmailMessage) -> bool:
 
     An HTML email carries its logos as ``inline`` parts with a
     ``Content-ID`` the body references by ``cid:``. When the whole
-    message is ``multipart/related`` - which is how Optum's HSA notice
-    arrived - stdlib's ``iter_attachments()`` hands those straight back,
-    and the shelf filed a 12 KB logo and a 1 KB banner as documents and
-    spent a model call reading each (2026-09-20). Inline plus a
-    Content-ID is chrome; everything else is paper.
+    message is ``multipart/related`` - the shape many provider notices
+    arrive in - stdlib's ``iter_attachments()`` hands those straight
+    back, and a logo and a banner would be filed as documents and each
+    read by a model. Inline plus a Content-ID is chrome; everything else
+    is paper.
     """
     return not (part.get_content_disposition() == "inline" and part.get("Content-ID"))
 
@@ -150,8 +150,9 @@ def _sent(mail: EmailMessage) -> datetime | None:
         when = parsedate_to_datetime(str(raw))
     except (TypeError, ValueError):
         return None
-    # One clock. A naive date is taken as UTC rather than guessed at.
-    return when.astimezone(UTC) if when.tzinfo else when.replace(tzinfo=UTC)
+    # One clock, the columns' naive UTC. A naive date is taken as UTC
+    # rather than guessed at.
+    return as_stored(when)
 
 
 def _body(mail: EmailMessage) -> str:

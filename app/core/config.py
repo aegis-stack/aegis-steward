@@ -19,6 +19,7 @@ from app.core.overseer_settings import OverseerSettings
 from app.core.queue_workers import DEFAULT_QUEUES, QueueWorker
 from app.core.settings_base import SettingsBase
 from app.core.voice_settings import VoiceSettings
+from app.services.mail.settings import MailSettings
 
 # Default placeholder bundled with the template — anyone reading the
 # template source knows this value, so leaving it unchanged in a non-dev
@@ -32,12 +33,10 @@ LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 class Settings(
     VoiceSettings,
     OverseerSettings,
+    MailSettings,
     SettingsBase,
 ):
-    """
-    Defines application settings.
-    `model_config` is used to specify that settings should be loaded from a .env file.
-    """
+    """The application's settings, loaded from ``.env`` (``model_config``)."""
 
     # Project identity
     PROJECT_NAME: str = "aegis-steward"
@@ -413,6 +412,13 @@ class Settings(
             "A transaction held this long is recorded on the Database page, seconds (0: off)",
         ),
     ] = 2.0
+    DATABASE_ACTIVITY_RETENTION_SECONDS: Annotated[
+        int,
+        Configurable(
+            ComponentName.DATABASE,
+            "How long slow transactions and lock failures are kept, seconds",
+        ),
+    ] = 7 * 86400
 
     # Database. ABSOLUTE, on the aegis-data volume: off the bind mount or
     # WAL is unsafe (app/core/db.py). Host cannot open it; compose exec.

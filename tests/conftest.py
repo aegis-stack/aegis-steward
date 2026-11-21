@@ -424,6 +424,47 @@ def files(tmp_path: Path) -> Generator[Any]:
 
 
 @pytest.fixture
+def open_session(async_db_session: AsyncSession, files: Any) -> Any:
+    """The test's session for code that takes a way to OPEN one (mail's
+    ingest and pull), with the object store in the test's directory."""
+    from tests._session import opens
+
+    return opens(async_db_session)
+
+
+@pytest.fixture
+def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Every document new paper asked to have read, in order. Only the
+    hand-off is faked: ``read_quietly`` looks ``start_extraction`` up at
+    call time, so its guard still runs."""
+    from app.services.documents.domains.extraction import dispatch
+
+    asked: list[int] = []
+
+    async def start(document_id: int, *, owner_user_id: Any, force: bool) -> str:
+        asked.append(document_id)
+        return f"job-{document_id}"
+
+    monkeypatch.setattr(dispatch, "start_extraction", start)
+    return asked
+
+
+@pytest.fixture
+def no_mail_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mail's core alone: what a project's ``mail_hooks`` do as mail is
+    filed (file paper under a contact, read a letter) is theirs to test,
+    so the core's tests neither find nor call them. Found first, so a
+    hook module imported mid-test cannot register onto the stand-in
+    list and be lost with it."""
+    import app.services as services
+    from app.services.mail import ingest
+
+    ingest.import_modules_named(services, "mail_hooks")
+    monkeypatch.setattr(ingest, "_filed_hooks", [])
+    monkeypatch.setattr(ingest, "import_modules_named", lambda *args: [])
+
+
+@pytest.fixture
 def client_with_db(app: FastAPI, db_session: Session) -> Generator[TestClient]:
     """Create a test client with database dependency override."""
     from app.core.db import get_db
@@ -1064,21 +1105,3 @@ def clean_agent_cache():
     invalidate_agent_cache()
     yield
     invalidate_agent_cache()
-
-
-@pytest.fixture
-def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Every document the shelf asked to have read, in order. The reads
-    would go to the worker; ``read_quietly`` looks ``start_extraction``
-    up at call time, so the real guard runs and only the enqueue is
-    faked."""
-    from app.services.documents.domains.extraction import dispatch
-
-    asked: list[int] = []
-
-    async def _fake(document_id: int, *, owner_user_id: Any, force: bool) -> str:
-        asked.append(document_id)
-        return f"job-{document_id}"
-
-    monkeypatch.setattr(dispatch, "start_extraction", _fake)
-    return asked

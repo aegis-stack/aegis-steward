@@ -71,6 +71,9 @@ class WorkerSettings:
         # A picture shared in chat, read into its paste index.
         if present("app.services.ai.domains.chat.pastes"):
             functions.append(read_photo_task)
+    if present("app.services.mail"):
+        # A mailbox export, read into documents.
+        functions.append(mail_import_task)
     if present("app.services.ai.domains.chat.summary"):
         # A long conversation's turns out of view, folded into its summary.
         functions.append(fold_conversation_task)

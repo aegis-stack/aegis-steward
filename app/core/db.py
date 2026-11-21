@@ -7,7 +7,11 @@ Includes proper session management with transaction handling and foreign key sup
 """
 
 from collections.abc import AsyncGenerator, Callable, Generator
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
+from contextlib import (
+    AbstractAsyncContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -241,14 +245,12 @@ SessionLocal = sessionmaker(
     class_=Session, bind=engine, autoflush=False, autocommit=False
 )
 
-# Configure async session factory using SQLModel's AsyncSession
-# How work that must NOT hold the write lock across something slow gets a
-# database: a way to OPEN one, rather than one already open. SQLite has a
-# single writer and every transaction here begins IMMEDIATE, so an open
-# session IS the application-wide write lock - and a model call or a file
-# parse in the middle of one stops every other writer (#210, 2026-09-20).
-# Take the database twice, briefly; hold it for nothing else.
+# How work that must NOT hold the write lock across something slow (a file
+# parse, a model call) gets a database: a way to OPEN one, taken briefly
+# and more than once, rather than one already open (``get_async_session``).
 OpenSession = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+
+# Configure async session factory using SQLModel's AsyncSession
 
 AsyncSessionLocal = async_sessionmaker(
     async_engine,

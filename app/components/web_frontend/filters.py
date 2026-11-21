@@ -399,7 +399,15 @@ def color_tone(color: str) -> str:
     return _TONE_BY_COLOR.get(color, "muted")
 
 
-_WORST_FIRST = ("error", "warn")
+# A badge's tones, what wants a look first.
+LOUDEST = ("error", "warn", "accent", "muted", "ok")
+_WORST_FIRST = LOUDEST[:2]
+
+
+def loudness(tone: str) -> int:
+    """Where a tone stands among ``LOUDEST``, to sort by; one it does not
+    know comes last."""
+    return LOUDEST.index(tone) if tone in LOUDEST else len(LOUDEST)
 
 
 # What a ``pattern`` attribute escapes: the browser compiles it with the v

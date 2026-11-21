@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi.testclient import TestClient
+import pytest
 
 from tests._mbox import PDF, eml_bytes, mbox_bytes, message
 from tests.web.conftest import follow
@@ -25,6 +26,15 @@ MBOX = (
 # 3.1. The autouse ``_no_production_database`` already points app-owned
 # sessions at the test's file-backed engine; the job reaches it by the
 # real path.
+
+
+@pytest.fixture(autouse=True)
+def _jobs_run_here(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The import runs as a task in this process, as on a stack with no
+    worker: no test worker reads the queue (``start_job``)."""
+    from app.services.system import job_store
+
+    monkeypatch.setattr(job_store, "present", lambda module: False)
 
 
 def _upload(client: TestClient, upload: tuple) -> Any:

@@ -93,9 +93,8 @@ async def create_contact_execute(
     )
     await db.flush()
     # Mail already on the shelf from this address is theirs now. Lazy:
-    # matters does not otherwise know mail exists, and the queue runs
-    # this in the same transaction as the create.
-    from app.services.mail.ingest import adopt_sender
+    # the queue runs this in the same transaction as the create.
+    from app.services.matters.mail_hooks import adopt_sender
 
     await adopt_sender(db, int(party.id), payload.email)
     return {"party_id": party.id, "name": party.name}

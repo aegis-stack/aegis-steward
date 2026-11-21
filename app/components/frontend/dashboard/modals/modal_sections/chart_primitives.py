@@ -23,6 +23,7 @@ class ChartColors:
     RAMP = SERIES
     TEAL = Theme.Colors.PRIMARY
     VIOLET = SERIES[1]
+    INDIGO = SERIES[3]  # a second series beside teal: the ramp's blue
     AMBER = Theme.Colors.WARNING
     ERROR = Theme.Colors.ERROR
 

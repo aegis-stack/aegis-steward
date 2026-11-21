@@ -9,16 +9,19 @@
    row's ``currency`` when it has one; ``signed`` adds a leading ``+`` and
    colours by sign, ``toned`` colours by sign without the plus), ``date``,
    ``int``, ``status`` (the value is
-   ``{"label", "tone"}``, rendered as a ``badge``), ``avatar`` (the
-   row's ``icon_url`` brand mark before the value), ``code`` (monospace,
+   ``{"label", "tone"}``, rendered as a ``badge``, and ``sub``, a muted
+   second line under it), ``avatar`` (the row's ``icon_url`` brand mark
+   before the value), ``code`` (monospace,
    wrapping: a key, a rule, a command), ``file`` (the value is ``{"path",
    "url"}``: the path as code after its type's icon, ``file_icon``, linked
    when it has a ``url``) or ``link`` (the value is
-   ``{"label", "url"}``; the link replaces ``target``, default
-   ``#app-content``, the way a list's row opens its item; ``mark`` puts
-   the row's mark before it); ``render`` is a macro taking the value (the row, with ``row``), for
-   a cell no kind covers; ``header`` is a macro rendering the column's
-   heading in place of ``label``. A row marked ``group`` reads as a
+   ``{"label", "url"}``, and ``sub`` as a status has; the
+   link replaces ``target``, default ``#app-content``, the way a list's
+   row opens its item; ``mark`` puts the row's mark before it); ``render``
+   is a macro taking the value (the row, with ``row``), for a cell no kind
+   covers; ``header`` is a macro rendering the column's heading in place
+   of ``label``; ``wrap`` lets a long text cell wrap instead of running
+   on. A row marked ``group`` reads as a
    heading and the ``child`` rows after it are indented (a total and its
    parts under one set of columns); ``align`` is ``left``
    (default) or ``right``; ``phone`` (``primary`` or ``amount``) moves
@@ -28,11 +31,13 @@
    renders as a dash. Zero rows render ``empty_state`` instead.
 
    ``row_id`` names each ``<tr>`` (``row_id ~ "-" ~ row.id``) so an action
-   can swap one row back; a ``{% call(row) data_table(...) %}`` block, or
-   a macro passed as ``actions``, adds an actions column rendered per row.
+   can swap one row back; a ``{% call(row) data_table(...) %}`` block, or a
+   macro passed as ``actions``, adds an actions column rendered per row
+   (``actions=none`` leaves it out, so one table serves both cases).
    ``detail`` is a macro taking the row: each row then gets a toggle and a
    hidden full-width row under it with that macro's output, shown from
-   the start where the row says ``open``.
+   the start where the row says ``open``; a row that says ``flat`` has
+   nothing to unfold (a row of its own among rows that hold others).
 
    Three parameters exist for the register, which is a table like any
    other until you look at a row: ``select`` adds the checkbox column and
@@ -59,6 +64,9 @@
    never pushes the columns after it out of view. #}
 {% macro _code(text) %}<code class="font-mono text-xs whitespace-normal [overflow-wrap:anywhere]">{{ text }}</code>{% endmacro %}
 
+{# A cell's muted second line (a link's, a status's ``sub``). #}
+{% macro _sub(value) %}{% if value.sub %}<div data-sub class="text-xs text-aegis-muted">{{ value.sub }}</div>{% endif %}{% endmacro %}
+
 {% macro _cell(row, col) -%}
 {%- set value = row[col.key] if row is mapping or col.key is number else row|attr(col.key) -%}
 {%- if value is not defined or value is none or value == "" -%}
@@ -69,7 +77,11 @@
 {%- set currency = (row["currency"] if row is mapping and "currency" in row else row|attr("currency")) -%}
 {{ value|money(currency if currency is string else "USD", signed=col.signed) }}
 {%- elif col.kind == "status" -%}
-{{ badge(value.label, value.tone) }}
+{{ badge(value.label, value.tone) }}{{ _sub(value) }}
+{%- elif col.kind == "date" -%}
+{{ value|short_date }}
+{%- elif col.kind == "int" -%}
+{{ "{:,}".format(value) }}
 {%- elif col.kind == "avatar" -%}
 <span class="inline-flex items-center gap-2">{{ mark(row, value) }}<span>{{ value }}</span></span>
 {%- elif col.kind == "open" -%}
@@ -124,12 +136,14 @@
 <span class="inline-flex items-start gap-2">{{ file_icon(value.path) }}{% if value.url %}<a href="{{ value.url }}" class="hover:text-aegis-teal">{{ _code(value.path) }}</a>{% else %}{{ _code(value.path) }}{% endif %}</span>
 {%- elif col.kind == "link" -%}
 {%- set link -%}{% if value.url %}<a href="{{ value.url }}" {{ hx_replace(value.url, col.target or "#app-content") }} class="text-aegis-text hover:text-aegis-teal">{{ value.label }}</a>{% else %}{{ value.label }}{% endif %}{%- endset -%}
-{%- if col.mark %}<span class="inline-flex items-center gap-2">{{ mark(row, value.label) }}{{ link }}</span>{% else %}{{ link }}{% endif -%}
-{%- if value.sub %}<div class="text-xs text-aegis-muted">{{ value.sub }}</div>{% endif -%}
-{%- elif col.kind == "date" -%}
-{{ value|short_date }}
-{%- elif col.kind == "int" -%}
-{{ "{:,}".format(value) }}
+{%- if col.mark -%}
+{#- A second line stays under the label, beside the mark. -#}
+{%- if value.sub -%}
+<div class="flex items-start gap-2">{{ mark(row, value.label) }}<div class="min-w-0">{{ link }}{{ _sub(value) }}</div></div>
+{%- else -%}
+<span class="inline-flex items-center gap-2">{{ mark(row, value.label) }}{{ link }}</span>
+{%- endif -%}
+{%- else -%}{{ link }}{{ _sub(value) }}{%- endif -%}
 {%- else -%}
 {{ value }}
 {%- endif -%}
@@ -184,8 +198,9 @@ text-aegis-text
 {# One row. ``id`` lets an action swap this row back by itself; ``oob``
    marks it as an out-of-band answer (pattern 2); ``actions`` is a macro
    (a call block's ``caller``) rendering the trailing actions cell;
-   ``expandable`` leads with the toggle of its ``detail`` row. #}
-{% macro table_row(columns, row, id=None, oob=False, actions=None, expandable=False) %}
+   ``expandable`` leads with the toggle of its ``detail`` row, ``flat``
+   with an empty cell in its place. #}
+{% macro table_row(columns, row, id=None, oob=False, actions=None, expandable=False, flat=False) %}
 {# A row swapped out of band travels wrapped: a bare <tr> at the top
    of a response bound for anything but a table is thrown away by the
    HTML parser, and its cells spill into whatever was being swapped - a
@@ -213,6 +228,8 @@ text-aegis-text
     <button type="button" @click.stop="open = !open" aria-expanded="false" :aria-expanded="open.toString()" aria-label="Details"
             class="text-aegis-muted hover:text-aegis-text"><span aria-hidden="true" class="inline-block transition-transform" :class="open && 'rotate-90'">›</span></button>
   </td>
+  {% elif flat %}
+  <td></td>
   {% endif %}
   {% for col in columns %}
   {# The mark rides in the FIRST cell, which is made its positioning
@@ -273,11 +290,14 @@ text-aegis-text
     </thead>
     {% if detail %}
     {% for item in rows %}
+    {% set flat = item is mapping and item.get("flat") %}
     <tbody x-data="{ open: {{ 'true' if item is mapping and item.get('open') else 'false' }} }" class="border-b border-aegis-border/60 last:border-0">
-      {{ table_row(columns, item, id=(row_id ~ "-" ~ item.id) if row_id else None, actions=actions, expandable=True) }}
+      {{ table_row(columns, item, id=(row_id ~ "-" ~ item.id) if row_id else None, actions=actions, expandable=not flat, flat=flat) }}
+      {% if not flat %}
       <tr data-detail x-show="open" x-cloak>
         <td colspan="{{ columns|length + 1 + (1 if actions else 0) }}" class="px-5 pb-4 pt-2 bg-aegis-border/10">{{ detail(item) }}</td>
       </tr>
+      {% endif %}
     </tbody>
     {% endfor %}
     {% else %}

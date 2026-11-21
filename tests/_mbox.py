@@ -16,7 +16,7 @@ import tempfile
 
 def message(
     *,
-    sender: str = "Delta Dental <claims@deltadentalins.com>",
+    sender: str = "Example Insurer <claims@insurer.example>",
     to: str = "sam@example.com",
     subject: str = "Your claim has been processed",
     body: str = "Your claim was processed. See the attached statement.",
@@ -29,8 +29,8 @@ def message(
 
     ``inline_images`` are ``(filename, bytes)`` embedded in an HTML body
     and referenced by ``cid:`` - the logos every HTML newsletter carries.
-    Built as ``multipart/related`` at the top level, exactly as a real
-    Optum notification arrived (2026-09-20), which is the shape stdlib's
+    Built as ``multipart/related`` at the top level, the shape a real
+    provider's notification arrives in, and the one stdlib's
     ``iter_attachments()`` hands straight back.
     """
     mail = EmailMessage()
@@ -62,7 +62,7 @@ def message(
 
 
 def mbox_bytes(messages: list[EmailMessage]) -> bytes:
-    """A whole mailbox, as Google Takeout writes one."""
+    """A whole mailbox, as a provider's export writes one."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "export.mbox"
         box = mailbox.mbox(path)
@@ -74,7 +74,7 @@ def mbox_bytes(messages: list[EmailMessage]) -> bytes:
 
 
 def eml_bytes(one: EmailMessage) -> bytes:
-    """A single message, as Gmail's "Download message" saves one."""
+    """A single message, as a mail client's "Download message" saves one."""
     return one.as_bytes()
 
 

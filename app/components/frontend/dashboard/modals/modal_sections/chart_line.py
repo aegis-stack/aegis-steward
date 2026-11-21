@@ -55,7 +55,11 @@ class LineChartCard(ft.Container):
 
     @classmethod
     def from_chart(
-        cls, title: str, data: dict[str, Any], subtitle: str = "", height: int = 214
+        cls,
+        title: str,
+        data: dict[str, Any],
+        subtitle: str = "",
+        height: int = 214,
     ) -> LineChartCard:
         """The card for chart data as the htmx ``chart_panel`` takes it
         (``app.core.series.chart``): a line per series in the shared

@@ -65,8 +65,8 @@ BUDGET: dict[str, int] = {
     # The template catch-up to aegis-stack 44a3670 (2026-10-09): the
     # template's own growth in shared modules, recorded rather than split
     # so the next update merges cleanly.
-    "components/web_frontend/rendering.py": 612,
-    "core/config.py": 829,  # #481 upload caps, #482 encryption-key guard, #486 code mode limits, #479 hosts + auth-off guard, #488 Traefik API, deploy DOMAIN, #508 push key, #519 off-site backup
+    "components/web_frontend/rendering.py": 634,  # template: status_cell sub, chips
+    "core/config.py": 834,  # #481 upload caps, #482 encryption-key guard, #486 code mode limits, #479 hosts + auth-off guard, #488 Traefik API, deploy DOMAIN, #508 push key, #519 off-site backup, template: mail settings, db activity retention
 }
 
 

@@ -70,7 +70,10 @@ class TestOnePalette:
         assert scheme.secondary == tokens["info"]
 
     def test_tailwind_reads_the_palette_file(self) -> None:
-        config = Path("tailwind.config.js").read_text()
+        tailwind = Path("tailwind.config.js")
+        if not tailwind.exists():
+            pytest.skip("no htmx frontend in this stack")
+        config = tailwind.read_text()
         assert 'require("./app/core/palette.json")' in config
         assert not re.search(r"#[0-9A-Fa-f]{6}", config.split("const SHAPES")[0])
 

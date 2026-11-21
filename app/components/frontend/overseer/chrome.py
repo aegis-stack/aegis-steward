@@ -91,22 +91,6 @@ def build_chrome(
         on_click=lambda _: DeploymentsPopup.open_on(page),
     )
 
-    # Overseer > Logs and Overseer > Deployments, as popups.
-    logs_button = ft.IconButton(
-        icon=ft.Icons.RECEIPT_LONG,
-        tooltip="Logs",
-        icon_size=24,
-        icon_color=ft.Colors.ON_SURFACE_VARIANT,
-        on_click=lambda _: LogsPopup.open_on(page),
-    )
-    deployment_button = ft.IconButton(
-        icon=ft.Icons.ROCKET_LAUNCH_OUTLINED,
-        tooltip="Deployments",
-        icon_size=24,
-        icon_color=ft.Colors.ON_SURFACE_VARIANT,
-        on_click=lambda _: DeploymentsPopup.open_on(page),
-    )
-
     async def handle_logout(_: Any) -> None:
         """
         Sign the current session out.

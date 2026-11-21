@@ -75,3 +75,11 @@ class TestThePersonaKeepsHerShort:
 
         assert "one ontology call" in section and "not also" in section
         assert "a list of ids" in section
+
+    def test_health_takes_the_parts_name_not_its_map_id(self) -> None:
+        """The map's ids (``component:worker``) are the ontology's; the
+        health tool wants the bare name, and a model shown only the id
+        passed ``component:backend`` to it (eval, 2026-11-20)."""
+        section = DEFAULT_SYSTEM_PROMPT.split("## Which tool I reach for")[1]
+
+        assert '``component="backend"``' in section

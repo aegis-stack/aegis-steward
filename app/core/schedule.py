@@ -31,9 +31,9 @@ class ServiceJob:
     ``trigger`` is passed to ``scheduler.add_job`` as keyword arguments.
     ``timeout`` is how long a worker lets it run; None keeps the queue's.
     ``server_only``: it reaches real banks, inboxes or storage, so a dev
-    stack never schedules it - the server's ledger owns the data (#532).
+    stack never schedules it - the server's data is the server's.
     ``at_start``: it also runs as the scheduler starts, so a deploy's
-    change shows at once rather than at its next run (#542).
+    change shows at once rather than at its next run.
     """
 
     func: Callable[[], Awaitable[Any]]

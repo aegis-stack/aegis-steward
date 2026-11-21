@@ -142,6 +142,8 @@ EXPECTED_EFFECTS = {
     "research_thread": "read",
     "research_history": "read",
     "meetings": "read",
+    # What came in by mail and what each message became.
+    "arrivals": "read",
     # What an agent knows: its knowledge bases, searched.
     "knowledge": "read",
     # The eval datasets and runs; a case or a run is proposed.
@@ -190,7 +192,6 @@ EXPECTED_EFFECTS = {
     "contact_details": "read",
     "claim_candidates": "read",
     "policies": "read",
-    "arrivals": "read",
 }
 
 

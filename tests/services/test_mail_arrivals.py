@@ -1,44 +1,41 @@
-"""What came in: one answer for the page and for the chat (MI-06).
+"""What came in: one answer for the page and for the chat.
 
-Mail that arrives, reads itself and proposes cards is still a pile if
-the only way to see it is the approvals queue, which says what is
-WAITING rather than what ARRIVED. The intake rows say, per message:
-when, from whom, what it became - a letter, its attachments, a card -
-and, when nothing, why. The page and the assistant read the same rows
-so they cannot disagree.
+What is waiting is a queue's question; this is what ARRIVED. The rows
+say, per message: when, from whom, what it became - a letter, its
+attachments - and, when nothing, why. The page and the assistant read the
+same rows, so they cannot disagree.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.db import OpenSession
 from app.services.mail import ingest
 from app.services.mail.arrivals import arrivals
-from app.services.matters.service import PartyService
+from app.services.mail.models import MailMessage
 from tests._mbox import PDF, eml_bytes, mbox_bytes, message
+from tests._session import rows_of
+
+pytestmark = pytest.mark.usefixtures("no_mail_hooks")
 
 
 class TestWhatCameIn:
-    """The milestone's gate: a statement with an attachment, a letter with
-    none, and a newsletter - all three shown, each saying what it became."""
-
-    @pytest.mark.asyncio
     async def test_three_mails_and_what_each_became(
-        self, async_db_session: AsyncSession, open_session: Any, dispatched: list[int]
+        self,
+        async_db_session: AsyncSession,
+        open_session: OpenSession,
+        dispatched: list[int],
     ) -> None:
-        db = async_db_session
-        delta = await PartyService(db).create(
-            name="Delta Dental",
-            kind="organization",
-            contact={"email": "claims@deltadentalins.com"},
-        )
+        """A statement with an attachment, a letter with none, and a
+        newsletter with nothing in it: each says what it became."""
         data = mbox_bytes(
             [
                 message(
-                    sender="Delta Dental <claims@deltadentalins.com>",
+                    sender="Example Insurer <claims@insurer.example>",
                     subject="Your statement",
                     attachments=[("statement.pdf", "application/pdf", PDF)],
                 ),
@@ -50,51 +47,46 @@ class TestWhatCameIn:
                 ),
             ]
         )
-        await ingest.ingest_mail(open_session, data=data, file_name="takeout.mbox")
+        await ingest.ingest_mail(open_session, data=data, file_name="export.mbox")
 
-        [day] = await arrivals(db, owner_user_id=None)
+        [day] = await arrivals(async_db_session, owner_user_id=None)
         rows = {row.subject: row for row in day.messages}
         assert set(rows) == {"Your statement", "Renewal notice", "Weekly deals"}
 
         statement = rows["Your statement"]
-        assert statement.sender == "Delta Dental"
-        assert statement.party == {"id": delta.id, "name": "Delta Dental"}
+        assert (statement.sender, statement.address) == (
+            "Example Insurer",
+            "claims@insurer.example",
+        )
         assert statement.letter_id is not None
         assert [a.filename for a in statement.attachments] == ["statement.pdf"]
-        assert statement.card is None  # known sender: nothing to ask
-        assert statement.became == "letter + 1 attachment, filed under Delta Dental"
+        assert statement.became == "letter + 1 attachment"
+        assert statement.via == "export.mbox"
 
         notice = rows["Renewal notice"]
-        assert notice.sender == "County" and notice.party is None
-        assert notice.card == "pending"
-        assert notice.became == "letter; a card offers to add County"
+        assert notice.became == "letter" and notice.attachments == []
 
         deals = rows["Weekly deals"]
         assert deals.letter_id is None and deals.attachments == []
         assert deals.became == "nothing: empty message, no attachments"
 
-    @pytest.mark.asyncio
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # two imports, one read each
     async def test_days_are_newest_first_and_only_this_owners(
-        self, async_db_session: AsyncSession, open_session: Any, dispatched: list[int]
+        self,
+        async_db_session: AsyncSession,
+        open_session: OpenSession,
+        dispatched: list[int],
     ) -> None:
-        from datetime import UTC, datetime, timedelta
-
-        from app.services.mail.models import MailMessage
-
         db = async_db_session
         await ingest.ingest_mail(
             open_session, data=eml_bytes(message(subject="today")), file_name="a.eml"
         )
         await ingest.ingest_mail(
             open_session,
-            data=eml_bytes(message(subject="yesterday", message_id="<y@x>")),
+            data=eml_bytes(message(subject="yesterday", message_id="<y@x.example>")),
             file_name="b.eml",
         )
-        old = next(
-            r
-            for r in (await db.exec(__import__("sqlmodel").select(MailMessage))).all()
-            if r.subject == "yesterday"
-        )
+        [old] = [r for r in await rows_of(db, MailMessage) if r.subject == "yesterday"]
         old.created_at = datetime.now(UTC) - timedelta(days=1)
         db.add(old)
         await db.flush()
