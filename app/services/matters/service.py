@@ -76,6 +76,7 @@ class PartyService:
         )
         self.db.add(party)
         await self.db.flush()
+        await self._adopt_mail(party)
         return party
 
     async def get(self, party_id: int) -> Party | None:
@@ -148,11 +149,28 @@ class PartyService:
                     raise ValueError("A party needs a name.")
                 setattr(party, field, value or None if field == "note" else value)
         if "contact" in changes:
+            had = party.contact
             party.contact = changes["contact"] or None
         party.updated_at = utcnow()
         self.db.add(party)
         await self.db.flush()
+        if "contact" in changes:
+            await self._adopt_mail(party, had=had)
         return party
+
+    async def _adopt_mail(
+        self, party: Party, had: dict[str, Any] | None = None
+    ) -> None:
+        """Whatever an address a contact gains already sent is theirs: one
+        home for every way it gains one (a card, the Contacts page). Only
+        the gained ones - an edit to a phone reads no mail."""
+        from app.services.documents.domains.reading.identity import addresses_of
+        from app.services.matters.mail_hooks import adopt_mail
+
+        known = set(addresses_of(had or {}))
+        gained = [a for a in addresses_of(party.contact or {}) if a not in known]
+        if gained and party.id is not None:
+            await adopt_mail(self.db, int(party.id), gained)
 
     async def remove(self, party_id: int) -> bool:
         """Soft delete. Matters and documents point here, and a hard

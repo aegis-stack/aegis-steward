@@ -10,6 +10,10 @@ from sqlmodel import Field, SQLModel
 
 from app.core.time import utcnow
 
+# Steward: ``party_id`` below points at matters' table, which a process
+# filing mail (the worker's pull) otherwise never loads.
+import app.services.matters.models.core  # noqa: F401, E402
+
 # How a batch's messages got here: a file somebody dropped, or a pull
 # from a mailbox the app reads itself (``pull``).
 SOURCE_FILE, SOURCE_IMAP = "file", "imap"

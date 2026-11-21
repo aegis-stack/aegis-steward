@@ -278,6 +278,9 @@ FINANCE_CHAT_TOOL_NAMES = (
     # What each table and change type is, read from the code, instead of
     # a prompt restating the schema.
     "ontology",
+    # What came in by mail and what it became; the template grants it to
+    # the default assistant, and the web chat is this agent.
+    "arrivals",
 )
 
 

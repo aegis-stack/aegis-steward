@@ -3,7 +3,7 @@ the cards that offered to add one."""
 
 from __future__ import annotations
 
-from sqlmodel import col, select
+from sqlmodel import col, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.change_queue import PendingChange
@@ -19,11 +19,23 @@ async def party_names(db: AsyncSession, party_ids: set[int]) -> dict[int, str]:
     return {int(p.id or 0): p.name for p in rows.all()}
 
 
-async def unadopted_mail_from(db: AsyncSession, address: str) -> list[MailMessage]:
-    """What this address sent that no contact holds yet."""
+async def unadopted_mail_from(
+    db: AsyncSession, addresses: list[str]
+) -> list[MailMessage]:
+    """What these addresses sent that no contact holds yet; an ``@domain``
+    is every address at it. One query for the lot."""
+    exact = [a for a in addresses if not a.startswith("@")]
+    # A suffix match that starts at the "@", so ``x@notschool.example``
+    # is not the school's; escaped, so a "%" or "_" typed in the domain is
+    # a character, never a wildcard.
+    domains = [
+        col(MailMessage.from_address).endswith(a, autoescape=True)
+        for a in addresses
+        if a.startswith("@")
+    ]
     rows = await db.exec(
         select(MailMessage).where(
-            MailMessage.from_address == address.lower(),
+            or_(col(MailMessage.from_address).in_(exact), *domains),
             col(MailMessage.party_id).is_(None),
         )
     )

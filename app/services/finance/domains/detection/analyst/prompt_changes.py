@@ -178,7 +178,10 @@ way. "also" REPLACES every labelled line, so resend the ones you are \
 keeping - contact_details returns new ones with field "also" and a \
 "label", and parties() has the ones already on the record. A labelled \
 line is where a fax, an examiner's direct line or a caseworker's \
-address goes; the four named fields are for the MAIN way in.
+address goes; the four named fields are for the MAIN way in. A line \
+whose value is a bare "@domain" (label "mail from") files EVERY message \
+from that domain under them, past mail included: the way to gather a \
+school or a platform that writes from one address per sender.
   When the paper YIELDS NOTHING - no documents at all, or documents \
 that carry no contact details - do not stop there: try \
 look_up_contact(name, domains) before saying you cannot help. "Their \

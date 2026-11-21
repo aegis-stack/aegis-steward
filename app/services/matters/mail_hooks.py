@@ -9,7 +9,9 @@ its name. Who a sender IS is a contacts question, so it is answered here:
   so Contacts shows it and nothing learns a second way of filing).
 - A stranger is offered as a ``contact.create`` card, never added: once
   per address, and a rejected one is never asked again (no means no).
-- An approved card adopts what that address already sent (``adopt_sender``).
+- A contact adopts what its addresses already sent whenever it gains one
+  (``adopt_mail``): an approved card, or an edit on the Contacts page.
+- ``@domain`` on a contact claims every address at it (``sender_of``).
 - Each letter is read as a scan is (``read_the_letters``): the template
   files it already read and stops; here the reading names, dates and
   files it, and a mailed receipt is matched off its From line.
@@ -24,7 +26,10 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.change_queue import propose
 from app.services.documents.domains.extraction.dispatch import read_quietly
-from app.services.documents.domains.reading.identity import parties_by_email
+from app.services.documents.domains.reading.identity import (
+    parties_by_email,
+    sender_of,
+)
 from app.services.documents.service import DocumentService
 from app.services.mail import queries as mail_queries
 from app.services.mail.arrivals import Arrival
@@ -44,7 +49,7 @@ async def file_under_senders(
     papers = await _papers_of(db, rows)
     documents = DocumentService(db)
     for row in rows:
-        party_id = senders.get(row.from_address)
+        party_id = sender_of(senders, row.from_address)
         if party_id is not None:
             row.party_id = party_id
             db.add(row)
@@ -70,14 +75,12 @@ register_messages_filed(file_under_senders)
 register_messages_filed(read_the_letters)
 
 
-async def adopt_sender(db: AsyncSession, party_id: int, address: str | None) -> int:
-    """A stranger's card was approved: everything they already sent is
-    theirs now - the message rows name them, and their letters and
-    attachments are filed under them the way a known sender's are on
-    ingest. Returns how many messages were adopted."""
-    if not address:
-        return 0
-    rows = await queries.unadopted_mail_from(db, address)
+async def adopt_mail(db: AsyncSession, party_id: int, addresses: list[str]) -> int:
+    """A contact gained these addresses (a card approved, an edit):
+    everything already sent from them is theirs now - the message rows
+    name them, and their letters and attachments are filed under them the
+    way a known sender's are on ingest. Returns how many were adopted."""
+    rows = await queries.unadopted_mail_from(db, addresses)
     papers = await _papers_of(db, rows)
     documents = DocumentService(db)
     for row in rows:
@@ -156,7 +159,7 @@ async def _papers_of(db: AsyncSession, rows: list[MailMessage]) -> dict[int, lis
     found: dict[int, list[int]] = {
         int(row.id or 0): [row.document_id] if row.document_id else [] for row in rows
     }
-    for link in await mail_queries.attachments_of(db, ids):
+    for link in await mail_queries.attachments_of(db, ids) if ids else []:
         found[link.message_id].append(link.document_id)
     return found
 

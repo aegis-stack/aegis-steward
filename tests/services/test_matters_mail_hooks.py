@@ -114,6 +114,53 @@ class TestTheSenderIsKnown:
         [row] = await rows_of(async_db_session, MailMessage)
         assert row.party_id == county.id
 
+    @pytest.mark.queryspy(allow_n_plus_one=True)
+    @pytest.mark.asyncio
+    async def test_a_domain_on_file_claims_every_address_at_it(
+        self, async_db_session: AsyncSession, open_session: Any, dispatched: list[int]
+    ) -> None:
+        """A school writes through a platform from one address per teacher,
+        and a new teacher is a new address. ``@domain`` on a contact claims
+        them all, and nobody is offered as a stranger."""
+        school = await PartyService(async_db_session).create(
+            name="Example School",
+            kind="organization",
+            contact={"also": [{"label": "mail from", "value": "@School.example"}]},
+        )
+        for n, who in enumerate(("Ms A", "Mr B")):
+            data = eml_bytes(
+                message(
+                    sender=f"{who} via School <donotreply+{n}@school.example>",
+                    message_id=f"<t{n}@school.example>",
+                )
+            )
+            await ingest.ingest_mail(open_session, data=data, file_name=f"{n}.eml")
+
+        rows = await rows_of(async_db_session, MailMessage)
+        assert [row.party_id for row in rows] == [school.id, school.id]
+        assert await _cards(async_db_session) == []
+
+    @pytest.mark.asyncio
+    async def test_an_exact_address_beats_a_domain_claim(
+        self, async_db_session: AsyncSession, open_session: Any, dispatched: list[int]
+    ) -> None:
+        parties = PartyService(async_db_session)
+        await parties.create(
+            name="Example School",
+            kind="organization",
+            contact={"also": [{"label": "mail from", "value": "@school.example"}]},
+        )
+        nurse = await parties.create(
+            name="School Nurse",
+            kind="person",
+            contact={"email": "nurse@school.example"},
+        )
+        data = eml_bytes(message(sender="Nurse <nurse@school.example>"))
+        await ingest.ingest_mail(open_session, data=data, file_name="x.eml")
+
+        [row] = await rows_of(async_db_session, MailMessage)
+        assert row.party_id == nurse.id
+
     @pytest.mark.asyncio
     async def test_a_stranger_is_kept_and_named_nobody(
         self, async_db_session: AsyncSession, open_session: Any, dispatched: list[int]
@@ -309,3 +356,78 @@ class TestPaperIsFiledUnderTheSender:
         [link] = await rows_of(async_db_session, MailAttachment)
         assert await docs.tags_for(int(row.document_id)) == [party_tag(party_id)]
         assert await docs.tags_for(link.document_id) == [party_tag(party_id)]
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)
+    @pytest.mark.asyncio
+    async def test_a_domain_added_to_a_contact_adopts_what_it_already_sent(
+        self, async_db_session: AsyncSession, open_session: Any, dispatched: list[int]
+    ) -> None:
+        """The edit on the Contacts page is the way in: mail already on the
+        shelf from the domain is the contact's from then on."""
+        from app.services.documents.service import DocumentService
+        from app.services.matters.models.core import party_tag
+
+        for n in range(2):
+            data = eml_bytes(
+                message(
+                    sender=f"Teacher {n} <donotreply+{n}@school.example>",
+                    message_id=f"<t{n}@school.example>",
+                )
+            )
+            await ingest.ingest_mail(open_session, data=data, file_name=f"{n}.eml")
+        parties = PartyService(async_db_session)
+        school = await parties.create(name="Example School", kind="organization")
+
+        await parties.update(
+            int(school.id),
+            {"contact": {"also": [{"label": "mail from", "value": "@school.example"}]}},
+        )
+
+        rows = await rows_of(async_db_session, MailMessage)
+        assert [row.party_id for row in rows] == [school.id, school.id]
+        docs = DocumentService(async_db_session)
+        for row in rows:
+            assert await docs.tags_for(int(row.document_id)) == [
+                party_tag(int(school.id))
+            ]
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)
+    @pytest.mark.asyncio
+    async def test_a_domain_claims_only_addresses_at_it(
+        self, async_db_session: AsyncSession, open_session: Any, dispatched: list[int]
+    ) -> None:
+        """The suffix starts at the "@", and what is typed is matched as
+        characters: ``_`` is not a wildcard."""
+        for n, address in enumerate(("a@notschool.example", "b@schoolxexample")):
+            data = eml_bytes(message(sender=address, message_id=f"<o{n}@x.example>"))
+            await ingest.ingest_mail(open_session, data=data, file_name=f"{n}.eml")
+        parties = PartyService(async_db_session)
+        school = await parties.create(name="Example School", kind="organization")
+
+        for claim in ("@school_example", "@school.example"):
+            await parties.update(
+                int(school.id),
+                {"contact": {"also": [{"label": "mail from", "value": claim}]}},
+            )
+
+        rows = await rows_of(async_db_session, MailMessage)
+        assert [row.party_id for row in rows] == [None, None]
+
+
+def test_the_mail_models_alone_resolve_every_link() -> None:
+    """The worker's pull loads mail's ingest and what it imports, nothing
+    of matters. ``party_id`` points at matters' table, so mail's models
+    must bring it: without it the first flush raised
+    NoReferencedTableError and every pull failed."""
+    import subprocess
+    import sys
+
+    code = (
+        "import app.services.mail.ingest\n"
+        "import app.services.mail.models as m\n"
+        "for fk in m.MailMessage.__table__.foreign_keys: fk.column\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr[-600:]
