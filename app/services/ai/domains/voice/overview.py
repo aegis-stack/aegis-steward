@@ -30,7 +30,7 @@ from .catalog import (
     get_voice,
     speaking_model,
 )
-from .models import DEFAULT_TTS_VOICES, TTSProvider, install_line, unserved
+from .models import DEFAULT_TTS_VOICES, TTSProvider, install_line, server_url, unserved
 
 if TYPE_CHECKING:
     # Only a stack with a database has it; a voice-only one does not.
@@ -115,7 +115,7 @@ def blocked(provider: Any, found: dict[str, str | None]) -> str | None:
     its key (``missing_from``); None when it can run."""
     return (
         install_line(provider.id)
-        or unserved(provider.id, settings.SPEECH_BASE_URL)
+        or unserved(provider.id, server_url(provider.id, settings))
         or missing_from(provider_key(provider), found)
     )
 
@@ -150,7 +150,7 @@ def _price(row: Any) -> str | None:
     """A catalog price as per million in and out, as every model's is shown."""
     if row is None:
         return None
-    return format_price(row.input_price, row.output_price) or None
+    return format_price(row.input_price, row.output_price)
 
 
 def detail(*parts: Any) -> str:
@@ -228,7 +228,8 @@ def _in_use(
         engine.key,
         provider_name=engine.llm.served_by.name,
         detail=detail(
-            call_voice(live.realtime_model(engine), voice) or "its own voice",
+            call_voice(live.realtime_model(engine), voice, chained=live.chained(engine))
+            or "its own voice",
             f"reply {used.VOICE_REPLY}",
             f"check in {used.VOICE_LIVE_IDLE_SECONDS}s",
         ),

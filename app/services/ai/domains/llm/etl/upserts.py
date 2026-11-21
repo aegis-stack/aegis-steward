@@ -188,23 +188,35 @@ class UpsertMixin:
             result: SyncResult to update.
             dry_run: If True, don't persist changes.
         """
+        self._deploy(
+            model,
+            vendor,
+            result,
+            dry_run,
+            output_max_tokens=data.max_output_tokens or 4096,
+            function_calling=data.supports_function_calling,
+            structured_output=data.supports_structured_output,
+            input_cache=data.supports_prompt_caching,
+        )
+
+    def _deploy(
+        self,
+        model: LargeLanguageModel,
+        vendor: LLMOrg,
+        result: SyncResult,
+        dry_run: bool,
+        **capabilities: Any,
+    ) -> None:
+        """What ``vendor``'s deployment of ``model`` can do (``capabilities``,
+        LLMDeployment's fields): the cloud sync's merged catalog data, or
+        the local sync's engine report."""
         existing = self._deployment_cache.get((model.id, vendor.id))
 
         if existing:
             changed = any(
                 [
-                    self._update_if_changed(
-                        existing, "output_max_tokens", data.max_output_tokens or 4096
-                    ),
-                    self._update_if_changed(
-                        existing, "function_calling", data.supports_function_calling
-                    ),
-                    self._update_if_changed(
-                        existing, "structured_output", data.supports_structured_output
-                    ),
-                    self._update_if_changed(
-                        existing, "input_cache", data.supports_prompt_caching
-                    ),
+                    self._update_if_changed(existing, field, value)
+                    for field, value in capabilities.items()
                 ]
             )
 
@@ -220,10 +232,7 @@ class UpsertMixin:
                 speed=50,  # Default - would need benchmarks
                 intelligence=50,
                 reasoning=50,
-                output_max_tokens=data.max_output_tokens or 4096,
-                function_calling=data.supports_function_calling,
-                structured_output=data.supports_structured_output,
-                input_cache=data.supports_prompt_caching,
+                **capabilities,
             )
 
             if not dry_run:

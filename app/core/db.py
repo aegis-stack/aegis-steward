@@ -189,7 +189,7 @@ def _async_sqlite_take_over_transactions(
 
 
 # A session opened ``read_only`` (``get_async_session``) begins plain.
-READ_ONLY = "aegis_read_only"
+READ_ONLY = db_activity.READ_ONLY
 
 
 @event.listens_for(async_engine.sync_engine, "begin")
@@ -302,8 +302,9 @@ async def get_async_session(read_only: bool = False) -> AsyncGenerator[AsyncSess
             result = await session.exec(select(MyModel))
     """
     async with AsyncSessionLocal() as session:
-        if read_only:
-            await session.connection(execution_options={READ_ONLY: True})
+        if read_only:  # on its bind: no connection until it reads
+            sync = session.sync_session
+            sync.bind = sync.bind.execution_options(**{READ_ONLY: True})
         try:
             yield session
             await session.commit()

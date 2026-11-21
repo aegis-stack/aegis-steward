@@ -39,6 +39,7 @@ from .models import (
     VoiceInfo,
     VoicePreviewRequest,
     VoiceSettingsResponse,
+    uninstalled,
 )
 
 # STT submodule imports
@@ -109,6 +110,7 @@ __all__ = [
     "get_voice",
     "speaking_model",
     "get_stt_providers",
+    "uninstalled",
     "get_stt_models",
     "get_current_voice_config",
 ]

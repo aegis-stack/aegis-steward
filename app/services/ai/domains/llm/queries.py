@@ -21,6 +21,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.services.ai.models.llm import (
     LargeLanguageModel,
     LLMActiveSelection,
+    LLMDeployment,
     LLMModality,
     LLMOrg,
     LLMPrice,
@@ -182,8 +183,10 @@ async def catalog_models(
     limit: int | None = None,
     released_after: date | None = None,
     mode: str | None = "chat",
-) -> list[LargeLanguageModel]:
-    """Catalog rows newest-first with both orgs loaded.
+) -> list[tuple[LargeLanguageModel, bool | None]]:
+    """Catalog rows newest-first with both orgs loaded, each with whether
+    its serving org's deployment calls tools (None where none says), read
+    in the same statement.
 
     ``vendor`` is a substring match, ``vendors`` an exact whitelist.
     ``released_after`` keeps models released on or after that day; an
@@ -195,8 +198,13 @@ async def catalog_models(
     vendor's fresh catalog starve the others.
     """
     stmt = (
-        select(LargeLanguageModel)
+        select(LargeLanguageModel, LLMDeployment.function_calling)
         .join(LLMOrg, LargeLanguageModel.served_by_org_id == LLMOrg.id)
+        .outerjoin(
+            LLMDeployment,
+            (col(LLMDeployment.llm_id) == LargeLanguageModel.id)
+            & (col(LLMDeployment.org_id) == LLMOrg.id),
+        )
         .options(
             selectinload(LargeLanguageModel.served_by),
             selectinload(LargeLanguageModel.made_by),
@@ -229,7 +237,7 @@ async def catalog_models(
     )
     if limit is not None:
         stmt = stmt.limit(limit)
-    return list((await session.exec(stmt)).all())
+    return [(model, tools) for model, tools in (await session.exec(stmt)).all()]
 
 
 async def latest_prices_by_llm_ids(

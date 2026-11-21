@@ -346,7 +346,9 @@ def mock_async_session(llm_session: Session):
             return MockAsyncResult(self._session.exec(stmt))
 
     @asynccontextmanager
-    async def async_session_context() -> AsyncGenerator[MockAsyncSession]:
+    async def async_session_context(
+        read_only: bool = False,
+    ) -> AsyncGenerator[MockAsyncSession]:
         yield MockAsyncSession(llm_session)
 
     return async_session_context
@@ -489,10 +491,10 @@ class TestListModels:
         the others out - it must not loop a session per vendor."""
         sessions = 0
 
-        def counting_factory():
+        def counting_factory(read_only: bool = False):
             nonlocal sessions
             sessions += 1
-            return mock_async_session()
+            return mock_async_session(read_only=read_only)
 
         with patch(
             "app.services.ai.domains.llm.catalog.get_async_session",
@@ -968,4 +970,4 @@ async def test_the_catalog_can_start_at_a_release_date(async_db_session) -> None
     rows = await queries.catalog_models(
         async_db_session, released_after=date(2026, 1, 1)
     )
-    assert [r.model_id for r in rows] == ["new"]
+    assert [model.model_id for model, _ in rows] == ["new"]

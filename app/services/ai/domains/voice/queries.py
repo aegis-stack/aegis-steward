@@ -5,7 +5,8 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.services.ai.models.llm import LargeLanguageModel, LLMOrg
+from app.models.conversation import ConversationMessage
+from app.services.ai.models.llm import LargeLanguageModel, LLMDeployment, LLMOrg
 from app.services.ai.models.voice import (
     LiveEngine,
     VoiceProfile,
@@ -68,8 +69,9 @@ async def all_engines(session: AsyncSession) -> list[LiveEngine]:
 
 
 async def enabled_engines(session: AsyncSession) -> list[LiveEngine]:
-    """The engines on offer, in their order, each with its catalog model
-    and the org that serves it."""
+    """The engines on offer, in their order, each with its catalog model,
+    the org that serves it and its deployments (what it can write)."""
+    llm = selectinload(LiveEngine.llm)  # type: ignore[arg-type]
     return list(
         (
             await session.exec(
@@ -77,9 +79,8 @@ async def enabled_engines(session: AsyncSession) -> list[LiveEngine]:
                 .where(col(LiveEngine.is_enabled))
                 .order_by(col(LiveEngine.sort_order))
                 .options(
-                    selectinload(LiveEngine.llm).selectinload(  # type: ignore[arg-type]
-                        LargeLanguageModel.served_by  # type: ignore[arg-type]
-                    )
+                    llm.selectinload(LargeLanguageModel.served_by),  # type: ignore[arg-type]
+                    llm.selectinload(LargeLanguageModel.deployments),  # type: ignore[arg-type]
                 )
             )
         ).all()
@@ -97,16 +98,30 @@ async def engine_for_model(session: AsyncSession, model_id: str) -> LiveEngine |
     ).first()
 
 
-async def model_vendor(session: AsyncSession, model_id: str) -> tuple[int, str] | None:
-    """A catalog model's id and the slug of the org that serves it."""
+async def model_vendor(
+    session: AsyncSession, model_id: str
+) -> tuple[int, str, str, bool | None] | None:
+    """A catalog model's id, the slug of the org that serves it, its mode
+    ("realtime", "chat", ...) and whether that org's deployment of it calls
+    tools (None where none says)."""
     row = (
         await session.exec(
-            select(LargeLanguageModel.id, LLMOrg.slug)
+            select(
+                LargeLanguageModel.id,
+                LLMOrg.slug,
+                LargeLanguageModel.mode,
+                LLMDeployment.function_calling,
+            )
             .join(LLMOrg, col(LargeLanguageModel.served_by_org_id) == LLMOrg.id)
+            .outerjoin(
+                LLMDeployment,
+                (col(LLMDeployment.llm_id) == LargeLanguageModel.id)
+                & (col(LLMDeployment.org_id) == LLMOrg.id),
+            )
             .where(LargeLanguageModel.model_id == model_id)
         )
     ).first()
-    return (row[0], row[1]) if row and row[0] is not None else None
+    return (row[0], row[1], row[2], row[3]) if row and row[0] is not None else None
 
 
 async def catalog_ids(session: AsyncSession, model_ids: list[str]) -> dict[str, int]:
@@ -117,3 +132,22 @@ async def catalog_ids(session: AsyncSession, model_ids: list[str]) -> dict[str, 
         )
     )
     return {model_id: llm_id for model_id, llm_id in rows.all() if llm_id is not None}
+
+
+async def first_word_waits(
+    session: AsyncSession, model_id: str, limit: int
+) -> list[int]:
+    """How long callers waited for the first word back (ms), on the last
+    ``limit`` timed call turns on ``model_id``, newest first."""
+    meta = ConversationMessage.meta_data
+    waited = meta["first_word_ms"].as_integer()  # type: ignore[index]
+    rows = await session.exec(
+        select(waited)
+        .where(
+            meta["model"].as_string() == model_id,  # type: ignore[index]
+            waited.is_not(None),
+        )
+        .order_by(col(ConversationMessage.timestamp).desc())
+        .limit(limit)
+    )
+    return [int(ms) for ms in rows.all()]

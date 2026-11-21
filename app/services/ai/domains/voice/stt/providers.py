@@ -15,10 +15,12 @@ from ..models import (
     DEFAULT_STT_MODELS,
     AudioFormat,
     AudioInput,
+    CannotRunError,
     STTProvider,
     TranscriptionResult,
     TranscriptionSegment,
     not_installed,
+    unserved,
 )
 
 logger = logging.getLogger(__name__)
@@ -421,6 +423,7 @@ def get_stt_provider(
     provider: STTProvider,
     api_key: str | None = None,
     model: str | None = None,
+    server_url: str | None = None,
     **kwargs: Any,
 ) -> BaseSTTProvider:
     """Factory function to create an STT provider instance.
@@ -429,6 +432,7 @@ def get_stt_provider(
         provider: The STT provider type to create.
         api_key: Optional API key for cloud providers.
         model: Optional model name/size to use.
+        server_url: A hearing server's address (``hearing_server``).
         **kwargs: Additional provider-specific arguments.
 
     Returns:
@@ -438,9 +442,13 @@ def get_stt_provider(
         ValueError: If provider type is not supported.
         RuntimeError: If an in-process provider's packages are not installed.
     """
-    if refused := not_installed(provider):
-        raise RuntimeError(refused)
+    if refused := not_installed(provider) or unserved(provider, server_url):
+        raise CannotRunError(refused)
     model = model or DEFAULT_STT_MODELS[provider]
+    if provider == STTProvider.HEARING_SERVER:
+        from .server import ServerSTTProvider  # it imports this module
+
+        return ServerSTTProvider(base_url=server_url or "", model=model)
     if provider == STTProvider.OPENAI_WHISPER:
         return OpenAIWhisperProvider(api_key=api_key, model=model, **kwargs)
     elif provider == STTProvider.WHISPER_LOCAL:

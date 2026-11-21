@@ -8,9 +8,11 @@ audio input handling, and voice chat responses.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core import speech_server
 from app.core.discovery import present
 from app.core.voice_settings import TTS_SPEED_MAX, TTS_SPEED_MIN, setting_default
 
@@ -23,6 +25,7 @@ class STTProvider(str, Enum):
     FASTER_WHISPER = "faster_whisper"  # SYSTRAN faster-whisper (optimized local)
     GROQ_WHISPER = "groq_whisper"  # Groq API (ultra-fast)
     PARAKEET = "parakeet"  # NVIDIA Parakeet in the app (onnx-asr)
+    HEARING_SERVER = "hearing_server"  # a transcription server you run
 
 
 class TTSProvider(str, Enum):
@@ -86,6 +89,7 @@ DEFAULT_STT_MODELS: dict[STTProvider, str] = {
     STTProvider.WHISPER_LOCAL: "openai/whisper-base",
     STTProvider.FASTER_WHISPER: "base",
     STTProvider.PARAKEET: "nemo-parakeet-tdt-0.6b-v3",  # as onnx-asr names it
+    STTProvider.HEARING_SERVER: "parakeet-tdt-0.6b-v3",  # as its server names it
 }
 # The setting holding each cloud provider's key; a provider not here runs
 # locally and needs none.
@@ -135,11 +139,26 @@ def not_installed(provider: str) -> str | None:
     return f"{name} is not installed: {install}" if install else None
 
 
+# Each provider a server of yours runs, and the setting holding its address:
+# the one home of which server a provider is reached at.
+SERVED: dict[str, str] = {
+    TTSProvider.LOCAL_SERVER: "SPEECH_BASE_URL",
+    STTProvider.HEARING_SERVER: "HEARING_BASE_URL",
+}
+
+
+def server_url(provider: str, settings: Any) -> str | None:
+    """Where this process reaches ``provider``'s server (``SERVED``); None
+    for a provider no server of yours runs."""
+    setting = SERVED.get(provider)
+    return speech_server.reach(settings, setting) if setting else None
+
+
 def unserved(provider: str, url: str | None) -> str | None:
     """Why a provider reached over the network cannot run: its server's
-    address (SPEECH_BASE_URL, ``url``) is not set."""
-    served = provider == TTSProvider.LOCAL_SERVER
-    return "SPEECH_BASE_URL missing" if served and not url else None
+    address (``SERVED``, ``url``) is not set."""
+    setting = SERVED.get(provider)
+    return f"{setting} missing" if setting and not url else None
 
 
 class CannotRunError(RuntimeError):
@@ -272,6 +291,11 @@ class SpeechRequest(BaseModel):
         description="How to say it - tone, emotion, pacing (a model that "
         "steers them); "
         "None = TTS_INSTRUCTIONS",
+    )
+    format: AudioFormat | None = Field(
+        default=None,
+        description="The audio wanted, from a provider that picks one "
+        "(OpenAI); None = its own (TTS_FORMATS). Every other speaks WAV",
     )
 
 

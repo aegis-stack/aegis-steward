@@ -14,8 +14,6 @@ from app.services.ai.domains.chat.attachments import (
     LiftedTurn,
     prepare_turn,
 )
-from app.services.ai.domains.chat.self_context import current_turn
-from app.services.ai.domains.chat.summary import enqueue_fold
 from app.services.ai.domains.chat.titles import conversation_title
 from app.services.ai.domains.llm.config import AIServiceConfig
 from app.services.ai.domains.spend.calls import handed_off_call
@@ -238,7 +236,3 @@ class ChatMixin(TurnMixin):
 
         # Save conversation
         await self.conversation_manager.save_conversation(conversation)
-        # Turns that left this one's window fold into the running summary,
-        # on the worker (``summary``).
-        if (stamp := current_turn()) is not None and stamp.fold_to:
-            await enqueue_fold(conversation.id, stamp.fold_to)

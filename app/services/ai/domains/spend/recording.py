@@ -92,8 +92,8 @@ async def _rates(model: str) -> llm_queries.Rates | None:
     when it is not priced or the read fails: a cost is never worth failing
     the call it describes."""
     bare = _bare_model_name(model)
-    try:
-        async with get_async_session() as session:
+    try:  # a read: it must not wait on a caller's open session
+        async with get_async_session(read_only=True) as session:
             return await llm_queries.price_for_model(session, bare)
     except Exception as e:
         logger.warning("Failed to read a model's price", error=str(e), model=bare)

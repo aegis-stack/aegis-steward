@@ -31,6 +31,7 @@ def create_web_frontend_app() -> APIRouter:
     router = APIRouter()
 
     from app.components.web_frontend.routes.chat import router as chat_router
+    from app.components.web_frontend.routes.chat import sockets as chat_sockets
     from app.components.web_frontend.routes.contact_faces import (
         router as contact_faces_router,
     )
@@ -85,6 +86,7 @@ def create_web_frontend_app() -> APIRouter:
     router.include_router(mail_router)
     router.include_router(icons_router)
     router.include_router(chat_router, include_in_schema=False)
+    router.include_router(chat_sockets)
     # The change queue's approval cards (the signed-in user's, not the
     # Overseer's alone), on the stacks that ship the queue.
     if importlib.util.find_spec(CHANGES) is not None:

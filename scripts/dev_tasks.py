@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -52,10 +53,79 @@ def _env_file() -> Path:
     return Path(named) if named else _DOTENV
 
 
+# Kokoro-FastAPI runs on the host, on its GPU (a Mac's, which Docker cannot
+# reach), and compose starts containers only: serve starts it with make
+# kokoro's command and keeps its pid here; stop stops it.
+_SPEECH_PID = Path(".kokoro.pid")
+_SPEECH_LOG = Path(".kokoro.log")
+
+
+def _env_value(key: str) -> str | None:
+    """One variable of the containers' env file (``_env_file``)."""
+    env_file = _env_file()
+    return dotenv_values(env_file).get(key) if env_file.exists() else None
+
+
+def _speech_checkout() -> bool:
+    """A Kokoro-FastAPI checkout at SPEECH_SERVER_DIR, or its default, as
+    ``inference kokoro`` finds it."""
+    from app.core.speech_settings import SpeechServerSettings
+
+    named = _env_value("SPEECH_SERVER_DIR") or (
+        SpeechServerSettings.model_fields["SPEECH_SERVER_DIR"].default
+    )
+    return Path(named).expanduser().is_dir()
+
+
+def _speech_running() -> bool:
+    """The Kokoro-FastAPI an earlier serve started (``serve-bg``) is still up."""
+    try:
+        os.kill(int(_SPEECH_PID.read_text()), 0)
+    except (FileNotFoundError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True  # alive, as someone else
+    return True
+
+
+def _start_speech() -> None:
+    """Kokoro-FastAPI in its own process group, logging to ``.kokoro.log``:
+    Ctrl-C on serve reaches compose, and serve stops it after. One already
+    up is kept: a second could not bind its port, and its pid would hide
+    the first from stop."""
+    if not _speech_checkout() or _speech_running():
+        return
+    with _SPEECH_LOG.open("ab") as log:
+        started = subprocess.Popen(
+            ["uv", "run", "aegis-steward", "inference", "kokoro"],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    _SPEECH_PID.write_text(str(started.pid))
+    print(f"Kokoro-FastAPI started on the host (log: {_SPEECH_LOG})")
+
+
+def _signal_group(pid: int) -> None:
+    """Its start script and the server it runs; Windows has no groups."""
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(pid, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass  # already gone
+
+
+def _stop_speech() -> None:
+    if _SPEECH_PID.exists():
+        _signal_group(int(_SPEECH_PID.read_text()))
+        _SPEECH_PID.unlink()
+
+
 def _plaid_configured() -> bool:
     """The tunnel carries only Plaid's webhook, so it starts only with Plaid."""
-    env_file = _env_file()
-    return env_file.exists() and bool(dotenv_values(env_file).get("PLAID_CLIENT_ID"))
+    return bool(_env_value("PLAID_CLIENT_ID"))
 
 
 def _aegis_checkout() -> str | None:
@@ -125,6 +195,7 @@ def serve(*, detach: bool = False) -> None:
         ollama=False,
         browser=False,
         storage=False,
+        hearing=True,
     )
     env = {**os.environ, **{key: str(value) for key, value in ports.items()}}
     # `make serve ENGINE=granian LOOP=rloop`: make exports command-line
@@ -141,7 +212,20 @@ def serve(*, detach: bool = False) -> None:
         cmd.append("-d")
     env["HOST_OS"], env["HOST_OS_URL"] = _host_os()
     _deploy_agent_ready(env)
-    subprocess.run(cmd, env=env, check=True)
+    _start_speech()
+    try:
+        subprocess.run(cmd, env=env, check=True)
+    finally:
+        if not detach:
+            _stop_speech()
+
+
+def stop() -> None:
+    print("Stopping services...")
+    _stop_speech()
+    subprocess.run(
+        [*_COMPOSE_DEV, "--profile", "dev", "down", "--remove-orphans"], check=True
+    )
 
 
 def serve_bg() -> None:
@@ -255,6 +339,7 @@ def main(argv: list[str] | None = None) -> None:
             "serve",
             "serve-bg",
             "serve-prod",
+            "stop",
             "docs",
             "migrate-reset",
         ],
@@ -268,6 +353,8 @@ def main(argv: list[str] | None = None) -> None:
             serve_bg()
         elif args.action == "serve-prod":
             serve_prod()
+        elif args.action == "stop":
+            stop()
         elif args.action == "docs":
             docs()
         else:

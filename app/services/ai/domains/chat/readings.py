@@ -32,7 +32,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.core.figures import FIGURES
 from app.core.tools import Refused, register_tool
@@ -59,11 +59,22 @@ class ReadingItem(BaseModel):
 
 
 class Reading(BaseModel):
-    """One recorded extraction from an attached image (or document)."""
+    """One recorded extraction from an attached image (or document): its
+    line items, and the source's own fields - letterhead, address, phone,
+    dates, totals, account numbers. A reading is the only copy of the
+    image left (#286: a dentist's receipt kept the visit and lost the
+    address and phone, so it took a re-upload)."""
 
     kind: str = "receipt"
     title: str = Field(min_length=1)
-    items: list[ReadingItem] = Field(min_length=1)
+    items: list[ReadingItem] = Field(default_factory=list)
+    fields: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _says_something(self) -> Reading:
+        if not self.items and not self.fields:
+            raise ValueError("a reading needs its line items, its fields, or both")
+        return self
 
 
 def kept_readings(raw: list[dict[str, Any]]) -> list[Reading]:
@@ -93,7 +104,10 @@ class Recorded(BaseModel):
 
 
 async def record_reading(
-    title: str, items: list[dict[str, Any]], kind: str = "receipt"
+    title: str,
+    items: list[dict[str, Any]],
+    kind: str = "receipt",
+    fields: dict[str, str] | None = None,
 ) -> Recorded | Refused:
     """Durably record what you just read out of an attached image.
 
@@ -103,6 +117,11 @@ async def record_reading(
     'note'). Preserve the source's own grouping in 'group' (a shipment
     like "Arriving Thu, Aug 27", a sub-receipt, a page): the groups are
     what map items to the right charge later.
+    'fields' is every other visible fact, by its label - the issuer's
+    name, address, phone, email, website, dates, totals, tax, account
+    or invoice numbers - whether or not this question needs them: a
+    later question will, and the image will be gone. A document with no
+    line items (a letter, a card) is recorded with 'fields' alone.
     The image itself is gone after this turn; this record is what
     later turns (and you) get instead. Returns the count recorded, or
     an 'error' explaining exactly what to fix."""
@@ -110,7 +129,7 @@ async def record_reading(
     if staged is None:
         return Refused(error="No conversation turn is active; nothing was recorded.")
     try:
-        reading = Reading(kind=kind, title=title, items=items)
+        reading = Reading(kind=kind, title=title, items=items, fields=fields or {})
     except ValidationError as e:
         return Refused(error=f"invalid reading: {e}")
     staged.append(reading)
@@ -168,6 +187,7 @@ def format_readings(readings: list[Reading] | None) -> str | None:
     ]
     for reading in readings:
         lines.append(f"\n### {reading.title} ({reading.kind})")
+        lines.extend(f"{label}: {value}" for label, value in reading.fields.items())
         current_group: str | None = None
         for item in reading.items:
             group = item.group
@@ -192,7 +212,7 @@ def format_readings(readings: list[Reading] | None) -> str | None:
 register_tool(
     "record_reading",
     record_reading,
-    description="Durably record line items read from an attached image",
+    description="Durably record everything read from an attached image",
     effect="writes",
     replace=True,
 )

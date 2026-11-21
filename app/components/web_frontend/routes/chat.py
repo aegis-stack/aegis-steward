@@ -1,7 +1,8 @@
 """Steward's own mount of the chat surface (``chat_surface.ChatSurface``):
 the Chat section's page and the Illiana drawer on every app page, answering
 as Illiana for the household. Every route but the page is the surface's
-(``routes/partials/chat_surface.py``); the request gate already guards them.
+(``routes/partials/chat_surface.py``), the call's socket too
+(``chat_live.live_router``); the request gate already guards them.
 """
 
 from fastapi import Request
@@ -11,6 +12,7 @@ from app.components.web_frontend import chat_surface
 from app.components.web_frontend.chat_surface import ChatSurface
 from app.components.web_frontend.nav import section
 from app.components.web_frontend.rendering import render
+from app.components.web_frontend.routes.partials.chat_live import live_router
 from app.components.web_frontend.routes.partials.chat_surface import chat_router
 from app.services.finance.service import STANDALONE_USER_ID
 
@@ -30,6 +32,8 @@ async def _signed_in() -> None:
 
 
 router = chat_router(STEWARD, _signed_in)
+# The page's live call (``chat_live``): a socket, included beside ``router``.
+sockets = live_router(STEWARD, _signed_in)
 
 
 @router.get("", response_class=HTMLResponse, include_in_schema=False)

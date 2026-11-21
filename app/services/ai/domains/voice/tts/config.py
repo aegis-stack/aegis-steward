@@ -9,7 +9,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, Field
 
-from app.core import secrets, speech_server
+from app.core import secrets
 from app.core.voice_settings import TTS_SPEED_MAX, TTS_SPEED_MIN, setting_default
 
 from ..models import (
@@ -19,6 +19,7 @@ from ..models import (
     TTS_KEYS,
     TTSProvider,
     not_installed,
+    server_url,
     unserved,
 )
 
@@ -58,7 +59,7 @@ class TTSConfig(BaseModel):
             voice=getattr(settings, "TTS_VOICE", None),
             speed=getattr(settings, "TTS_SPEED", None) or setting_default("TTS_SPEED"),
             instructions=getattr(settings, "TTS_INSTRUCTIONS", None),
-            server_url=speech_server.reach(settings),
+            server_url=server_url(provider, settings),
             server=getattr(settings, "SPEECH_SERVER", setting_default("SPEECH_SERVER")),
         )
 

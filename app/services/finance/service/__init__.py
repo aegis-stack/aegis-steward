@@ -64,7 +64,10 @@ if TYPE_CHECKING:
         load_finance_agent_fixtures,
         run_analyst_note,
     )
-    from app.services.finance.domains.detection.analyst.live_engines import ENGINE_SEEDS
+    from app.services.finance.domains.detection.analyst.live_engines import (
+        ENGINE_SEEDS,
+        HER_REALTIME_DEFAULTS,
+    )
     from app.services.finance.domains.detection.analyst.prompts import LIVE_SIGN_OFF
     from app.services.finance.domains.detection.analyst.shared import (
         FINANCE_VOICE_AGENT_SLUG,
