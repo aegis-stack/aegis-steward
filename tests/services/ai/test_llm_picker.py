@@ -1,5 +1,7 @@
 """The chat composer's model selector: pure display/grouping helpers."""
 
+import pytest
+
 from app.core.model_picker import (
     family_display_name,
     format_price,
@@ -215,8 +217,9 @@ class TestALocalModelIsFreeNotUnpriced:
     looking like the one we failed to price gets it read as the risky
     choice rather than the free one."""
 
-    def test_a_local_model_costs_nothing_and_says_so(self) -> None:
-        model = {"vendor": "ollama", "input_price": None, "output_price": None}
+    @pytest.mark.parametrize("vendor", ["ollama", "llamacpp"])
+    def test_a_local_model_costs_nothing_and_says_so(self, vendor: str) -> None:
+        model = {"vendor": vendor, "input_price": None, "output_price": None}
 
         assert is_local_model(model)
         assert format_price(None, None, local=True) == "Free"
