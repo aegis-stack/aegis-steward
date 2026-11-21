@@ -56,3 +56,5 @@ class SpeechServerSettings(InferenceEngineSettings):
     SPEECH_BASE_URL: str | None = "http://host.docker.internal:8880/v1"
     # The host port ``make serve`` published its container on (``.env.ports``).
     SPEECH_HOST_PORT: int | None = None
+    # A Kokoro-FastAPI checkout on the host, for ``make kokoro``.
+    SPEECH_SERVER_DIR: str = "~/Kokoro-FastAPI"
