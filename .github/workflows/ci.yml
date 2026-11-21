@@ -5,6 +5,8 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # The merge queue tests each queued merge; Illiana reads the pull request only.
+  merge_group:
   # For CodeQL: a week with no push is still scanned.
   schedule:
     - cron: '0 6 * * 1'
