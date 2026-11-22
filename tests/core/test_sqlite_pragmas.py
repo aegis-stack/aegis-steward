@@ -185,6 +185,31 @@ class TestTheLockIsTakenUpFront:
         assert not offenders, f"bare BEGIN: {offenders}"
 
 
+class TestAReadOnlySession:
+    """``get_async_session(read_only=True)`` begins plain, and only once it
+    is used: a read the cache answers opens no connection at all."""
+
+    async def test_it_opens_nothing_until_it_reads(self, holder: Any) -> None:
+        from app.core.db import get_async_session
+
+        engine = holder.bind.sync_engine
+        checkouts: list[object] = []
+
+        def checked_out(*_: object) -> None:
+            checkouts.append(1)
+
+        event.listen(engine, "checkout", checked_out)
+        try:
+            async with get_async_session(read_only=True):
+                pass
+            assert checkouts == []
+            async with get_async_session(read_only=True) as session:
+                await session.exec(text("select 1"))  # type: ignore[call-overload]
+            assert len(checkouts) == 1
+        finally:
+            event.remove(engine, "checkout", checked_out)
+
+
 class TestTheModeTheStackIntends:
     """``journal_mode`` lives in the FILE and survives every restart, so
     it is asked for once at startup rather than on every connection.

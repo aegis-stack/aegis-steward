@@ -239,6 +239,30 @@ services:
     profiles:
       - dev
       - prod
+  # Hearing server (lbedner/aegis-stack#2162): Parakeet TDT 0.6B v3 on the
+  # CPU behind OpenAI's transcription API, built from groxaxo's repo at a
+  # pinned commit (it publishes no image). The app hears through it at
+  # HEARING_BASE_URL=http://hearing:5092/v1.
+  hearing:
+    build:
+      context: https://github.com/groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai.git#06464cd06a0f75426ce46e94c2d04ee7e26f48c0
+      dockerfile: Dockerfile.cpu
+    image: aegis-hearing:06464cd
+    pull_policy: build  # built here, never pulled: no registry has it
+    hostname: hearing
+    environment:
+      PARAKEET_USE_GPU: "false"
+      PARAKEET_DEFAULT_MODEL: parakeet-tdt-0.6b-v3
+    volumes:
+      - hearing-models:/app/models
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+    profiles:
+      - dev
+      - prod
   # TRAEFIK REVERSE PROXY
 
   traefik:
@@ -311,6 +335,7 @@ services:
 
 volumes:
   aegis-data:
+  hearing-models:
   storage-data:
   backup-data:
   traefik-letsencrypt:

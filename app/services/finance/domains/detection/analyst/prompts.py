@@ -1,11 +1,12 @@
-from app.services.finance.domains.detection.analyst.prompt_taxes import TAXES
-
 """The seed prompts and their sampling budgets.
 
 SEED CONTENT ONLY: the agent rows in the database are the runtime source
 (``resolve_agent`` is DB-first, and dashboard edits win). This file is what
 first populates those rows, and the fallback when a row is missing.
 """
+
+from app.services.ai.service import live_engines
+from app.services.finance.domains.detection.analyst.prompt_taxes import TAXES
 
 # Sampling: low temperature because the job is faithful restatement, not
 # invention. The token ceiling covers a full sectioned report (~300 words is
@@ -296,7 +297,14 @@ A question that names a payee and an amount is one call, no filtering:
 # tokens, which is most of what a faster model saves.
 FINANCE_VOICE_TEMPERATURE = FINANCE_CHAT_TEMPERATURE
 FINANCE_VOICE_MAX_TOKENS = 2_000  # still room for a code-mode script
-FINANCE_VOICE_SYSTEM_PROMPT = """\
+# What only she does on a spoken turn or a call: a change she proposes is a
+# card to approve, said in a sentence.
+PROPOSE = (
+    "- If you propose a change, say in one sentence what it is; the card "
+    "appears on their screen to approve."
+)
+FINANCE_VOICE_SYSTEM_PROMPT = (
+    """\
 ## THIS TURN IS SPOKEN
 
 The person asked this aloud, and your answer will be read out by a voice. \
@@ -312,8 +320,9 @@ it helps and say its point in a sentence.
 Friday" or "September 30th".
 - One or two figures, not a list. If there is more, say what else you can \
 tell them and let them ask.
-- If you propose a change, say in one sentence what it is; the card appears \
-on their screen to approve."""
+"""
+    + PROPOSE
+)
 
 
 # How she ends a live call: said last, and listened for by the page, which
@@ -350,21 +359,7 @@ nothing more to ask - say a short goodbye that ends with exactly \
 # A realtime engine's own section (#273): the model hears, thinks with her
 # tools, and speaks the answer itself, and her voice agent's prompt is
 # mostly the chat prompt below it - so this leads, and says it is a call.
-FINANCE_REALTIME_INSTRUCTIONS = f"""\
-## THIS IS A LIVE VOICE CALL
-
-You are talking with them out loud, in real time. Everything below still \
-applies - your role, your tools, how you compute and how you propose \
-changes - except how you answer, which this section decides:
-
-- One or two short sentences a reply. Lead with the answer.
-- Never read out a list, a table or markdown. Round money to the dollar \
-and say dates the way a person would.
-- If there is more, say you can tell them more and let them ask.
-- Before you look something up, say a few words ("Let me check") so there \
-is no silence.
-- If you propose a change, say in one sentence what it is; the card is on \
-their screen to approve.
-- When they are done - a goodbye, "that's all", thanks with nothing more \
-to ask - say a short goodbye that ends with exactly "{LIVE_SIGN_OFF}" \
-Never say those words at any other time."""
+# The template's call manners (cards, no announced lookups, end_call), with
+# what only she does: a copy of them fell behind, and on a call she said
+# "charting them now" and drew nothing (2026-11-21).
+FINANCE_REALTIME_INSTRUCTIONS = f"{live_engines.LIVE_CALL_INSTRUCTIONS}\n{PROPOSE}"

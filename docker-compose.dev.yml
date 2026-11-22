@@ -59,6 +59,11 @@ services:
       # container still listens on 6379 for in-network clients.
       - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
 
+  hearing:
+    ports:
+      # Host port auto-selected by `make serve` (HEARING_HOST_PORT).
+      - "127.0.0.1:${HEARING_HOST_PORT:-5092}:5092"
+
   traefik:
     volumes:
       - ./traefik/traefik.dev.yml:/etc/traefik/traefik.yml:ro

@@ -44,6 +44,9 @@ class CatalogModel(BaseModel):
     lab: str | None = None
     # What kind of model: "chat", or a voice kind (LargeLanguageModel.mode).
     mode: str = "chat"
+    # Whether its serving org's deployment calls tools (LLMDeployment);
+    # None where no deployment says.
+    function_calling: bool | None = None
 
 
 class LLMListResult(CatalogModel):
@@ -102,8 +105,9 @@ async def list_models(
     """
     if vendors is not None and not vendors:
         return []
-    async with get_async_session() as session:
-        models = await queries.catalog_models(
+    # A read: no write lock, so a caller holding one does not wait on it.
+    async with get_async_session(read_only=True) as session:
+        rows = await queries.catalog_models(
             session,
             pattern=pattern,
             vendor=vendor,
@@ -115,30 +119,35 @@ async def list_models(
             mode=mode,
         )
         if vendors:
-            models = _capped_per_vendor(models, limit)
+            rows = _capped_per_vendor(rows, limit)
         prices = await queries.latest_prices_by_llm_ids(
-            session, [m.id for m in models if m.id is not None]
+            session, [m.id for m, _ in rows if m.id is not None]
         )
-    return [_list_result(model, prices.get(model.id or -1)) for model in models]
+    return [
+        _list_result(model, prices.get(model.id or -1), tools) for model, tools in rows
+    ]
 
 
 def _capped_per_vendor(
-    models: list[LargeLanguageModel], limit: int
-) -> list[LargeLanguageModel]:
+    rows: list[tuple[LargeLanguageModel, bool | None]], limit: int
+) -> list[tuple[LargeLanguageModel, bool | None]]:
     """``limit`` newest per vendor, applied AFTER the fetch: a SQL limit
     under the global newest-first ordering would let one vendor's fresh
     catalog starve the others entirely."""
     per_vendor: dict[str, int] = {}
     capped = []
-    for model in models:
+    for row in rows:
+        model = row[0]
         name = model.served_by.name if model.served_by else ""
         per_vendor[name] = per_vendor.get(name, 0) + 1
         if per_vendor[name] <= limit:
-            capped.append(model)
+            capped.append(row)
     return capped
 
 
-def _list_result(model: LargeLanguageModel, price: LLMPrice | None) -> LLMListResult:
+def _list_result(
+    model: LargeLanguageModel, price: LLMPrice | None, tools: bool | None
+) -> LLMListResult:
     return LLMListResult(
         model_id=model.model_id,
         title=model.title,
@@ -154,6 +163,7 @@ def _list_result(model: LargeLanguageModel, price: LLMPrice | None) -> LLMListRe
         if model.released_on
         else None,
         mode=model.mode,
+        function_calling=tools,
     )
 
 

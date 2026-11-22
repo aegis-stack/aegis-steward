@@ -3016,7 +3016,7 @@
     },
     {
       "kind": "repeated_statement",
-      "label": "SELECT ... FROM large_language_model JOIN llm_org ON large_language_model.served_by_org_id = llm_org.id WHERE large_language_model.mode = :mode_1 AND large_language_model.enabled = true ORDER BY large_language_model.released_on DESC NULLS LAST, large_language_model.model_id LIMIT :param_1",
+      "label": "SELECT ... FROM large_language_model JOIN llm_org ON large_language_model.served_by_org_id = llm_org.id LEFT OUTER JOIN llm_deployment ON llm_deployment.llm_id = large_language_model.id AND llm_deployment.org_id = llm_org.id WHERE large_language_model.mode = :mode_1 AND large_language_model.enabled = true ORDER BY large_language_model.released_on DESC NULLS LAST, large_language_model.model_id LIMIT :param_1",
       "file": "app/services/ai/domains/llm/queries.py",
       "function": "catalog_models"
     },

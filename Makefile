@@ -43,9 +43,8 @@ stop-prod: ## Stop the production-profile services
 	@echo "Stopping production services..."
 	@$(COMPOSE_PROD) --profile prod down --remove-orphans
 
-stop: ## Gracefully stop all services
-	@echo "Stopping services..."
-	@$(COMPOSE_DEV) --profile dev down --remove-orphans
+stop: ## Gracefully stop all services (and the Kokoro-FastAPI serve started)
+	@uv run python scripts/dev_tasks.py stop
 
 clean: ## Clean up project containers, networks, volumes, and images
 	@echo "Cleaning up project Docker resources..."

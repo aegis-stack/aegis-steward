@@ -14,31 +14,30 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from pydantic_ai.messages import (
-    FunctionToolCallEvent,
-    FunctionToolResultEvent,
-    PartEndEvent,
-    RealtimeTurnCompleteEvent,
-    SpeechPart,
-)
+from pydantic_ai.messages import ModelMessage, RealtimeSessionErrorEvent
 from pydantic_ai.toolsets import FunctionToolset
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.log import logger
-from app.services.ai.domains.chat.cards import attach_cards, card_stage
+from app.services.ai.domains.chat.cards import card_stage
+from app.services.ai.domains.chat.chat_kit import ChatMessage, to_model_history
+from app.services.ai.domains.chat.chat_kit.models import ChatRole
 from app.services.ai.domains.chat.readings import reading_stage
 from app.services.ai.domains.chat.user_memory import memory_user
 from app.services.ai.domains.spend import calls
 from app.services.ai.domains.voice import live_engines
-from app.services.ai.domains.voice.call_turns import save_turn
+from app.services.ai.domains.voice.call_turns import (
+    END_CALL as END_CALL,  # what the call path reads it as
+)
+from app.services.ai.domains.voice.call_turns import TurnLog, end_call, save_turn
+from app.services.ai.domains.voice.cascade import call as cascade
 from app.services.ai.domains.voice.catalog import GEMINI_PREBUILT, get_voice
 from app.services.ai.domains.voice.live_engines import is_gpt_live
 from app.services.ai.domains.voice.models import TTSProvider
 from app.services.ai.domains.voice.spoken import pronunciation_instructions
 from app.services.ai.models import AIProvider, MessageRole
-from app.services.ai.service.trace import record_tool_call, record_tool_result
 
 # What OpenAI transcribes the caller's side with: a saved turn needs both
 # sides, and only OpenAI's realtime models need asking.
@@ -62,75 +61,19 @@ def _elapsed(started: datetime) -> float:
     return (datetime.now(UTC) - started).total_seconds()
 
 
-def end_call() -> str:
-    """End the call. Use it once they have said they are done - a goodbye,
-    "that's all", thanks with nothing more to ask - right after your short
-    goodbye, and say nothing after it. Never on a turn with no words of
-    theirs in it (a noise, a breath, your own voice heard back): that is
-    not a goodbye, so carry on or ask what they meant."""
-    return "The call ends when your goodbye has played. Say nothing more."
-
-
-# A call ends on the agent's tool, not on a phrase the page listens for: a
-# model can drop a phrase. The page hangs up when it sees the call.
-END_CALL = end_call.__name__
+# A call ends on the agent's tool (``call_turns.end_call``), not on a
+# phrase the page listens for: a model can drop a phrase. The page hangs up
+# when it sees the call.
 CALL_TOOLS = FunctionToolset([end_call])
 
 
-class TurnLog:
-    """One turn, gathered from the session's events: what was heard, what
-    was said, and the steps, recorded as a streamed turn records them."""
-
-    def __init__(self) -> None:
-        self._reset()
-        # The cards the call's steps draw (its card stage), moved onto the
-        # step that drew them; the call's, not a turn's.
-        self.drawn: list[dict[str, Any]] = []
-        # The cards the last event's step drew, for the page at once.
-        self.shown: list[str] = []
-
-    def _reset(self) -> None:
-        self.heard: list[str] = []
-        self.said: list[str] = []
-        self.trace: list[dict[str, Any]] = []
-
-    def observe(self, event: Any) -> bool:
-        """Take in one event; True when it finished a turn. Ending the call
-        is how it ends, not one of the steps."""
-        self.shown = []
-        if (
-            isinstance(event, FunctionToolCallEvent | FunctionToolResultEvent)
-            and event.part.tool_name == END_CALL
-        ):
-            return False
-        if isinstance(event, PartEndEvent) and isinstance(event.part, SpeechPart):
-            text = (event.part.transcript or "").strip()
-            side = self.heard if event.part.speaker == "user" else self.said
-            # The same part reported finished twice is not more speech.
-            if text and (not side or side[-1] != text):
-                side.append(text)
-        elif isinstance(event, FunctionToolCallEvent):
-            record_tool_call(self.trace, event)
-        elif isinstance(event, FunctionToolResultEvent):
-            finished = record_tool_result(self.trace, event)
-            self.shown = [marker["id"] for marker in self.drawn]
-            attach_cards(finished, self.drawn)
-        return isinstance(event, RealtimeTurnCompleteEvent)
-
-    def take(self) -> tuple[str, str, list[dict[str, Any]]] | None:
-        """The finished turn, once; None when nothing was said."""
-        heard, said, trace = " ".join(self.heard), " ".join(self.said), self.trace
-        self._reset()
-        if not heard and not said:
-            return None
-        return heard, said, trace
-
-
-def call_voice(model: str, voice: str | None) -> str | None:
+def call_voice(model: str, voice: str | None, *, chained: bool = False) -> str | None:
     """The voice a call on ``model`` speaks: the profile's ``voice`` where
     the engine's provider has it (one voice for the agent's calls and
     spoken lines), else OpenAI's recommended one, else (Gemini) its own,
     None."""
+    if chained:
+        return voice  # it speaks in the profile's own TTS
     spoken = get_voice(voice) if voice else None
     by = spoken.provider_id if spoken else None
     if model.startswith("openai:"):
@@ -145,20 +88,21 @@ def _model_settings(
     voice: str | None,
     max_output_tokens: int | None,
     instructions: str | None = None,
+    chained: bool = False,
 ) -> dict[str, Any]:
-    """The session's settings for its provider. Each speaks the profile's
+    """The session's settings for its provider (a chain's: its reply cap). Each speaks the profile's
     voice where it has it (one voice for the agent's calls and spoken
     lines), else its own; OpenAI transcribes the caller only when asked,
     Gemini by default."""
     settings: dict[str, Any] = {}
-    speaks = call_voice(model, voice)
-    if model.startswith("openai:"):
+    speaks = call_voice(model, voice, chained=chained)
+    if model.startswith("openai:") and not chained:
         settings["openai_voice"] = speaks
         if is_gpt_live(model):
             # GPT-Live's voice takes the call manners, when to hand off and
-            # the thread so far (``realtime_for``); the agent's prompt is the
-            # backend's. It has no token limit and
-            # transcribes itself.
+            # the running summary (``realtime_for``); its thread rides as past
+            # turns, the agent's prompt is the backend's. It transcribes
+            # itself.
             if instructions:
                 settings["openai_live_instructions"] = instructions
             return settings
@@ -169,7 +113,7 @@ def _model_settings(
         # that ends when the thought does.
         settings["openai_input_noise_reduction"] = "far_field"
         settings["openai_turn_detection"] = {"type": "semantic_vad", "eagerness": "low"}
-    if model.startswith("google:"):
+    if model.startswith("google:") and not chained:
         if speaks:
             settings["google_voice"] = speaks
         # Background talk (a TV in the room) held Gemini's turn open with
@@ -211,6 +155,45 @@ async def call_instructions(agent: Any, history: str) -> str:
     return _and_history("\n\n".join(part.content for part in parts), history)
 
 
+# What GPT-Live takes as past turns: OpenAI refuses a seed
+# (``session.input``) of more than 128 items or 8,192 tokens, measured
+# 2026-11-22; tokens at 3 characters, which errs short.
+LIVE_SEED_ITEMS = 128
+LIVE_SEED_CHARS = 8_192 * 3
+
+
+def _seed_size(conversation: Any) -> int:
+    """How many of the thread's latest turns GPT-Live is seeded with."""
+    from app.services.ai.service.prompt import replayed, steps_ahead
+
+    room, size = LIVE_SEED_CHARS, 0
+    for message in reversed(replayed(conversation.messages)[-LIVE_SEED_ITEMS:]):
+        room -= len(steps_ahead(message)) + len(message.content)
+        if room < 0:
+            break
+        size += 1
+    return size
+
+
+def _seeded(setup: Any, size: int) -> list[ModelMessage]:
+    """The thread's latest ``size`` turns, as far back as her prompt's
+    window reaches (``setup.history_start``), as the turns they were: a
+    reply with what its turn did. GPT-Live's voice hears them, and its
+    backend reads them (15,650 tokens seeded, 1,733 not, 2026-11-22)."""
+    from app.services.ai.service.prompt import replayed, steps_ahead
+
+    turns = replayed(setup.conversation.messages)
+    tail = turns[max(setup.history_start, len(turns) - size) :]
+    return to_model_history(
+        [
+            ChatMessage(
+                role=cast(ChatRole, m.role.value), content=steps_ahead(m) + m.content
+            )
+            for m in tail
+        ]
+    )
+
+
 def _and_history(text: str, history: str) -> str:
     """``text``, then the conversation so far, when there is one."""
     return f"{text}\n\n{history}" if history else text
@@ -230,8 +213,10 @@ async def realtime_for(
     instructions: str | None = None,
     max_output_tokens: int | None = None,
     hang_up: bool = True,
+    chained: bool = False,
 ) -> tuple[Any, str]:
-    """The agent on ``model`` (a Pydantic AI realtime model string), built
+    """The agent on ``model`` (a Pydantic AI realtime model string, or a
+    chat model's a ``chained`` call thinks with), built
     for the caller (``user_id``, ``owner_user_id``, ``admin``) about the
     call's ``subject`` by the function a typed turn builds her with
     (``_build_turn``), and the slug of the agent she is (``held_agent``:
@@ -254,6 +239,7 @@ async def realtime_for(
     # GPT-Live's voice takes the call manners as its own (``_model_settings``).
     if not is_gpt_live(model):
         config = config.led_by(instructions)
+    seeded = _seed_size(conversation) if is_gpt_live(model) else 0
     setup = await ai._build_turn(
         conversation,
         config,
@@ -261,17 +247,24 @@ async def realtime_for(
         subject=subject,
         owner_user_id=owner_user_id,
         admin=admin,
+        lean=chained and cascade.local(model),
+        seeded=seeded,
     )
     agent, history = setup.agent, setup.conversation_context
+    past = None
     if is_gpt_live(model):
-        # Its voice hears the thread as every other engine does: told only
-        # the manners, it made answers up (2026-11-16).
-        instructions = _and_history(instructions, history)
+        past = _seeded(setup, seeded)
+        instructions = _and_history(instructions, setup.history_summary)
     realtime = agent.realtime(
-        model,
+        await cascade.for_call(ai, model, user_id=user_id) if chained else model,
         instructions=await call_instructions(agent, history),
-        model_settings=_model_settings(model, voice, max_output_tokens, instructions),
+        model_settings=_model_settings(
+            model, voice, max_output_tokens, instructions, chained=chained
+        ),
         toolsets=[CALL_TOOLS] if hang_up else [],
+        # GPT-Live's voice: its thread as past turns (``_seeded``). Every
+        # other engine reads it in its prompt.
+        message_history=past,
     )
     return realtime, slug
 
@@ -317,8 +310,9 @@ async def open_call(
         subject=subject,
         admin=admin,
         instructions=engine.instructions if instructions is None else instructions,
-        max_output_tokens=engine.max_output_tokens,
+        max_output_tokens=live_engines.reply_cap(engine),
         hang_up=hang_up,
+        chained=live_engines.chained(engine),
     )
     return conversation, realtime, slug
 
@@ -344,8 +338,7 @@ async def drive(
 ) -> CallEnd:
     """Run one call to its end, and say who ended it (``CallEnd``): the
     agent's tools in a turn's context, each finished turn saved into the
-    conversation, the call's ledger row billed as each is (by the second on
-    a model priced by time, else by its tokens: ``call_cost``).
+    conversation, the call's ledger row billed as each is (``call_cost``).
     ``alongside`` runs beside the events for the length of the call (the
     audio both ways), ``on_event`` sees every event, ``on_saved`` hears of
     each saved turn with the call's own cost so far, and ``on_drawn`` of the
@@ -357,10 +350,21 @@ async def drive(
     usage = None
     ended: CallEnd = "provider"
     log = TurnLog()
-    provider, _, bare = model.rpartition(":")
+    provider, bare = live_engines.split_model(model)
     # The call so far, at the last saved turn: each turn keeps its share.
     so_far = {"input_tokens": 0, "output_tokens": 0, "cost": 0.0}
     rates = await calls.realtime_price(bare)
+    # The rates of the model it hands its work to, read once it has; only
+    # a model priced by time hands its work elsewhere (GPT-Live).
+    delegated: calls.llm_queries.Rates | None = None
+    looked = not calls.per_second(rates)
+
+    async def handed_to(session: Any) -> None:
+        nonlocal delegated, looked
+        if not looked and (name := calls.delegated_to(session)):
+            looked = True
+            delegated = await calls.realtime_price(name)
+
     # The call's ledger row, written beside the audio rather than ahead of
     # it; each bill waits for it (``row``).
     opening: asyncio.Task[int | None] | None = None
@@ -375,6 +379,7 @@ async def drive(
         """Save one turn with its share of the call, billing the call's row;
         the call's cost so far."""
         nonlocal so_far
+        await handed_to(session)
         now = {
             "input_tokens": session.usage.input_tokens or 0,
             "output_tokens": session.usage.output_tokens or 0,
@@ -384,15 +389,20 @@ async def drive(
                 session.usage,
                 seconds=_elapsed(started),
                 rates=rates,
+                delegated=delegated,
             ),
         }
+        shares: dict[str, Any] = {k: now[k] - so_far[k] for k in now}
+        if log.first_word_ms is not None:
+            shares["first_word_ms"] = log.first_word_ms
+            log.first_word_ms = None
         await save_turn(
             ai,
             conversation_id,
             *turn,
             model=bare,
             provider=provider or "openai",
-            usage={k: now[k] - so_far[k] for k in now},
+            usage=shares,
             interrupted=interrupted,
         )
         so_far = now
@@ -426,6 +436,17 @@ async def drive(
                     async for event in session:
                         if on_event:
                             await on_event(event)
+                        if isinstance(event, RealtimeSessionErrorEvent):
+                            # Work the session lost (GPT-Live's backend
+                            # failing or stopping short): the call carries
+                            # on, but it went quiet with no word of why
+                            # (2026-11-22).
+                            logger.warning(
+                                "A live call lost work",
+                                error=event.message,
+                                code=event.code,
+                                model=model,
+                            )
                         if log.observe(event) and (turn := log.take()):
                             if on_turn:
                                 await on_turn(turn)
@@ -442,6 +463,7 @@ async def drive(
                     # A dropped call still used what it used, and still
                     # said and ran what it did: the turn it cut is kept.
                     usage = session.usage
+                    await handed_to(session)
                     if cut := log.take():
                         try:
                             await keep(session, cut, interrupted=True)
@@ -462,6 +484,7 @@ async def drive(
                 usage,
                 seconds=seconds,
                 rates=rates,
+                delegated=delegated,
                 success=ended != "error",
             )
         logger.info(

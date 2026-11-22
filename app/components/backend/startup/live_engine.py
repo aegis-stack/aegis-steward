@@ -15,12 +15,14 @@ from app.core.log import logger
 async def startup_hook() -> Any:
     from app.core.db import get_async_session
     from app.services.ai.service import live_engines
-    from app.services.finance.service import ENGINE_SEEDS
+    from app.services.finance.service import ENGINE_SEEDS, HER_REALTIME_DEFAULTS
 
     try:
         async with get_async_session() as session:
             added = await live_engines.seed_missing(session, ENGINE_SEEDS)
-            refreshed = await live_engines.refresh_defaults(session)
+            refreshed = await live_engines.refresh_defaults(
+                session, HER_REALTIME_DEFAULTS
+            )
     except Exception:
         logger.exception("Could not seed the live engines")
         return None

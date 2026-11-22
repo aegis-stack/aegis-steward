@@ -18,7 +18,12 @@ from app.core.voice_settings import (
     WorkingSound,
 )
 from app.services.ai.domains.voice import pronunciations, queries
-from app.services.ai.domains.voice.catalog import get_stt_model, get_stt_models
+from app.services.ai.domains.voice.catalog import (
+    get_stt_model,
+    get_stt_models,
+    get_tts_model,
+    get_tts_voices,
+)
 from app.services.ai.models.voice import VoiceProfile
 
 # The first profile, seeded from ``.env``.
@@ -78,8 +83,7 @@ def parse_form(form: Any) -> tuple[dict[str, Any], list[str]]:
         if value not in allowed:
             errors.append(f"{column.replace('_', ' ')}: pick one of the choices.")
         values[column] = value
-    if heard := get_stt_model(values["stt_model"]):  # heard by its own provider
-        values["stt_provider"] = heard.provider_id
+    values.update(hearing(values["stt_model"]))
     try:
         idle = int(str(form.get("live_idle_seconds") or ""))
         if not IDLE_RANGE[0] <= idle <= IDLE_RANGE[1]:
@@ -90,6 +94,50 @@ def parse_form(form: Any) -> tuple[dict[str, Any], list[str]]:
             f"Check in after is whole seconds from {IDLE_RANGE[0]} to {IDLE_RANGE[1]}."
         )
     return values, errors
+
+
+def hearing(model_id: str) -> dict[str, str]:
+    """The columns a hearing model sets: it, and its own provider (an
+    OpenAI model kept beside Parakeet would be asked of Parakeet); none for
+    a model the catalog does not know."""
+    heard = get_stt_model(model_id)
+    return {"stt_model": model_id, "stt_provider": heard.provider_id} if heard else {}
+
+
+async def hear_with(
+    session: AsyncSession, profile_id: int, model_id: str
+) -> VoiceProfile:
+    """``profile_id`` hearing with ``model_id`` (the call setup's Hears)."""
+    columns = hearing(model_id)
+    if not columns:
+        raise VoiceProfileError(f"{model_id} is not a hearing model.")
+    return await update(session, profile_id, **columns)
+
+
+def speaking(model_id: str, voice: str | None) -> dict[str, str]:
+    """The columns a speaking model sets: it, its own provider, and
+    ``voice`` where the model has it, else the model's first; none for a
+    model the catalog does not know or one with no voices."""
+    found = get_tts_model(model_id)
+    has = [v.id for v in get_tts_voices(model_id=model_id)] if found else []
+    if not (found and has):
+        return {}
+    return {
+        "tts_model": model_id,
+        "tts_provider": found.provider_id,
+        "tts_voice": voice if voice in has else has[0],
+    }
+
+
+async def speak_with(
+    session: AsyncSession, profile_id: int, model_id: str
+) -> VoiceProfile:
+    """``profile_id`` speaking with ``model_id`` (the call setup's Speaks)."""
+    profile = await session.get(VoiceProfile, profile_id)
+    columns = speaking(model_id, profile.tts_voice if profile else None)
+    if not columns:
+        raise VoiceProfileError(f"{model_id} is not a speaking model.")
+    return await update(session, profile_id, **columns)
 
 
 def settings_for(profile: VoiceProfile, settings: Any) -> Any:

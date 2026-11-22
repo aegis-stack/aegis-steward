@@ -22,6 +22,7 @@ from app.services.finance.domains.detection.analyst.prompts import (
 # are that.
 REALTIME_REPLY_CAP = 1_200
 
+
 ENGINE_SEEDS: tuple[dict[str, Any], ...] = (
     {
         "key": "gpt-live",
@@ -55,4 +56,20 @@ ENGINE_SEEDS: tuple[dict[str, Any], ...] = (
         "max_output_tokens": REALTIME_REPLY_CAP,
         "sort_order": 3,
     },
+)
+
+
+# Her realtime manners and every default they have had, by digest, for the
+# startup's refresh (``live_engines.refresh_defaults``) beside the
+# template's: an engine still holding one was never edited, so it takes the
+# current. They follow the template's, so a change to either adds the old
+# digest here (the pinned digest in the tests says when).
+HER_REALTIME_DEFAULTS = (
+    FINANCE_REALTIME_INSTRUCTIONS,
+    frozenset(
+        {
+            "e5eeb64025208848811658fedfa7ea0461b9846b6869d3673bbee2bdbdda4ae0",
+            "66196909b835d4619994a9e57fa566dbd0b1332912c51e9f20ca91c8286eafdd",
+        }
+    ),
 )

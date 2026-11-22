@@ -22,6 +22,7 @@ from .models import (
     TTSProvider,
     VoiceInfo,
 )
+from .stt import server as hearing_server
 from .stt.config import STTConfig
 from .tts import realtime, server
 from .tts.config import TTSConfig
@@ -358,7 +359,8 @@ _STT_MODELS: list[ModelInfo] = [
     ),
     *local.STT_MODELS,
 ]
-_STT_PROVIDERS.append(local.STT_PROVIDER)
+_STT_PROVIDERS += [local.STT_PROVIDER, hearing_server.PROVIDER]
+_STT_MODELS += hearing_server.MODELS
 _STT_BY_ID = {m.id: m for m in _STT_MODELS}
 
 

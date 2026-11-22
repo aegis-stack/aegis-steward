@@ -14,9 +14,13 @@ from typing import Any
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
+    PartDeltaEvent,
     PartEndEvent,
+    RealtimeInputSpeechEndEvent,
+    RealtimeInputSpeechStartEvent,
     RealtimeTurnCompleteEvent,
     SpeechPart,
+    SpeechPartDelta,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -27,16 +31,14 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.components.backend.api.ai.service import ai_service
 from app.services.ai.domains.spend import calls
 from app.services.ai.domains.spend import recording as usage_recording
+from app.services.ai.domains.voice.call_turns import END_CALL, TurnLog, save_turn
 from app.services.ai.domains.voice.realtime_calls import (
     CALL_TOOLS,
-    END_CALL,
     RESUME_WINDOW,
-    TurnLog,
     call_voice,
     resumed,
-    save_turn,
 )
-from app.services.ai.models import AIProvider
+from app.services.ai.models import AIProvider, MessageRole
 from app.services.ai.models.llm import LLMUsage
 from tests._session import opens
 from tests._voice_catalog import seed_voice_catalog
@@ -95,6 +97,30 @@ class TestATurn:
         assert [step["tool"] for step in trace] == ["run_code"]
         assert trace[0]["code"] == "await budget()"
         assert log.take() is None  # taken once
+
+    def test_it_times_the_caller_stopping_to_the_first_word_back(self) -> None:
+        """From the end of the caller's speech to the reply's first audio:
+        what a caller waits. Speaking again starts the wait over; a
+        provider that never says the caller stopped is not timed."""
+        now = iter([1.0, 3.0, 4.4])
+        log = TurnLog(clock=lambda: next(now))
+        audio = PartDeltaEvent(
+            index=1, delta=SpeechPartDelta(speaker="assistant", audio_chunk=b"hi")
+        )
+        for event in (
+            RealtimeInputSpeechStartEvent(item_id="a"),
+            RealtimeInputSpeechEndEvent(item_id="a"),  # 1.0, then they go on
+            RealtimeInputSpeechStartEvent(item_id="b"),
+            RealtimeInputSpeechEndEvent(item_id="b"),  # 3.0
+            audio,  # 4.4
+            audio,  # a later chunk is not the first word
+        ):
+            log.observe(event)
+
+        assert log.first_word_ms == 1400
+        untimed = TurnLog(clock=lambda: 9.0)
+        untimed.observe(audio)
+        assert untimed.first_word_ms is None
 
     def test_a_part_ended_twice_is_said_once(self) -> None:
         """#292: one reply was saved with its text twice, back to back - the
@@ -212,6 +238,8 @@ class TestACallKnowsWhoSheIs:
             "owner_user_id": 7,
             "subject": "42",
             "admin": True,
+            "lean": False,
+            "seeded": 0,  # only GPT-Live is seeded with past turns
             "slug": slug,
             "held": None,
         }
@@ -240,6 +268,55 @@ class TestACallKnowsWhoSheIs:
         assert realtime["toolsets"] == []
 
     @pytest.mark.asyncio
+    async def test_a_local_chat_model_is_called_as_a_cascade(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """It has no realtime API: the agent's session runs on the app's own
+        chain around it, and a realtime model is still called by name."""
+        from app.services.ai.domains.voice.cascade.connection import (
+            CascadeRealtimeModel,
+        )
+
+        _, local = await _built(monkeypatch, model="ollama:qwen3.8:27b", chained=True)
+        _, cloud = await _built(monkeypatch)
+
+        assert isinstance(local["model"], CascadeRealtimeModel)
+        assert local["model"].model_name == "qwen3.8:27b"
+        assert cloud["model"] == "google:gemini-3.8-live"
+
+    @pytest.mark.asyncio
+    async def test_a_cloud_chat_model_is_chained_with_its_whole_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cloud model thinking on the chain reads her whole turn (it is
+        not minutes of local prefill), and is not warmed: a warm-up is a
+        local cache's, and a cloud one bills the prompt for it."""
+        from app.core.config import settings
+        from app.services.ai.domains.voice.cascade.connection import (
+            CascadeRealtimeModel,
+        )
+
+        monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test")
+        built, chained = await _built(monkeypatch, model="openai:gpt-5.5", chained=True)
+
+        assert isinstance(chained["model"], CascadeRealtimeModel)
+        assert chained["model"].model_name == "gpt-5.5"
+        assert chained["model"].warm is False
+        assert built["lean"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_local_model_reads_a_lean_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Her whole turn was 53k tokens: past a local model's window, and
+        minutes before a word (``_build_turn``'s ``lean``)."""
+        local, _ = await _built(monkeypatch, model="ollama:qwen3.8:27b", chained=True)
+        cloud, _ = await _built(monkeypatch)
+
+        assert local["lean"] is True
+        assert cloud["lean"] is False
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("model", ["openai:gpt-live-1", "google:gemini-3.8-live"])
     async def test_the_model_that_speaks_is_told_how_to_say_the_list(
         self, monkeypatch: pytest.MonkeyPatch, model: str
@@ -260,26 +337,114 @@ class TestACallKnowsWhoSheIs:
         assert 'Say "Traefik" as "traffic".' in told
 
     @pytest.mark.asyncio
-    async def test_gpt_lives_voice_hears_the_thread_so_far(
+    async def test_gpt_lives_voice_hears_the_thread_as_the_turns_it_was(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The voice that speaks on GPT-Live heard only the call manners:
-        asked for "the wiring of the thing you were just talking about", it
-        made up a power source and a sensor harness, and said it had no
-        earlier conversation (2026-11-16). It hears the thread as every
-        other engine does, and when to hand a question to the backend."""
-        _, realtime = await _built(
-            monkeypatch,
-            model="openai:gpt-live-1",
-            instructions="Keep it short.",
-            history="User: how is the browser built?",
-        )
-
+        """Told only the manners, GPT-Live's voice made answers up
+        (2026-11-16); given the thread in its instructions, 48k characters
+        of it buried them, and it said "lemme pull that up" and handed
+        nothing off (2026-11-22). It is seeded with the thread as past
+        turns, its instructions the manners; the backend's prompt keeps
+        the thread as every engine's does."""
         from app.services.ai.domains.voice.live_engines import LIVE_HANDS_OFF
 
+        _, realtime = await _built(
+            monkeypatch,
+            model="openai:gpt-live-1.1",
+            instructions="Keep it short.",
+            history="User: how is the browser built?",
+            thread=[
+                (MessageRole.USER, "how is the browser built?"),
+                (MessageRole.ASSISTANT, "On htmx."),
+            ],
+        )
+
         told = realtime["model_settings"]["openai_live_instructions"]
-        assert "User: how is the browser built?" in told
+        assert told.startswith("Keep it short.")
         assert LIVE_HANDS_OFF in told
+        assert "how is the browser built?" not in told
+        asked, answered = realtime["message_history"]
+        assert asked.parts[0].content == "how is the browser built?"
+        assert answered.parts[0].content == "On htmx."
+        assert "how is the browser built?" in realtime["instructions"]
+
+    @pytest.mark.asyncio
+    async def test_gpt_lives_voice_hears_the_window_her_prompt_replays(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Seeded with less than the backend reads, the voice lost the
+        turns between the two cuts (2026-11-22). It hears the turns her
+        prompt replays, and the running summary ahead of them."""
+        from app.services.ai.domains.chat.summary import INTRO
+
+        built, realtime = await _built(
+            monkeypatch,
+            model="openai:gpt-live-1.1",
+            instructions="Keep it short.",
+            thread=[
+                (MessageRole.USER, "how is the browser built?"),
+                (MessageRole.ASSISTANT, "On htmx."),
+                (MessageRole.USER, "and the chart?"),
+            ],
+            dropped=1,
+            summary=f"{INTRO}\nThey asked how the browser is built.",
+        )
+
+        seeded = [message.parts[0].content for message in realtime["message_history"]]
+        assert seeded == ["On htmx.", "and the chart?"]
+        assert built["seeded"] == 3  # the backend's text leaves them out
+        told = realtime["model_settings"]["openai_live_instructions"]
+        assert f"{INTRO}\nThey asked how the browser is built." in told
+
+    @pytest.mark.asyncio
+    async def test_gpt_live_is_seeded_within_what_it_accepts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OpenAI refuses a seed of more than 128 items ("array too long")
+        or 8,192 tokens ("Initial items must not exceed 8192 tokens"),
+        measured 2026-11-22: the latest turns that fit."""
+        from app.services.ai.domains.voice import realtime_calls
+
+        many = [(MessageRole.USER, f"turn {n}") for n in range(300)]
+        built, realtime = await _built(
+            monkeypatch, model="openai:gpt-live-1.1", thread=many
+        )
+        assert len(realtime["message_history"]) == built["seeded"] == 128
+        assert realtime["message_history"][-1].parts[0].content == "turn 299"
+
+        long = [(MessageRole.USER, "x" * 1_000) for _ in range(100)]
+        built, realtime = await _built(
+            monkeypatch, model="openai:gpt-live-1.1", thread=long
+        )
+        sent = sum(len(m.parts[0].content) for m in realtime["message_history"])
+        assert 0 < sent <= realtime_calls.LIVE_SEED_CHARS
+        assert built["seeded"] == len(realtime["message_history"])
+
+    @pytest.mark.asyncio
+    async def test_a_seeded_reply_keeps_what_its_turn_did(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The backend read what its last turns ran from their steps in
+        its history text (#243); seeded, a reply carries them too."""
+        _, realtime = await _built(
+            monkeypatch,
+            model="openai:gpt-live-1.1",
+            thread=[(MessageRole.ASSISTANT, "Filed it.")],
+            steps=[{"tool": "lookup", "args": '{"q": "atm"}', "result": "5"}],
+        )
+
+        [reply] = realtime["message_history"]
+        assert reply.parts[0].content.startswith("Assistant steps: lookup(")
+        assert reply.parts[0].content.endswith("\nFiled it.")
+
+    @pytest.mark.asyncio
+    async def test_every_other_engine_hears_the_thread_in_its_prompt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, realtime = await _built(
+            monkeypatch, thread=[(MessageRole.USER, "how is the browser built?")]
+        )
+        assert realtime["message_history"] is None
 
 
 async def _built(
@@ -305,15 +470,29 @@ async def _built(
     prompts: list[str] = []
 
     history = asked.pop("history", "")
+    steps = asked.pop("steps", None)
+    for role, text in asked.pop("thread", []):
+        conversation.add_message(
+            role, text, metadata={"tool_trace": steps} if steps else None
+        )
+    # Where her history window starts, and the summary ahead of it.
+    dropped, summary = asked.pop("dropped", 0), asked.pop("summary", "")
 
     async def build_turn(conversation: Any, agent_config: Any, **kwargs: Any) -> Any:
         built.update(kwargs, slug=agent_config.slug)
         built["held"] = conversation.metadata.get(chat.AGENT_KEY)
         prompts.append(agent_config.system_prompt)
         agent = SimpleNamespace(
-            system_prompt_parts=_no_parts, realtime=lambda model, **kw: kw
+            system_prompt_parts=_no_parts,
+            realtime=lambda model, **kw: {**kw, "model": model},
         )
-        return SimpleNamespace(agent=agent, conversation_context=history)
+        return SimpleNamespace(
+            conversation=conversation,
+            agent=agent,
+            conversation_context=history,
+            history_start=dropped,
+            history_summary=summary,
+        )
 
     async def _no_parts() -> list[Any]:
         return []
@@ -421,6 +600,79 @@ class TestACutCall:
         assert [step["tool"] for step in reply.metadata["tool_trace"]] == ["run_code"]
 
     @pytest.mark.asyncio
+    async def test_work_the_session_lost_is_logged(
+        self, async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Asked to put a list on a table, GPT-Live said it would and the
+        call went quiet: whether its backend failed was nowhere, the
+        session's own errors were dropped (2026-11-22)."""
+        from pydantic_ai.messages import RealtimeSessionErrorEvent
+
+        from app.services.ai.domains.voice import realtime_calls
+        from tests._realtime import FakeRealtime
+
+        told: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            realtime_calls.logger, "warning", lambda *a, **kw: told.append((a, kw))
+        )
+        await _priced(async_db_session, monkeypatch)
+        conversation = await _conversation()
+        lost = RealtimeSessionErrorEvent(
+            message="The delegated backend did not finish (incomplete).",
+            code="response_incomplete",
+        )
+
+        async def hang_up(session: object) -> None:
+            await session.close()  # type: ignore[attr-defined]
+
+        await realtime_calls.drive(
+            ai_service,
+            FakeRealtime([lost]),
+            ledger=async_db_session,
+            conversation_id=conversation.id,
+            model="openai:gpt-live-1.1",
+            agent_slug="voice",
+            user_id=USER,
+            alongside=hang_up,
+        )
+
+        [(_, fields)] = told
+        assert fields["error"] == lost.message
+        assert fields["code"] == "response_incomplete"
+
+    @pytest.mark.asyncio
+    async def test_a_local_models_turn_is_saved_under_its_whole_id(
+        self, async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A local model's id has a colon of its own ("qwen3.8:27b"): only
+        the first one ends the provider's prefix."""
+        from app.services.ai.domains.voice.realtime_calls import drive
+        from tests._realtime import FakeRealtime
+
+        await _priced(async_db_session, monkeypatch)
+        conversation = await _conversation()
+
+        async def hang_up(session: object) -> None:
+            await session.close()  # type: ignore[attr-defined]
+
+        await drive(
+            ai_service,
+            FakeRealtime(_turn()[:2]),
+            ledger=async_db_session,
+            conversation_id=conversation.id,
+            model="llamacpp:qwen3.8:27b",
+            agent_slug="voice",
+            user_id=USER,
+            alongside=hang_up,
+        )
+
+        reply = (await ai_service.get_conversation(conversation.id)).messages[-1]
+        assert (reply.metadata["provider"], reply.metadata["model"]) == (
+            "llamacpp",
+            "qwen3.8:27b",
+        )
+
+    @pytest.mark.asyncio
     async def test_a_call_soon_after_picks_up_the_question(self) -> None:
         from datetime import UTC, datetime
 
@@ -512,8 +764,8 @@ class TestTheLedger:
     async def test_an_engine_priced_by_the_minute_is_billed_by_the_second(
         self, async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """GPT-Live lists a per-minute rate and no token price: its call
-        costs its length, whatever tokens it reports."""
+        """GPT-Live lists a per-minute rate and no token price: its voice
+        costs its length."""
         await _priced(async_db_session, monkeypatch)
         rates = await calls.realtime_price("gpt-live-1")
         assert calls.per_second(rates) == pytest.approx(0.05 / 60)
@@ -529,6 +781,67 @@ class TestTheLedger:
         (row,) = (await async_db_session.exec(select(LLMUsage))).all()
         assert row.total_cost == pytest.approx(0.10)  # two minutes at $0.05
         assert row.audio_seconds == pytest.approx(120)
+
+    @pytest.mark.asyncio
+    async def test_the_work_it_hands_off_is_billed_by_its_tokens(
+        self, async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GPT-Live's per-minute rate is its voice; the model it hands its
+        work to bills its tokens as any model does: one call's 496,505
+        went unpriced (2026-11-22)."""
+        await _priced(async_db_session, monkeypatch)
+        usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=100_000)
+
+        db = async_db_session
+        row_id = await calls.open_realtime(db, "gpt-live-1", conversation_id="c")
+        cost = await calls.bill_realtime(
+            db,
+            row_id,
+            usage,
+            seconds=60,
+            rates=await calls.realtime_price("gpt-live-1"),
+            delegated=await calls.realtime_price("gpt-4o-mini"),
+        )
+
+        assert cost == pytest.approx(0.05 + 0.15 + 0.06)  # a minute, then tokens
+        (row,) = (await async_db_session.exec(select(LLMUsage))).all()
+        assert row.total_cost == pytest.approx(cost)
+
+    @pytest.mark.asyncio
+    async def test_a_calls_turn_counts_the_model_it_handed_work_to(
+        self, async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read off the session (``delegated_model``, as Pydantic AI
+        records it): the call never names its backend itself."""
+        from pydantic_ai.messages import ModelResponse
+
+        from app.services.ai.domains.voice.realtime_calls import drive
+        from tests._realtime import FakeRealtime
+
+        await _priced(async_db_session, monkeypatch)
+        conversation = await _conversation()
+        realtime = FakeRealtime(_turn())
+        handed = {"delegated_model": "gpt-4o-mini"}
+        realtime.live.messages = [ModelResponse(parts=[], provider_details=handed)]
+
+        async def hang_up(session: object) -> None:
+            await session.close()  # type: ignore[attr-defined]
+
+        await drive(
+            ai_service,
+            realtime,
+            ledger=async_db_session,
+            conversation_id=conversation.id,
+            model="openai:gpt-live-1",
+            agent_slug="voice",
+            user_id=USER,
+            alongside=hang_up,
+        )
+
+        (row,) = (await async_db_session.exec(select(LLMUsage))).all()
+        voice = (row.audio_seconds or 0) * 0.05 / 60
+        tokens = 100 * 0.15e-6 + 40 * 0.60e-6  # the fake session's usage
+        assert row.total_cost - voice == pytest.approx(tokens)
 
 
 class TestTheSettings:
@@ -686,6 +999,41 @@ class TestDrivingACall:
         (row,) = (await async_db_session.exec(select(LLMUsage))).all()
         assert (row.action, row.model_id) == ("realtime", "gemini-3.8-live")
         assert row.total_cost > 0  # priced at the catalog's Gemini rates
+
+    @pytest.mark.asyncio
+    async def test_a_turn_keeps_how_long_the_caller_waited(
+        self, async_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Its first word's wait, on the reply, for the voice dialog's
+        "to first word"."""
+        from app.services.ai.domains.voice.realtime_calls import drive
+        from tests._realtime import FakeRealtime
+
+        await _priced(async_db_session, monkeypatch)
+        conversation = await _conversation()
+        audio = SpeechPartDelta(speaker="assistant", audio_chunk=b"hi")
+        events = [
+            RealtimeInputSpeechEndEvent(item_id="a"),
+            PartDeltaEvent(index=1, delta=audio),
+            *_turn(),
+        ]
+
+        async def hang_up(session: object) -> None:
+            await session.close()  # type: ignore[attr-defined]
+
+        await drive(
+            ai_service,
+            FakeRealtime(events),
+            ledger=async_db_session,
+            conversation_id=conversation.id,
+            model="google:gemini-3.8-live",
+            agent_slug="voice",
+            user_id=USER,
+            alongside=hang_up,
+        )
+
+        reply = (await ai_service.get_conversation(conversation.id)).messages[-1]
+        assert reply.metadata["first_word_ms"] >= 0
 
     @pytest.mark.asyncio
     async def test_a_turn_it_hands_off_names_its_row(
@@ -921,3 +1269,5 @@ def test_a_call_speaks_only_a_prebuilt_gemini_voice(
 
     assert call_voice("google:gemini-3.8-live", "Kore") == "Kore"
     assert call_voice("google:gemini-3.8-live", "voice_en_gb_amelia") is None
+    # A cascade speaks in the profile's own TTS, whichever voice it is.
+    assert call_voice("llamacpp:qwen3.8:27b", "af_heart", chained=True) == "af_heart"

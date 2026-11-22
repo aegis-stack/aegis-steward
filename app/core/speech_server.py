@@ -23,9 +23,15 @@ from app.core.figures import FIGURES, absent
 from app.core.formatting import format_bytes, format_span
 
 NAME = "Kokoro-FastAPI"
-# What it is called on the Docker network: the host, or its own compose
-# service (``inference[docker,kokoro_fastapi]``).
-DOCKER_HOSTS = {"host.docker.internal", "kokoro-fastapi"}
+# Its id (SPEECH_SERVER, and the catalog's org for what it serves).
+SLUG = "kokoro_fastapi"
+# What a server of yours (speaking, hearing) is called on the Docker
+# network: the host, or its own compose service (``kokoro-fastapi``,
+# ``hearing``).
+DOCKER_HOSTS = {"host.docker.internal", "kokoro-fastapi", "hearing"}
+# Sent as a server of yours' key: without one the OpenAI client sends
+# OPENAI_API_KEY, the app's own, to a server that is not OpenAI.
+NO_KEY = "speech-server"
 # A local server answers at once; Ollama's client waits as long.
 WAIT_SECONDS = 2.0
 # A line takes as long as it is to say, and a model reload as long as a load.
@@ -109,15 +115,16 @@ class SpeechServerError(Exception):
         self.flag = flag
 
 
-def reach(settings: Any) -> str | None:
-    """SPEECH_BASE_URL as this process reaches it: a shell on the host swaps
-    a Docker name for localhost, on the port ``make serve`` published it on
-    (SPEECH_HOST_PORT). Only inference and ai[voice] carry the two
-    settings; elsewhere there is no server."""
-    url = getattr(settings, "SPEECH_BASE_URL", None)
+def reach(settings: Any, setting: str = "SPEECH_BASE_URL") -> str | None:
+    """A server's address (``setting``: SPEECH_BASE_URL, HEARING_BASE_URL)
+    as this process reaches it: a shell on the host swaps a Docker name for
+    localhost, on the port ``make serve`` published it on (its
+    ``*_HOST_PORT``). Only inference and ai[voice] carry the settings;
+    elsewhere there is no server."""
+    url = getattr(settings, setting, None)
     if not url or settings.is_docker:
         return url
-    port = getattr(settings, "SPEECH_HOST_PORT", None)
+    port = getattr(settings, setting.replace("_BASE_URL", "_HOST_PORT"), None)
     return settings.localhost_url(url, DOCKER_HOSTS, port)
 
 
@@ -152,6 +159,18 @@ async def voices(url: str) -> list[str]:
     speaks."""
     async with httpx.AsyncClient(timeout=WAIT_SECONDS) as client:
         return _names(await _get(client, url, "audio/voices"))
+
+
+async def answers(url: str) -> bool:
+    """Whether a server is up at ``url``: any answer counts, an error page
+    too; only one that cannot be reached, or does not answer in time, is
+    down. Asked of a speaking or a hearing server alike."""
+    try:
+        async with httpx.AsyncClient(timeout=WAIT_SECONDS) as client:
+            await client.get(url)
+    except httpx.HTTPError:
+        return False
+    return True
 
 
 def left_off(closed: list[str]) -> str:

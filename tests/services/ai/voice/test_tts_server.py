@@ -3,7 +3,6 @@ OpenAI client at SPEECH_BASE_URL, asked only what the server takes. The
 server is a stub; the real client's requests are answered in the test."""
 
 import asyncio
-from collections.abc import Callable
 import json
 from typing import Any
 
@@ -30,6 +29,7 @@ from app.services.ai.domains.voice.tts import (
     server,
 )
 from tests._fake_dns import answering
+from tests._speech_server import openai_answering
 
 URL = "http://localhost:8880/v1"
 
@@ -38,36 +38,19 @@ def test_the_provider_is_named_for_the_server_it_talks_to() -> None:
     assert server.PROVIDER.name == speech_server.NAME
 
 
-def _stub(answer: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.MockTransport(answer))
-
-
-def _served(monkeypatch: pytest.MonkeyPatch, asked: list[httpx.Request]) -> None:
-    """Every request the OpenAI client makes answered with a second of WAV,
-    and kept in ``asked``."""
-    import openai
-
-    real = openai.AsyncOpenAI
-
-    def answer(request: httpx.Request) -> httpx.Response:
-        asked.append(request)
-        # As Kokoro-FastAPI sends it, whole or not: its header's sizes are
-        # the placeholder a stream's carries (0xFFFFFFFF).
-        wav = realtime.wav(b"\0\0" * 24_000)
-        unsized = wav[:4] + b"\xff" * 4 + wav[8:40] + b"\xff" * 4 + wav[44:]
-        return httpx.Response(200, content=unsized)
-
-    monkeypatch.setattr(
-        openai, "AsyncOpenAI", lambda **kw: real(http_client=_stub(answer), **kw)
-    )
+def _wav() -> httpx.Response:
+    """A second of WAV as Kokoro-FastAPI sends it, whole or not: its
+    header's sizes are the placeholder a stream's carries (0xFFFFFFFF)."""
+    wav = realtime.wav(b"\0\0" * 24_000)
+    unsized = wav[:4] + b"\xff" * 4 + wav[8:40] + b"\xff" * 4 + wav[44:]
+    return httpx.Response(200, content=unsized)
 
 
 async def test_a_line_is_said_as_a_wav_in_the_servers_own_voice_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
-    asked: list[httpx.Request] = []
-    _served(monkeypatch, asked)
+    asked = openai_answering(monkeypatch, _wav)
     said = get_tts_provider(TTSProvider.LOCAL_SERVER, server_url=URL)
 
     result = await said.synthesize(
@@ -105,7 +88,7 @@ async def test_each_call_is_charted_for_the_speech_page(
         charted.append(kind)
 
     monkeypatch.setattr(speech_server, "charted", chart)
-    _served(monkeypatch, [])
+    openai_answering(monkeypatch, _wav)
     said = get_tts_provider(TTSProvider.LOCAL_SERVER, server_url=URL)
     request = SpeechRequest(text="Hello", voice="local_server:bm_george")
 

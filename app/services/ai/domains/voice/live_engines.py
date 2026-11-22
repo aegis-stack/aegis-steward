@@ -12,6 +12,7 @@ the app's, and an edit is never overwritten.
 from __future__ import annotations
 
 import hashlib
+import statistics
 from typing import Any
 
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -21,6 +22,7 @@ from app.core.voice_settings import setting_default
 from app.services.ai.domains.llm.queries import price_for_model
 from app.services.ai.domains.spend import calls
 from app.services.ai.domains.voice import queries
+from app.services.ai.models.provider_names import LOCAL_PROVIDERS
 from app.services.ai.models.voice import LiveEngine
 
 DEFAULT = setting_default("VOICE_LIVE_ENGINE")
@@ -73,7 +75,9 @@ REPLY_CAP = 2_400
 # manners replace its default, which is what says when to.
 LIVE_HANDS_OFF = (
     "When they ask for something you cannot answer from this conversation "
-    "alone, delegate it."
+    "alone, or for anything to be shown, drawn or changed (a table, a "
+    "chart, a category), delegate it: you can only talk. Never say you "
+    "will do something you have not delegated."
 )
 
 # Every default LIVE_CALL_INSTRUCTIONS has had, by digest: an engine still
@@ -125,10 +129,58 @@ ENGINE_SEEDS: tuple[dict[str, Any], ...] = (
 enabled = queries.enabled_engines
 
 
+def split_model(model: str) -> tuple[str, str]:
+    """A Pydantic AI model string's provider prefix and the model's own id
+    (``realtime_model`` joins them). The prefix ends at the first colon: a
+    local model's id has its own ("llamacpp:qwen3.8:27b"). No prefix, ""."""
+    provider, colon, bare = model.partition(":")
+    return (provider, bare) if colon else ("", model)
+
+
+def reachable(vendor: str, mode: str, model_id: str, tools: bool | None = None) -> bool:
+    """Whether a call can run on this catalog model: a realtime model of a
+    vendor the call path serves, by the vendor's own id (the catalog's
+    routed copies, "gemini/...", are not reachable), or any chat model,
+    local or cloud, that can call the agent's tools, which a call runs as
+    a chain (``chained``). Unknown is let through on a local engine, which
+    may not say; the cloud catalog says."""
+    if mode == "realtime":
+        return vendor in CALL_VENDORS and "/" not in model_id
+    said = tools if tools is not None else vendor in LOCAL_PROVIDERS
+    return mode == "chat" and said
+
+
+def reply_cap(engine: LiveEngine) -> int | None:
+    """One reply's token cap. A realtime model's is its engine's: a
+    backstop sized for its speech's audio tokens. A chain's reply is text
+    and its model's thinking, so its cap is what the catalog says the
+    model can write (its serving org's deployment); none where the
+    catalog does not say. A realtime seed's 1200 left GPT-6 Luna no room
+    to think, and it said nothing (2026-11-22)."""
+    if not chained(engine):
+        return engine.max_output_tokens
+    llm = engine.llm
+    return next(
+        (
+            d.output_max_tokens
+            for d in llm.deployments
+            if d.org_id == llm.served_by_org_id
+        ),
+        None,
+    )
+
+
+def chained(engine: LiveEngine) -> bool:
+    """Whether a call on ``engine`` runs as the app's own chain (hear,
+    think, speak: ``cascade``): its model is a chat model, with no
+    realtime API of its own."""
+    return engine.llm.mode != "realtime"
+
+
 def is_gpt_live(model: str) -> bool:
     """GPT-Live, by its id bare ("gpt-live-1") or as Pydantic AI names it
     ("openai:gpt-live-1"): its own session settings."""
-    return model.rpartition(":")[2].startswith("gpt-live")
+    return split_model(model)[1].startswith("gpt-live")
 
 
 def pick(engines: list[LiveEngine], key: str | None) -> LiveEngine | None:
@@ -163,21 +215,27 @@ async def choose(
 ) -> LiveEngine | None:
     """The engine for a catalog model picked for calls, offered again if it
     was turned off, or made on the spot: the seed of its kind (GPT-Live or
-    turn-taking) lends its instructions and reply cap, to be tuned on its
-    row afterwards. None when the catalog lacks the model or no call can
-    reach its vendor."""
+    turn-taking) lends its instructions, and a realtime model its reply cap
+    (a chain's is its model's, ``reply_cap``), to be tuned on its row
+    afterwards. None when the catalog lacks the model or no call can
+    reach it (``reachable``)."""
     engine = await queries.engine_for_model(session, model_id)
     if engine is None:
         found = await queries.model_vendor(session, model_id)
-        if found is None or found[1] not in CALL_VENDORS:
+        if found is None:
+            return None
+        llm_id, vendor, mode, tools = found
+        if not reachable(vendor, mode, model_id, tools):
             return None
         live = is_gpt_live(model_id)
         kind = next(seed for seed in seeds if is_gpt_live(seed["model"]) == live)
         engine = LiveEngine(
             key=model_id,
-            llm_id=found[0],
+            llm_id=llm_id,
             instructions=kind.get("instructions"),
-            max_output_tokens=kind.get("max_output_tokens"),
+            max_output_tokens=kind.get("max_output_tokens")
+            if mode == "realtime"
+            else None,
             sort_order=len(seeds),
         )
     engine.is_enabled = True
@@ -218,17 +276,35 @@ def digest(instructions: str) -> str:
     return hashlib.sha256(instructions.encode()).hexdigest()
 
 
-async def refresh_defaults(session: AsyncSession) -> int:
+async def refresh_defaults(
+    session: AsyncSession, *seeded: tuple[str, frozenset[str]]
+) -> int:
     """Hand the current instructions to each engine still holding a former
-    default; an edited engine keeps its own. Returns how many changed."""
+    default, in one read: the template's, and those an app seeding its own
+    passes (``seeded``: its current text and its former digests). An edited
+    engine keeps its own. Returns how many changed."""
+    current = dict.fromkeys(FORMER_DEFAULTS, LIVE_CALL_INSTRUCTIONS)
+    for text, former in seeded:
+        current |= dict.fromkeys(former, text)
     stale = [
-        engine
+        (engine, current[held])
         for engine in await queries.all_engines(session)
-        if engine.instructions and digest(engine.instructions) in FORMER_DEFAULTS
+        if engine.instructions and (held := digest(engine.instructions)) in current
     ]
-    for engine in stale:
-        engine.instructions = LIVE_CALL_INSTRUCTIONS
-    session.add_all(stale)
+    for engine, text in stale:
+        engine.instructions = text
+    session.add_all(engine for engine, _ in stale)
     if stale:
         await session.commit()
     return len(stale)
+
+
+# How many recent turns a model's wait is the median of.
+WAITS = 20
+
+
+async def first_word_ms(session: AsyncSession, model_id: str) -> int | None:
+    """The median wait for the first word back on a call on ``model_id``,
+    over its last timed turns (``WAITS``); None before any."""
+    waits = await queries.first_word_waits(session, model_id, WAITS)
+    return round(statistics.median(waits)) if waits else None

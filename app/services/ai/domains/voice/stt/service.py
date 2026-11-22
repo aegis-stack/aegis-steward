@@ -122,6 +122,7 @@ class STTService:
                 provider=provider_type,
                 api_key=api_key,
                 model=model,
+                server_url=self._config.server_url,
                 **kwargs,
             )
 

@@ -1,6 +1,9 @@
 """The chat composer's model selector: pure display/grouping helpers."""
 
+import pytest
+
 from app.core.model_picker import (
+    UNKNOWN_PRICE,
     family_display_name,
     format_price,
     group_models,
@@ -109,11 +112,15 @@ class TestFormatPrice:
         assert format_price(1.25, 10.0) == "$1.25 / $10"
         assert format_price(3.0, 15.0) == "$3 / $15"
 
-    def test_partial_or_missing_is_blank_or_single(self) -> None:
-        from app.core.model_picker import format_price
+    def test_partial_is_single_and_missing_is_unknown(self) -> None:
+        """No pricing on file, or zeros where it should be, is said to be
+        unknown: a blank or "$0 / $0" reads as free. A local model's is."""
+        from app.core.model_picker import UNKNOWN_PRICE, format_price
 
-        assert format_price(None, None) == ""
         assert format_price(0.5, None) == "$0.50"
+        assert format_price(None, None) == UNKNOWN_PRICE
+        assert format_price(0.0, 0.0) == UNKNOWN_PRICE
+        assert format_price(0.0, 0.0, local=True) == "Free"
 
 
 class TestFilterModels:
@@ -215,18 +222,19 @@ class TestALocalModelIsFreeNotUnpriced:
     looking like the one we failed to price gets it read as the risky
     choice rather than the free one."""
 
-    def test_a_local_model_costs_nothing_and_says_so(self) -> None:
-        model = {"vendor": "ollama", "input_price": None, "output_price": None}
+    @pytest.mark.parametrize("vendor", ["ollama", "llamacpp"])
+    def test_a_local_model_costs_nothing_and_says_so(self, vendor: str) -> None:
+        model = {"vendor": vendor, "input_price": None, "output_price": None}
 
         assert is_local_model(model)
         assert format_price(None, None, local=True) == "Free"
 
-    def test_a_cloud_model_with_no_pricing_stays_blank(self) -> None:
+    def test_a_cloud_model_with_no_pricing_says_so(self) -> None:
         """Inventing a figure is worse than admitting we lack one."""
         model = {"vendor": "openai", "input_price": None, "output_price": None}
 
         assert not is_local_model(model)
-        assert format_price(None, None, local=is_local_model(model)) == ""
+        assert format_price(None, None, local=False) == UNKNOWN_PRICE
 
     def test_a_priced_model_is_untouched_whatever_it_runs_on(self) -> None:
         assert format_price(3.0, 15.0, local=True) == "$3 / $15"

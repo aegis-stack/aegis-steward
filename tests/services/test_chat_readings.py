@@ -16,6 +16,7 @@ from app.services.ai.domains.chat.readings import (
     Reading,
     ReadingItem,
     format_readings,
+    kept_readings,
     merge_staged_readings,
     reading_stage,
     record_reading,
@@ -70,12 +71,48 @@ class TestRecordReading:
         assert staged == []
 
     @pytest.mark.asyncio
-    async def test_empty_items_are_rejected(self) -> None:
+    async def test_a_reading_with_nothing_in_it_is_rejected(self) -> None:
         with reading_stage() as staged:
             result = result_data(await record_reading(title="x", items=[]))
 
         assert "error" in result
         assert staged == []
+
+    @pytest.mark.asyncio
+    async def test_the_header_is_kept_with_the_lines(self) -> None:
+        """#286: a dentist's receipt kept the visit and lost the letterhead,
+        so the address and phone needed a re-upload. The source's own
+        fields are part of the reading."""
+        header = {"Practice": "Bright Smile Dental", "Phone": "555-0142"}
+        with reading_stage() as staged:
+            await record_reading(
+                title="Dentist receipt 9/29",
+                items=[{"label": "Cleaning", "amount_cents": 18_500}],
+                fields=header,
+            )
+
+        block = format_readings(staged)
+        assert block is not None
+        for label, value in header.items():
+            assert f"{label}: {value}" in block
+
+    @pytest.mark.asyncio
+    async def test_a_document_without_lines_is_still_a_reading(self) -> None:
+        """A tax form, a letter or a card has fields and no line items; one
+        stored so must load, or every turn that reads memory fails
+        (2026-11-21: a live call would not open)."""
+        with reading_stage() as staged:
+            result = result_data(
+                await record_reading(
+                    title="Form 1099-INT",
+                    items=[],
+                    kind="tax form",
+                    fields={"Interest": "$12.40"},
+                )
+            )
+
+        assert "error" not in result
+        assert kept_readings([staged[0].model_dump()]) == staged
 
 
 class TestMergeAndFormat:

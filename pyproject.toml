@@ -78,6 +78,10 @@ dependencies = [
     # Web push (VAPID + aes128gcm) to the home-screen app and browsers.
     "pywebpush>=2.5,<3",
     "openpyxl>=3.1.5",
+    "onnxruntime>=1.32.0",
+    # Parakeet hearing in the app (onnx-asr); PyAV decodes the browser's webm.
+    "onnx-asr[cpu,hub]>=0.12.0",
+    "av>=19.0.2",
 ]
 
 [project.scripts]
@@ -248,8 +252,8 @@ cmd = "docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile
 
 
 [tool.poe.tasks.stop]
-help = "Gracefully stop all services"
-cmd = "docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev down --remove-orphans"
+help = "Gracefully stop all services (and the Kokoro-FastAPI serve started)"
+script = "scripts.dev_tasks:stop"
 
 [tool.poe.tasks.clean]
 help = "Clean up project containers, networks, volumes, and images"

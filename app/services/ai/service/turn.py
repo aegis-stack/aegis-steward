@@ -10,15 +10,23 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any
 
+from app.core.concurrency import background
 from app.services.ai.domains.chat.agent_loader import CODE_MODE_OVERRIDE, AgentConfig
 from app.services.ai.domains.chat.module_context import render_context_modules
 from app.services.ai.domains.chat.page_actions import on_page
+from app.services.ai.domains.chat.self_context import TurnContext, current_turn
+from app.services.ai.domains.chat.summary import enqueue_fold
 from app.services.ai.domains.chat.user_memory import (
+    UserContext,
     build_user_memory_context,
     memory_user,
 )
 from app.services.ai.models import Conversation
-from app.services.ai.service.prompt import PromptMixin, history_char_budget
+from app.services.ai.service.prompt import (
+    HISTORY_CHAR_BUDGET_MIN,
+    PromptMixin,
+    history_char_budget,
+)
 from app.services.system.node_now import right_now
 
 # Whether a turn in this context is told what is wrong right now. The eval
@@ -36,6 +44,10 @@ class TurnSetup:
 
     agent: Any = None
     conversation_context: str = ""
+    # Where its replayed history starts among the thread's turns
+    # (``prompt.replayed``), and the running summary ahead of it.
+    history_start: int = 0
+    history_summary: str = ""
 
 
 class TurnMixin(PromptMixin):
@@ -50,11 +62,17 @@ class TurnMixin(PromptMixin):
         subject: str | None = None,
         owner_user_id: int | None = None,
         admin: bool | None = None,
+        lean: bool = False,
+        seeded: int = 0,
     ) -> TurnSetup:
         """The agent for ``conversation``, built from every context block
         a turn reads, as the caller (``owner_user_id``, ``admin``) sees
         them. A typed turn and a live call (``realtime_calls``) both build
-        her here, so each can do what the other can."""
+        her here, so each can do what the other can. ``lean`` is her prompt,
+        her tools and the last few turns alone: a local model on a call,
+        which read the rest for minutes before a word, or not at all past
+        its window (2026-11-21). The thread's latest ``seeded`` turns ride
+        as the session's past turns (GPT-Live), out of the history text."""
         # On a page that declares its parts, she may point at them.
         agent_config = on_page(agent_config)
         # A played script's turn is built in the mode it was recorded in.
@@ -71,8 +89,14 @@ class TurnMixin(PromptMixin):
         )
         wrong = asyncio.create_task(right_now()) if reads_health else None
 
+        if lean:  # no memory, readings or context modules
+            agent_config = replace(agent_config, context_modules=())
         # Guarded per-user memory block (saved via the save_memory tool)
-        known = await build_user_memory_context(user_id)
+        known = (
+            UserContext(memory=None, readings=[])
+            if lean
+            else await build_user_memory_context(user_id)
+        )
         memory_context = known.memory
 
         # History budget scales with the EFFECTIVE model for this
@@ -85,7 +109,9 @@ class TurnMixin(PromptMixin):
             else self.config.model
         )
         context_window = await context_window_for(effective_model)
-        history_budget = history_char_budget(context_window)
+        history_budget = (
+            HISTORY_CHAR_BUDGET_MIN if lean else history_char_budget(context_window)
+        )
 
         # Recorded readings, read with the facts from the user's one row:
         # an extraction belongs to the user, not to the thread it was
@@ -121,10 +147,20 @@ class TurnMixin(PromptMixin):
             context_window=context_window,
             readings=readings,
             right_now=now,
+            seeded=seeded,
         )
+        seen = current_turn() or TurnContext()
+        # Turns that left its window fold into the running summary, on the
+        # worker, whichever way the turn was asked. Never a lean one's: its
+        # window is a few turns, and the summary folded to its cut would
+        # take every typed turn's history from there on.
+        if seen.fold_to and not lean:
+            background(enqueue_fold(conversation.id, seen.fold_to))
         return TurnSetup(
             conversation=conversation,
             agent_config=agent_config,
             agent=agent,
             conversation_context=conversation_context,
+            history_start=seen.messages_dropped,
+            history_summary=seen.summary,
         )

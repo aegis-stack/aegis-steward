@@ -58,3 +58,9 @@ class SpeechServerSettings(InferenceEngineSettings):
     SPEECH_HOST_PORT: int | None = None
     # A Kokoro-FastAPI checkout on the host, for ``make kokoro``.
     SPEECH_SERVER_DIR: str = "~/Kokoro-FastAPI"
+    # A hearing server you run: any OpenAI-compatible transcription server,
+    # as the call setup's Hears lists it. Compose runs Parakeet as
+    # ``hearing``; unset, none.
+    HEARING_BASE_URL: str | None = "http://hearing:5092/v1"
+    # The host port ``make serve`` published it on, where it runs in Docker.
+    HEARING_HOST_PORT: int | None = None

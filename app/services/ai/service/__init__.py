@@ -153,11 +153,13 @@ if TYPE_CHECKING:
         ProviderInfo,
         SpeechRequest,
         SpeechResult,
+        STTProvider,
         TTSProvider,
         TTSService,
         VoiceInfo,
         VoicePreviewRequest,
         VoiceSettingsResponse,
+        call_setup,
         design,
         get_current_voice_config,
         get_stt_models,
@@ -171,8 +173,13 @@ if TYPE_CHECKING:
         pronunciations,
         realtime_calls,
         speaking_model,
+        uninstalled,
+    )
+    from app.services.ai.domains.voice.cascade.connection import (
+        stages as call_stages,
     )
     from app.services.ai.domains.voice.live_voice import live_voice
+    from app.services.ai.domains.voice.models import server_url
     from app.services.ai.domains.voice.overview import (
         VoiceOverview,
         switch_voice,

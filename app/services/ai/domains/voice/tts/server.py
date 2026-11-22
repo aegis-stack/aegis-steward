@@ -35,9 +35,6 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_ID = TTSProvider.LOCAL_SERVER.value
 PREFIX = f"{PROVIDER_ID}:"
-# What a server is asked with in place of a key it does not take. Never
-# none: given none, the OpenAI client sends OPENAI_API_KEY to the server.
-NO_KEY = "speech-server"
 
 
 @dataclass(frozen=True)
@@ -111,7 +108,9 @@ class ServerTTSProvider(OpenAITTSProvider):
     provider_type = TTSProvider.LOCAL_SERVER
 
     def __init__(self, base_url: str, server: str, model: str, voice: str) -> None:
-        super().__init__(api_key=NO_KEY, model=model, voice=voice, base_url=base_url)
+        super().__init__(
+            api_key=speech_server.NO_KEY, model=model, voice=voice, base_url=base_url
+        )
         self.whole = SERVERS[server].whole
 
     def _speech_kwargs(self, request: SpeechRequest) -> dict[str, Any]:

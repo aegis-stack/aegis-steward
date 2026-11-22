@@ -8,8 +8,8 @@ import httpx
 import pytest
 
 from app.core import speech_server
-from app.core.config import Settings
 from tests._fake_dns import answering
+from tests._speech_server import Shell
 
 URL = "http://localhost:8880/v1"
 MODELS = {"object": "list", "data": [{"id": "tts-1"}, {"id": "kokoro"}]}
@@ -191,28 +191,16 @@ async def test_a_server_that_cannot_be_read_is_unavailable(
     assert reading.error
 
 
-class _Shell:
-    """Settings as a shell on the host has them, with only the speech
-    settings given: this ships to every stack, and only inference and
-    ai[voice] carry them."""
-
-    is_docker = False
-    localhost_url = staticmethod(Settings.localhost_url)
-
-    def __init__(self, **given: Any) -> None:
-        self.__dict__.update(given)
-
-
 def test_a_shell_on_the_host_reaches_a_docker_name_on_localhost() -> None:
     for name in ("host.docker.internal", "kokoro-fastapi"):
         assert (
-            speech_server.reach(_Shell(SPEECH_BASE_URL=f"http://{name}:8880/v1")) == URL
+            speech_server.reach(Shell(SPEECH_BASE_URL=f"http://{name}:8880/v1")) == URL
         )
-    assert speech_server.reach(_Shell()) is None
+    assert speech_server.reach(Shell()) is None
 
 
 def test_a_shell_takes_the_port_make_serve_published_it_on() -> None:
-    published = _Shell(
+    published = Shell(
         SPEECH_BASE_URL="http://kokoro-fastapi:8880/v1", SPEECH_HOST_PORT=8890
     )
 
@@ -222,4 +210,4 @@ def test_a_shell_takes_the_port_make_serve_published_it_on() -> None:
 def test_the_app_in_docker_reaches_it_by_its_own_name() -> None:
     named = "http://kokoro-fastapi:8880/v1"
 
-    assert speech_server.reach(_Shell(is_docker=True, SPEECH_BASE_URL=named)) == named
+    assert speech_server.reach(Shell(is_docker=True, SPEECH_BASE_URL=named)) == named
