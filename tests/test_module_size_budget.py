@@ -43,8 +43,8 @@ DECLARATION_FILES = ("core/parts.py",)
 
 # path -> line count when recorded. The refactoring backlog, largest first.
 BUDGET: dict[str, int] = {
-    "i18n/locales/en.py": 1347,
-    "i18n/locales/zh.py": 1324,
+    "i18n/locales/en.py": 1349,  # template: code mode CLI
+    "i18n/locales/zh.py": 1326,  # template: code mode CLI
     "i18n/locales/de.py": 1270,
     "i18n/locales/es.py": 1270,
     "i18n/locales/fr.py": 1270,
@@ -65,7 +65,7 @@ BUDGET: dict[str, int] = {
     # The template catch-up to aegis-stack 44a3670 (2026-10-09): the
     # template's own growth in shared modules, recorded rather than split
     # so the next update merges cleanly.
-    "components/web_frontend/rendering.py": 634,  # template: status_cell sub, chips
+    "components/web_frontend/rendering.py": 658,  # template: status_cell sub, chips, guest sign-in
     "core/config.py": 834,  # #481 upload caps, #482 encryption-key guard, #486 code mode limits, #479 hosts + auth-off guard, #488 Traefik API, deploy DOMAIN, #508 push key, #519 off-site backup, template: mail settings, db activity retention
 }
 

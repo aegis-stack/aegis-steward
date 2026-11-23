@@ -121,7 +121,10 @@ def format_per_minute(usd: float) -> str:
 
 def is_local_model(model: dict[str, Any]) -> bool:
     """Does this model run on this machine. Reads either spelling: a catalog
-    row calls it ``vendor``, a finished message's metadata ``provider``."""
+    row calls it ``vendor``, a finished message's metadata ``provider``.
+    The local vendors are the local providers (Ollama, llama.cpp); read
+    here, not imported above, because the pickers' formatters serve the
+    inference pages without the AI service."""
     from app.core.discovery import optional
 
     # A stack without the AI service (the Flet picker ships in every one)

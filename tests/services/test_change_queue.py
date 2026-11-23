@@ -25,6 +25,7 @@ from tests._change_queue import (
     executed,
     note_type,
 )
+from tests._session import flushes_alone
 
 NOTE = "test.note"
 LETTER = "test.letter"
@@ -801,6 +802,16 @@ async def test_a_turn_without_an_owner_touches_no_cards(
 
     assert "no signed-in user" in proposed["error"]
     assert "no signed-in user" in listed["error"]
+
+
+def test_a_change_flushes_in_a_process_that_loaded_only_the_queue() -> None:
+    """A worker or CLI command that imports only the queue's model still
+    finds the table its owner column points at (``user``, with auth)."""
+    flushed = flushes_alone(
+        "app.services.change_queue.models", "PendingChange", change_type=NOTE
+    )
+
+    assert flushed.returncode == 0, flushed.stderr
 
 
 @pytest.mark.parametrize(

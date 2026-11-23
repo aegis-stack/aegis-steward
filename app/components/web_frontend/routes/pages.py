@@ -26,7 +26,10 @@ from app.components.web_frontend.assets import (
     static_url,
 )
 from app.components.web_frontend.overseer_access import LOGIN, overseer_gate
-from app.components.web_frontend.rendering import templates, with_query
+from app.components.web_frontend.rendering import (
+    refused_sign_in,
+    templates,
+)
 from app.components.web_frontend.routes import overseer as overseer_routes
 from app.components.web_frontend.routes.partials import (
     overseer_ai as overseer_ai_partials,
@@ -219,14 +222,7 @@ async def login_submit(
         # message. Its 403 comes only after a correct password, for a
         # disabled account, so saying so reveals nothing new.
         reason = "disabled" if exc.status_code == 403 else "invalid"
-        return RedirectResponse(
-            url=with_query(
-                LOGIN if overseer else "/login",
-                error=reason,
-                next=site_path(next, "") or None,
-            ),
-            status_code=303,
-        )
+        return refused_sign_in(LOGIN if overseer else "/login", reason, next)
     return redirect
 
 

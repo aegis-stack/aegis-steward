@@ -52,7 +52,11 @@ def _state(run: dict[str, Any]) -> dict[str, str]:
         return status_cell("Sending", "accent")
     if not run.get("finished"):
         return status_cell("Running", "warn")
-    return status_cell("Failures", "error") if run.get("tasks_failed") else status_cell("Done", "ok")
+    return (
+        status_cell("Failures", "error")
+        if run.get("tasks_failed")
+        else status_cell("Done", "ok")
+    )
 
 
 def run_rows(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -92,7 +96,9 @@ async def section_context() -> dict[str, Any]:
         "events": EVENTS,
         "event": EVENT,
         "partials": PARTIALS,
-        "types": [{"id": t.value, "name": t.value.replace("_", " ")} for t in LoadTestTypes],
+        "types": [
+            {"id": t.value, "name": t.value.replace("_", " ")} for t in LoadTestTypes
+        ],
         "queues": [{"id": q, "name": q} for q in load_queues()],
         "max_tasks": MAX_BACKGROUND_TASKS,
     }

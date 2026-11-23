@@ -60,5 +60,7 @@ def test_status_dot_carries_its_tone(state: str, tone: str) -> None:
     """The main sidebar shows only warn/error dots; it keys on this."""
     from app.components.web_frontend.rendering import templates
 
-    html = templates.env.get_template("pages/overseer/_status_dot.html").render(health_status=state)
+    html = templates.env.get_template("pages/overseer/_status_dot.html").render(
+        health_status=state
+    )
     assert one(html, "[data-tone]").get("data-tone") == tone

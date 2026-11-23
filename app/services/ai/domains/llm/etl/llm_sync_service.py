@@ -418,13 +418,15 @@ class LLMSyncService(UpsertMixin):
             result.models_added += 1
             logger.debug(f"Added local model: {model_id}")
             existing = model
-        # Whether it calls tools, in the engine's own report.
+        # Whether it calls tools, in the engine's own report; one it cannot
+        # give (a router's unloaded model) keeps what the last one said.
+        caps = model_data.capabilities
         self._deploy(
             existing,
             vendor,
             result,
             dry_run,
-            function_calling="tools" in model_data.capabilities,
+            **({} if caps is None else {"function_calling": "tools" in caps}),
         )
 
 

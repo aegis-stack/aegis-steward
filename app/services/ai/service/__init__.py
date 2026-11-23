@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         keeps_pastes,
         lift_turn,
     )
+    from app.services.ai.domains.chat.chat_kit import BudgetGuard
     from app.services.ai.domains.chat.context_modules import (
         InvalidContextModuleError,
         get_context_entry,

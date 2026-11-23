@@ -78,7 +78,9 @@ dependencies = [
     # Web push (VAPID + aes128gcm) to the home-screen app and browsers.
     "pywebpush>=2.5,<3",
     "openpyxl>=3.1.5",
-    "onnxruntime>=1.32.0",
+    # A live call on a local model hears its turns in the app (Silero VAD
+    # and Smart Turn, voice/cascade): small ONNX models, no torch.
+    "onnxruntime>=1.32,<2",
     # Parakeet hearing in the app (onnx-asr); PyAV decodes the browser's webm.
     "onnx-asr[cpu,hub]>=0.12.0",
     "av>=19.0.2",

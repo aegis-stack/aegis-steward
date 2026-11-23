@@ -58,7 +58,10 @@ def test_overview_keeps_the_status_and_details(client: TestClient) -> None:
 
 def test_routes_are_the_web_and_overseer_ones_only(client: TestClient) -> None:
     groups = select(_get(client, "routes"), "[data-route-group]")
-    assert {text(one(g, "h2")): len(select(g, "tbody tr:not([data-detail])")) for g in groups} == {
+    assert {
+        text(one(g, "h2")): len(select(g, "tbody tr:not([data-detail])"))
+        for g in groups
+    } == {
         "overseer": 2,
         "web": 1,
     }

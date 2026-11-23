@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.components.backend.api.auth import admin, sessions
-from app.components.backend.api.auth.sessions import sign_in_metadata
+from app.components.backend.api.auth.sessions import sign_in
 from app.components.backend.api.deps import (
     login_rate_limit,
     register_rate_limit,
@@ -13,8 +13,6 @@ from app.components.backend.security.rate_limit import get_client_ip
 from app.core.audit import AuditEmitter, get_audit
 from app.core.config import settings
 from app.core.security import (
-    set_refresh_cookie,
-    set_session_cookie,
     verify_password,
 )
 from app.core.time import utcnow
@@ -76,17 +74,8 @@ async def register(
         target_id=user.id,
     )
 
-    # Auto-sign-in: set the HttpOnly session cookie so the client lands on a
-    # signed-in state without a second round-trip. The refresh token is an
-    # opaque, server-side row; its cookie is path-scoped to ``/api/v1/auth``
-    # so it only rides on auth endpoints.
-    access_token, refresh_token = await refresh_service.start_session(
-        user,
-        source="password",
-        **await sign_in_metadata(request, refresh_service),
-    )
-    set_session_cookie(response, access_token)
-    set_refresh_cookie(response, refresh_token)
+    # Auto-sign-in: the client lands signed in without a second round-trip.
+    await sign_in(request, response, user, "password", refresh_service)
 
     return UserResponse.model_validate(user)
 
@@ -157,14 +146,7 @@ async def login(
     # Update last_login timestamp
     await user_service.update_user(user.id, last_login=utcnow())
 
-    # See /register for the cookie scoping rationale.
-    access_token, refresh_token = await refresh_service.start_session(
-        user,
-        source="password",
-        **await sign_in_metadata(request, refresh_service),
-    )
-    set_session_cookie(response, access_token)
-    set_refresh_cookie(response, refresh_token)
+    access_token = await sign_in(request, response, user, "password", refresh_service)
 
     await audit.emit(
         "auth.login_success",
@@ -182,5 +164,5 @@ async def get_current_user(
     user_service: UserService = Depends(get_user_service),
 ) -> UserResponse:
     """Get current authenticated user."""
-    user = await get_current_user_from_token(token, user_service)
+    user = await get_current_user_from_token(token, user_service, guests=True)
     return UserResponse.model_validate(user)

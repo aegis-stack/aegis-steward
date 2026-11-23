@@ -9,6 +9,9 @@ from app.core.security import get_password_hash
 from app.core.time import utcnow
 from app.models.user import User, UserCreate
 from app.services.auth.domains.users.base import (
+    FixedRoleError as FixedRoleError,
+)
+from app.services.auth.domains.users.base import (
     RegistrationClosedError as RegistrationClosedError,
 )
 from app.services.auth.domains.users.base import (

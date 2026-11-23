@@ -966,6 +966,56 @@ class TestLocalSync:
             "qwen3:8b-mlx": True,
         }
 
+    async def test_a_router_marks_what_a_loaded_model_can_do_and_keeps_the_rest(
+        self, sync_db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A loaded model's tools are read from its own props, so it can run
+        a call. An unloaded one's are unknown: its deployment keeps what an
+        earlier sync, with it loaded, said."""
+        import httpx
+
+        from app.components.inference.llamacpp import LlamaCppEngine
+        from app.services.ai.domains.llm.etl import llm_sync_service
+        from tests import _fake_llamacpp
+        from tests._fake_ollama import serving
+
+        engine = LlamaCppEngine(
+            "http://llamacpp:8080",
+            transport=httpx.MockTransport(serving(_fake_llamacpp.ROUTER)),
+        )
+        monkeypatch.setattr(llm_sync_service, "get_inference_engine", lambda: engine)
+
+        async def nothing(*args: object) -> None:
+            """Labs and marks fetch from outside (their own tests)."""
+
+        monkeypatch.setattr(llm_sync_service, "attach_labs", nothing)
+        monkeypatch.setattr(llm_sync_service, "attach_provider_marks", nothing)
+        service = LLMSyncService(sync_db_session)
+        TestCatalogStats._served_model(service, "llamacpp", _fake_llamacpp.OTHER)
+        other = sync_db_session.exec(
+            select(LargeLanguageModel).where(
+                LargeLanguageModel.model_id == _fake_llamacpp.OTHER
+            )
+        ).one()
+        sync_db_session.add(
+            LLMDeployment(
+                llm_id=other.id, org_id=other.served_by_org_id, function_calling=True
+            )
+        )
+        sync_db_session.commit()
+
+        await LLMSyncService(sync_db_session).sync(source="local")
+
+        calls = {
+            m.model_id: d.function_calling
+            for m, d in sync_db_session.exec(
+                select(LargeLanguageModel, LLMDeployment).where(
+                    LLMDeployment.llm_id == LargeLanguageModel.id
+                )
+            ).all()
+        }
+        assert calls == {_fake_llamacpp.MODEL: True, _fake_llamacpp.OTHER: True}
+
 
 def _litellm(model_id: str, mode: str) -> LiteLLMModel:
     return LiteLLMModel(
