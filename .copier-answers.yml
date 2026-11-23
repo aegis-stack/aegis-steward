@@ -5,7 +5,7 @@ author_name: Your Name
 author_email: your.email@example.com
 github_username: your-username
 version: 0.1.0
-aegis_version: 0.20.0
+aegis_version: 0.21.0
 python_version: 3.14
 include_htmx: true
 include_scheduler: true
@@ -59,9 +59,9 @@ insights_per_user: false
 include_finance: true
 finance_plaid: true
 finance_snaptrade: true
-_commit: ddda3c5055e5b9a953b458c58b3c5b951e6e91ee
-_src_path: git+file:///Users/leonardbedner/Workspace/worktrees/aegis-stack/update-src
-_template_version: 0.20.0.post62+gddda3c505
+_commit: 25b604f68518f91348063caa2013d185bfe278aa
+_src_path: git+file:///Users/leonardbedner/Workspace/worktrees/aegis-stack-voice-setup
+_template_version: 0.21.0.post23+g25b604f68
 ai_with_persistence: true
 finance_import: true
 include_auth_org: false

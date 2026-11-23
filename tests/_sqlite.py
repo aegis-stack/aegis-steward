@@ -64,4 +64,5 @@ def shape_like_production(
         if attach is not None:
             attach(dbapi_connection)
 
+    # The app's own begin, read-only sessions included, not a copy of it.
     event.listen(engine.sync_engine, "begin", emit_begin)

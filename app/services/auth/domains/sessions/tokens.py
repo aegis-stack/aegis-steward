@@ -98,6 +98,11 @@ def _new_family_id() -> str:
     return str(uuid.uuid4())
 
 
+def _lifetime(source: object) -> timedelta:
+    """How long a refresh token of a session signed in by ``source`` lives."""
+    return timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+
+
 def access_token(user: User, session_id: str) -> str:
     """An access token for ``user`` in the session (family) ``session_id``."""
     return create_access_token({"sub": user.email, "sid": session_id})
@@ -156,8 +161,7 @@ class RefreshService(DevicesMixin):
                 token=token_digest(token),
                 user_id=user_id,
                 family_id=family_id,
-                expires_at=utcnow()
-                + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+                expires_at=utcnow() + _lifetime(metadata.get("source")),
                 **metadata,
             )
         )

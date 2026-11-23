@@ -113,7 +113,7 @@ requires-dist = [
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = "==0.30.0" },
     { name = "ofxtools", specifier = ">=0.9.5,<2" },
     { name = "onnx-asr", extras = ["cpu", "hub"], specifier = ">=0.12.0" },
-    { name = "onnxruntime", specifier = ">=1.32.0" },
+    { name = "onnxruntime", specifier = ">=1.32,<2" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pillow", specifier = ">=13,<14" },
     { name = "prompt-toolkit", specifier = ">=3.0.0,<4" },

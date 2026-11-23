@@ -846,8 +846,8 @@ def test_the_models_table_leaves_out_the_library(
 
 
 class TestPronunciation:
-    """How every voice says terms, over the API: listed on every stack,
-    changed by an admin where the stack keeps a database."""
+    """How every voice says terms, over the API: listed on every stack.
+    Changing it is an admin's (``test_operator_refusal`` walks it)."""
 
     def test_the_list_is_read_on_every_stack(self, client: TestClient) -> None:
         listed = client.get("/api/v1/voice/pronunciation").json()

@@ -324,6 +324,23 @@ function restoreRows(root) {
     if (openRows[row.dataset.row]) row.setAttribute('data-open', '');
   }
 }
+// A box that follows what it holds (``data-follow="name"``, a run's session
+// over SSE) stays at its newest as it grows, unless the reader scrolled up
+// to read: where they were is kept by name across the swaps that redraw it.
+const FOLLOW_SLACK = 24;
+const unfollowed = {};
+document.addEventListener('scroll', (event) => {
+  const box = event.target;
+  if (!box.matches?.('[data-follow]')) return;
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK;
+  unfollowed[box.dataset.follow] = atEnd ? null : box.scrollTop;
+}, true);
+function restoreFollow(root) {
+  for (const box of root.querySelectorAll('[data-follow]')) {
+    const top = unfollowed[box.dataset.follow];
+    box.scrollTop = top == null ? box.scrollHeight : top;
+  }
+}
 // The tabs picked, the folds left and the rows opened, back on whatever
 // htmx brings in; again the moment new content is in, before the browser
 // paints it: htmx fires ``load`` only once the swap settles, a frame later,
@@ -334,6 +351,7 @@ function restoreView(root) {
   restoreTabs(root);
   restoreFolds(root);
   restoreRows(root);
+  restoreFollow(root);
 }
 document.body.addEventListener('htmx:load', (event) => restoreView(event.detail.elt));
 document.body.addEventListener('htmx:afterSwap', () => restoreView(document.body));
@@ -589,9 +607,10 @@ function syncDrawer(root) {
     if (drawer.open) drawer.close();
     return;
   }
+  // A real swap opens the drawer (``htmx:afterSwap``); htmx resolves this
+  // on any status, so opening it here would reopen one a 404 just closed.
   htmx.ajax('GET', url, { target: '#drawer-body', swap: 'innerHTML' })
     .then(() => {
-      if (!drawer.open) drawer.show();
       // Opened at one line (a search hit's ``data-hit``): bring it into view.
       const hit = drawer.querySelector('[data-hit]');
       revealTab(hit);

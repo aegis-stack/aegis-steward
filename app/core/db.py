@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Mapper, sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -235,9 +235,15 @@ db_activity.watch(engine)
 db_activity.watch(async_engine.sync_engine)
 
 
-# Long-held transactions and lock failures, for the Database pages.
-db_activity.watch(engine)
-db_activity.watch(async_engine.sync_engine)
+@event.listens_for(Mapper, "before_configured", once=True)
+def _load_every_model() -> None:
+    """Load every table before the first row or query of any process: a
+    process that imported one model (a CLI command, a worker, the
+    scheduler) could not otherwise flush it when a foreign key names a
+    table it never loaded (``user.id``)."""
+    from app.core.model_registry import import_all_models
+
+    import_all_models()
 
 
 # Configure session factory with SQLModel Session (sync)
@@ -288,7 +294,9 @@ def db_session(autocommit: bool = True) -> Generator[Session]:
 
 
 @asynccontextmanager
-async def get_async_session(read_only: bool = False) -> AsyncGenerator[AsyncSession]:
+async def get_async_session(
+    read_only: bool = False,
+) -> AsyncGenerator[AsyncSession]:
     """
     Async database session context manager with automatic transaction handling.
     ``read_only`` takes no write lock (``emit_begin``): for reads only.
@@ -312,6 +320,19 @@ async def get_async_session(read_only: bool = False) -> AsyncGenerator[AsyncSess
             await session.rollback()
             raise
         await _purge_released(session)
+
+
+async def release_lock(session: AsyncSession) -> None:
+    """Commit, ending ``session``'s transaction before slow work that needs
+    no database (a model call, a fetch over the network) or before code
+    that opens a connection of its own; its next query begins a new one.
+    On SQLite a transaction holds the one write lock from its first query
+    (the async engine begins IMMEDIATE): one left open across a model that
+    takes minutes stalls every process, and a second connection the same
+    request opens to write waits out the busy timeout behind it (one opened
+    ``read_only`` does not). On Postgres it is a connection idle in a
+    transaction."""
+    await session.commit()
 
 
 async def _purge_released(session: AsyncSession) -> None:
@@ -338,19 +359,6 @@ def insert(session: AsyncSession, model: Any) -> Any:
 
     name = session.sync_session.get_bind().dialect.name
     return (postgresql if name == "postgresql" else sqlite).insert(model)
-
-
-async def release_lock(session: AsyncSession) -> None:
-    """Commit, ending ``session``'s transaction before slow work that needs
-    no database (a model call, a fetch over the network) or before code
-    that opens a connection of its own; its next query begins a new one.
-    On SQLite a transaction holds the one write lock from its first query
-    (the async engine begins IMMEDIATE): one left open across a model that
-    takes minutes stalls every process, and a second connection the same
-    request opens to write waits out the busy timeout behind it (one opened
-    ``read_only`` does not). On Postgres it is a connection idle in a
-    transaction."""
-    await session.commit()
 
 
 def init_database() -> Path:

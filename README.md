@@ -128,6 +128,29 @@ Steward deploys from GitHub Actions: open **Actions, Deploy, Run workflow**. Set
 ## What It Is Made Of
 
 <!-- what-it-has -->
+### Components
+
+- **Backend**: FastAPI on uvicorn or granian, lifecycle hooks, in-memory request metrics, API load testing for every route (FastAPI on PORT (default 8000); OpenAPI docs at /docs)
+- **Frontend**: Flet, ships with the Overseer system dashboard (Flet dashboard at /dashboard)
+- **Worker**: Pluggable Arq, Taskiq, or Dramatiq (`make logs-worker`; tasks under app/worker, CLI group `tasks`)
+- **Scheduler**: APScheduler with persistent jobs (Runs in-process; jobs listed on the dashboard)
+- **Database**: Postgres (self-hosted or Neon serverless) or SQLite + SQLModel ORM (`make migrate` runs Alembic; models under app/models)
+- **Redis**: Redis for caching, sessions, pub/sub (redis:6379 in the compose network; REDIS_URL from the host)
+- **Ingress**: Traefik v3 reverse proxy with TLS (Traefik in front of the app; routes from docker-compose labels)
+- **Web Frontend**: Server-rendered pages at `/`: Jinja2 + htmx + Alpine, Tailwind/DaisyUI styling (Server-rendered pages at /)
+- **Inference**: Local AI models via Ollama or llama.cpp, speech via Kokoro (Ollama (OLLAMA_BASE_URL, :11434) or llama.cpp's llama-server (LLAMACPP_BASE_URL, :8080), on the host or as a compose service; get_inference_engine())
+- **Secrets**: Encrypted credential store: keys set while the app runs, checked with the provider on paste, never shown again (app.core.secrets: await secrets.get(name); Overseer > Secrets; ENCRYPTION_KEY in .env)
+- **Deploy**: Deployment target (Docker Compose), read by the Overseer (`aegis deploy`; the socket-proxy service answers the Overseer's read-only Docker queries)
+
+### Services
+
+- **Auth**: Persistent sessions with refresh-token rotation, GitHub/Google sign-in, RBAC, multi-tenant Organizations (/api/v1/auth, sign-in page at /login, CLI group `auth`)
+- **AI**: Conversational agents, RAG, model catalog, TTS and STT (PydanticAI / LangChain across 7 providers) (/api/v1/ai, chat on the dashboard, CLI groups `ai`, `llm`, `agents`)
+- **Comms**: Transactional email (Resend) + SMS / voice (Twilio) (/api/v1/comms, CLI group `comms`)
+- **Finance**: Personal finance aggregation (accounts, transactions, net worth, import) (/api/v1/finance, Finance tab on the dashboard, CLI group `finance`)
+- **Documents**: Content-addressed document store, deduped, with page-addressed extraction (/api/v1/documents, Documents tab on the dashboard)
+
+Each part's routes, jobs and tables: the docs' *What It Is Made Of* page (`stack.md`), read from the code when the docs are built.
 <!-- /what-it-has -->
 
 ## License

@@ -42,6 +42,15 @@ def get_session_metadata(request: Request) -> dict[str, str | None]:
 SWEEP_AT = 10_000
 
 
+def too_many(window_seconds: int) -> HTTPException:
+    """The 429 every limit answers with, saying when to try again."""
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Too many requests. Please try again later.",
+        headers={"Retry-After": str(window_seconds)},
+    )
+
+
 class RateLimiter:
     """In-memory rate limiter using sliding window. Its limit and window are
     the named settings, read on each check, so a value saved in the Overseer
@@ -76,11 +85,7 @@ class RateLimiter:
         recent = [t for t in self._requests.get(key, []) if t > cutoff]
         self._requests[key] = recent
         if len(recent) >= self.max_requests:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many requests. Please try again later.",
-                headers={"Retry-After": str(self.window_seconds)},
-            )
+            raise too_many(self.window_seconds)
         recent.append(now)
 
     def _sweep(self, cutoff: float) -> None:
@@ -126,7 +131,7 @@ async def login_rate_limit(request: Request) -> None:
     if email:
         buckets.append(f"{LOGIN_BUCKET}email:{email}")
     window = settings.RATE_LIMIT_LOGIN_WINDOW
-    counts = [await get_cache().hit(bucket, window) for bucket in buckets]
+    counts = [await get_cache().count(bucket, 1, window) for bucket in buckets]
     if max(counts) > settings.RATE_LIMIT_LOGIN_MAX:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

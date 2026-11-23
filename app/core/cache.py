@@ -309,21 +309,23 @@ class CacheService:
         self._store[key] = (True, time.time() + ttl)
         return True
 
-    async def hit(self, key: str, ttl: int) -> int:
-        """Count one more at ``key`` and return the count: a fixed window
-        that starts with the first hit and lasts ``ttl`` seconds."""
+    async def count(self, key: str, by: int, ttl: int) -> int:
+        """Add ``by`` to the number at ``key`` and return the total: one
+        step on Redis, so every process counts into the same number. The
+        key lapses ``ttl`` seconds after it was first counted. Read it only
+        through ``count`` (``by=0``): ``get`` unpickles, and a count is a
+        plain number."""
         if self._redis is not None:
-            async with self._redis.pipeline(transaction=True) as pipe:
-                pipe.incr(key)
-                pipe.expire(key, ttl, nx=True)
-                count, _ = await pipe.execute()
-            return int(count)
-        held = await self._lookup(key)
-        count = (held or 0) + 1
+            pipe = self._redis.pipeline()
+            pipe.set(key, 0, nx=True, ex=ttl)
+            pipe.incrby(key, by)
+            _, total = await pipe.execute()
+            return int(total)
+        total = (await self._lookup(key) or 0) + by
         assert self._store is not None
-        expires_at = self._store[key][1] if held else time.time() + ttl
-        self._store[key] = (count, expires_at)
-        return count
+        expires_at = self._store.get(key, (0, time.time() + ttl))[1]
+        self._store[key] = (total, expires_at)
+        return total
 
     async def _keys(self, prefix: str) -> list[bytes]:
         """Every Redis key starting with ``prefix``: SCAN with MATCH, O(n)

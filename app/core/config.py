@@ -263,7 +263,6 @@ class Settings(
     PASSWORD_RESET_EXPIRE_MINUTES: int = 60
     EMAIL_VERIFICATION_EXPIRE_HOURS: int = 24
 
-    # Rate limiting settings
     RATE_LIMIT_LOGIN_MAX: Annotated[
         int,
         Configurable(
@@ -299,7 +298,6 @@ class Settings(
         ),
     ] = 300
 
-    # Account lockout settings
     ACCOUNT_LOCKOUT_ATTEMPTS: Annotated[
         int, Configurable("service_auth", "Failed sign-ins before an account is locked")
     ] = 5

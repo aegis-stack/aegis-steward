@@ -37,15 +37,28 @@ from app.services.auth.service import (
 router = APIRouter()
 
 
-async def sign_in_metadata(
-    request: Request, refresh_service: RefreshService
-) -> dict[str, str | None]:
-    """``get_session_metadata`` plus the session the browser's refresh cookie
-    belongs to (``replaces``), so a sign-in ends the session it replaces.
-    The cookie rides only on the auth API, so a page form's sign-in has none."""
+async def sign_in(
+    request: Request,
+    response: Response,
+    user: User,
+    source: str,
+    refresh_service: RefreshService,
+) -> str:
+    """Start ``user``'s session and set both cookies on ``response``: the
+    HttpOnly session cookie, and the refresh cookie path-scoped to
+    ``/api/v1/auth`` so it rides only on auth endpoints. The access token.
+
+    The session the browser's refresh cookie belongs to is ended (it is
+    ``replaces``d). The cookie rides only on the auth API, so a page form's
+    sign-in has none."""
     cookie = request.cookies.get(REFRESH_COOKIE)
     replaces = await refresh_service.family_of(cookie) if cookie else None
-    return get_session_metadata(request) | {"replaces": replaces}
+    access_token, refresh_token = await refresh_service.start_session(
+        user, source=source, replaces=replaces, **get_session_metadata(request)
+    )
+    set_session_cookie(response, access_token)
+    set_refresh_cookie(response, refresh_token)
+    return access_token
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -135,7 +148,9 @@ async def logout(
     # Auth gate. If invalid, build the 401 response ourselves so the
     # cookie-removal headers actually ride on the wire.
     try:
-        current_user = await get_current_user_from_token(token, user_service)
+        current_user = await get_current_user_from_token(
+            token, user_service, guests=True
+        )
     except HTTPException as exc:
         failure = JSONResponse(
             status_code=exc.status_code,
@@ -187,9 +202,10 @@ async def list_sessions(
     ``DELETE /sessions/{id}``; the underlying refresh token is never
     returned.
     """
-    current_user = await get_current_user_from_token(token, user_service)
+    current_user = await get_current_user_from_token(token, user_service, guests=True)
     current_family = await _current_session_family(request, token, refresh_service)
-    rows = await refresh_service.list_sessions(current_user.id)
+    family = None
+    rows = await refresh_service.list_sessions(current_user.id, family)
     return session_responses(rows, current_family)
 
 
@@ -215,6 +231,7 @@ def session_responses(
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_session(
     session_id: str,
+    request: Request,
     token: str | None = Depends(get_session_token),
     user_service: UserService = Depends(get_user_service),
     refresh_service: RefreshService = Depends(get_refresh_service),
@@ -225,7 +242,7 @@ async def revoke_session(
 
     The session's access tokens stop working on their next request.
     """
-    current_user = await get_current_user_from_token(token, user_service)
+    current_user = await get_current_user_from_token(token, user_service, guests=True)
     await _revoke_one(
         refresh_service, audit, current_user.id, current_user.id, session_id
     )
@@ -247,6 +264,7 @@ async def revoke_other_sessions(
     everything. Returns 401 if the caller isn't authenticated via the
     access token.
     """
+    # Not a guest's: every other session on its account is another visitor's.
     current_user = await get_current_user_from_token(token, user_service)
     current_family = await _current_session_family(request, token, refresh_service)
     revoked = await refresh_service.revoke_other_sessions(

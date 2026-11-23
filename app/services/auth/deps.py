@@ -75,10 +75,16 @@ async def get_optional_user(
     catching exceptions. With ``AUTH_ENABLED=False`` a request with no
     session still resolves, to the synthetic dev user.
     """
+    return await _optional_user(token, user_service)
+
+
+async def _optional_user(
+    token: str | None, user_service: UserService, *, guests: bool = False
+) -> User | None:
     if not token and settings.AUTH_ENABLED:
         return None
     try:
-        return await get_current_user_from_token(token, user_service)
+        return await get_current_user_from_token(token, user_service, guests=guests)
     except HTTPException:
         return None
 

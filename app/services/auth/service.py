@@ -12,6 +12,7 @@ from app.models.user import User
 from app.services.auth.domains.sessions import history as session_history
 from app.services.auth.domains.sessions.tokens import RefreshService, access_token
 from app.services.auth.domains.users.accounts import (
+    FixedRoleError,
     RegistrationClosedError,
     RestoreConflictError,
     UserService,
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 
 # What callers outside the service use of its domains.
 __all__ = [
+    "FixedRoleError",
     "RefreshService",
     "RegistrationClosedError",
     "RestoreConflictError",
@@ -57,9 +59,11 @@ def session_id_of(token: str | None) -> str | None:
 
 
 async def get_current_user_from_token(
-    token: str | None, user_service: UserService
+    token: str | None, user_service: UserService, *, guests: bool = False
 ) -> User:
-    """Get current user from JWT token."""
+    """Get current user from JWT token. The shared guest account
+    (``auth[guest]``) is refused (403) unless ``guests``: a route a guest
+    may use says so, so none hands a stranger what a member may do."""
     if not settings.AUTH_ENABLED:
         return _build_dev_user()
 

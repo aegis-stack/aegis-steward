@@ -51,7 +51,7 @@ def test_the_page_form_shares_the_count(app: FastAPI) -> None:
 
 async def test_a_count_is_a_window() -> None:
     """The counter the limit reads, on the in-memory backend tests run on
-    (Redis is INCR, then EXPIRE on the first hit)."""
+    (on Redis, one step: the key set with its expiry, then INCRBY)."""
     cache = CacheService()
-    assert [await cache.hit("k", ttl=60) for _ in range(3)] == [1, 2, 3]
-    assert await cache.hit("other", ttl=60) == 1
+    assert [await cache.count("k", 1, ttl=60) for _ in range(3)] == [1, 2, 3]
+    assert await cache.count("other", 1, ttl=60) == 1

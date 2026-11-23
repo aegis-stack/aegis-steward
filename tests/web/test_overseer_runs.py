@@ -33,6 +33,7 @@ class TestRunLog:
         box = one(response.text, "[data-run-log]")
         assert box.get("sse-connect") == "/partials/overseer/runs/r1/log/events"
         assert one(box, "pre").get("sse-swap") == "run-log"
+        assert one(box, "pre").get("data-follow") == "run-log"
         assert text(one(box, "pre")) == "a b"
 
     def test_a_finished_run_holds_no_stream(

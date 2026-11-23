@@ -751,6 +751,7 @@ def test_the_page_scripts_declare_no_name_twice() -> None:
 # A script fetched from another origin: a tag's ``src``, or a URL a page
 # script loads itself (``createElement('script')``, ``import()``).
 REMOTE_TAG = re.compile(r"<script\b[^>]*\bsrc=\"https?://[^>]*>")
+TURNSTILE_JS = "https://challenges.cloudflare.com/turnstile/v0/api.js"
 REMOTE_URL = re.compile(r"['\"`]https?://[^'\"`]+['\"`]")
 
 
@@ -766,7 +767,9 @@ def test_no_third_party_script_runs_unverified() -> None:
         if "integrity=" not in tag or "crossorigin=" not in tag
     ]
     for path in APP_JS.parent.glob("*.js"):
-        source = path.read_text()
+        # Cloudflare serves Turnstile unversioned and refuses a hash; it
+        # loads only on the sign-in page, never Overseer's.
+        source = path.read_text().replace(f"'{TURNSTILE_JS}'", "")
         if REMOTE_URL.search(source) and ".integrity = " not in source:
             unverified.append(f"{path.name}: loads a remote script unhashed")
     assert unverified == []
@@ -804,22 +807,28 @@ GONE_HARNESS = (
 let closed = false;
 const toasts = [];
 window.dispatchEvent = (e) => toasts.push(e.detail && e.detail.text);
-document.getElementById = (id) => (id === 'drawer' ? { close: () => { closed = true; } } : null);
+const drawer = { open: true, dataset: {}, querySelector: () => null,
+                 show() { this.open = true; }, close() { this.open = false; closed = true; } };
+document.getElementById = (id) => (id === 'drawer' ? drawer : null);
 require(APP_JS);
 const failed = (target, status) => fire('htmx:responseError',
   { detail: { elt: { dataset: {} }, target: { id: target }, xhr: { status } } });
-failed('drawer-body', 404);
+// htmx resolves its promise on any status, after the error event.
+htmx.ajax = () => { failed('drawer-body', 404); return Promise.resolve(); };
+const link = { dataset: { drawerParam: 'run', drawerUrl: '/overseer/runner/runs/9' } };
+fire('htmx:load', { detail: { elt: { querySelector: () => link } } });
 failed('overseer-main', 500);
-console.log(JSON.stringify({ closed, toasts }));
+setTimeout(() => console.log(JSON.stringify({ closed, open: drawer.open, toasts })), 0);
 """
 )
 
 
 def test_a_drawer_for_an_item_no_longer_there_closes() -> None:
     """Deleted from that very drawer, or a stale link: the drawer closes
-    (its parameter leaves the address), no error; any other failure says so."""
+    (its parameter leaves the address) and stays closed once the load is
+    over, no error; any other failure says so."""
     out = run(GONE_HARNESS, APP_JS=APP_JS)
-    assert out == {"closed": True, "toasts": ["Request failed (500)"]}
+    assert out == {"closed": True, "open": False, "toasts": ["Request failed (500)"]}
 
 
 def test_a_change_reads_in_the_viewers_clock() -> None:
