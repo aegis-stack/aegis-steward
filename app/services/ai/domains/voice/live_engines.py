@@ -22,12 +22,16 @@ from app.core.voice_settings import setting_default
 from app.services.ai.domains.llm.queries import price_for_model
 from app.services.ai.domains.spend import calls
 from app.services.ai.domains.voice import queries
+from app.services.ai.domains.voice.catalog import GEMINI_PREBUILT
+from app.services.ai.domains.voice.models import TTS_ORGS, TTSProvider
 from app.services.ai.models.provider_names import LOCAL_PROVIDERS
 from app.services.ai.models.voice import LiveEngine
 
 DEFAULT = setting_default("VOICE_LIVE_ENGINE")
 # The vendors whose realtime models a call can reach through Pydantic AI.
 CALL_VENDORS = frozenset({"openai", "google"})
+# The speaking provider whose voices each realtime vendor speaks.
+VOICED_BY = {org: provider for provider, org in TTS_ORGS.items()}
 
 # How a call talks: the section that leads the voice agent's prompt on a
 # call. Everything else in that prompt still applies.
@@ -175,6 +179,24 @@ def chained(engine: LiveEngine) -> bool:
     think, speak: ``cascade``): its model is a chat model, with no
     realtime API of its own."""
     return engine.llm.mode != "realtime"
+
+
+def voiced_by(model: str) -> TTSProvider | None:
+    """The speaking provider whose voices a realtime ``model`` speaks;
+    None for a vendor with none to pick."""
+    return VOICED_BY.get(model.partition(":")[0])
+
+
+def call_voice(model: str, voices: dict[str, str]) -> str | None:
+    """The voice a call on realtime ``model`` speaks: the voice's own for
+    the vendor's provider (``voices``, ``VoiceProfile.voices``), else None:
+    the model's own default. Gemini Live speaks only its 30 prebuilt
+    voices, not its library's others."""
+    by = voiced_by(model)
+    voice = voices.get(by.value) if by else None
+    if by == TTSProvider.GEMINI and voice not in GEMINI_PREBUILT:
+        return None
+    return voice
 
 
 def is_gpt_live(model: str) -> bool:

@@ -13,7 +13,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.ai.domains.voice import live_engines
-from app.services.ai.domains.voice.profiles import SETTINGS
+from app.services.ai.domains.voice.profiles import SETUP
 from app.services.ai.models.voice.live_engine import LiveEngine
 from app.services.finance.domains.detection.analyst.live_engines import (
     ENGINE_SEEDS,
@@ -115,7 +115,7 @@ class TestHowTheyTalk:
 
 
 def test_the_active_profile_carries_its_engine() -> None:
-    assert SETTINGS["live_engine"] == "VOICE_LIVE_ENGINE"
+    assert SETUP["live_engine"] == "VOICE_LIVE_ENGINE"
 
 
 class TestResolving:

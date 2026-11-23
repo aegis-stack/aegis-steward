@@ -852,4 +852,4 @@ class TestPronunciation:
     def test_the_list_is_read_on_every_stack(self, client: TestClient) -> None:
         listed = client.get("/api/v1/voice/pronunciation").json()
 
-        assert {"term": "Traefik", "say": "traffic", "ipa": None} in listed
+        assert {"term": "Traefik", "say": "traffic"} in listed
