@@ -175,7 +175,7 @@ if KEEPS_PROFILES:
     ) -> list[Pronunciation]:
         """Say ``said.term`` its way from the next thing said."""
         try:
-            await pronunciations.save(db, said.term, said.say, said.ipa)
+            await pronunciations.save(db, said.term, said.say)
         except pronunciations.PronunciationError as exc:
             raise HTTPException(422, str(exc)) from None
         return pronunciation_list()
