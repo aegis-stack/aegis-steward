@@ -22,8 +22,14 @@ from pydantic_ai.messages import (
     SpeechPartDelta,
     ToolReturnPart,
 )
-from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
+from pydantic_ai.models.function import (
+    AgentInfo,
+    DeltaThinkingPart,
+    DeltaToolCall,
+    FunctionModel,
+)
 
+from app.core import steps
 from app.services.ai.domains.voice.cascade import call, connection
 from app.services.ai.domains.voice.cascade.connection import CascadeRealtimeModel
 from app.services.ai.domains.voice.models import AudioFormat
@@ -286,6 +292,22 @@ async def test_each_stage_of_a_turn_is_told_as_it_starts() -> None:
     told = await _staged(_model(_brain))
 
     assert told == [connection.HEARING, connection.READING, connection.READING]
+
+
+async def test_the_model_thinking_is_a_stage_of_its_own() -> None:
+    """A local model thinks before it answers: the call says so, not that
+    it is still reading."""
+
+    async def thinking(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> AsyncIterator[Any]:
+        if not _warming(info):
+            yield {0: DeltaThinkingPart(content="They want the balance.")}
+        yield "You have 42 dollars."
+
+    told = await _staged(_model(thinking))
+
+    assert told == [connection.HEARING, connection.READING, steps.THINKING]
 
 
 async def test_a_turn_with_no_words_ends_its_steps() -> None:

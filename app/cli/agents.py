@@ -62,6 +62,22 @@ async def _set_prompt(slug: str, prompt: str, note: str) -> None:
     await update_agent(slug, {"system_prompt": prompt}, source="cli", note=note)
 
 
+async def _call_prompts(keys: list[str]) -> dict[str, str]:
+    from app.core.db import get_async_session
+    from app.services.ai.service import live_engines
+
+    async with get_async_session(read_only=True) as session:
+        return await live_engines.instructions_of(session, keys)
+
+
+async def _set_call_prompt(keys: list[str], instructions: str) -> list[str]:
+    from app.core.db import get_async_session
+    from app.services.ai.service import live_engines
+
+    async with get_async_session() as session:
+        return await live_engines.set_instructions(session, keys, instructions)
+
+
 async def _set_code_mode(slug: str, on: bool) -> None:
     from app.services.ai.service import update_agent
 
@@ -254,6 +270,29 @@ async def set_prompt(
         _error(str(e))
         sys.exit(1)
     console.print(theme.good_text(t("agents.prompt_set", slug=slug)))
+
+
+@app.command("call-prompt", help=lazy_t("agents.call_prompt_help"))
+async def call_prompt(
+    keys: list[str] = typer.Argument(..., help=lazy_t("agents.arg_engines")),
+    file: Path | None = typer.Option(
+        None, "--file", exists=True, dir_okay=False, help=lazy_t("agents.opt_file")
+    ),
+) -> None:
+    import sys
+
+    if file is None:
+        found = await _call_prompts(keys)
+        for key, instructions in found.items():
+            console.print(Panel(instructions, title=key))
+    else:
+        found = dict.fromkeys(await _set_call_prompt(keys, file.read_text()))
+        for key in found:
+            console.print(theme.good_text(t("agents.call_prompt_set", engine=key)))
+    missing = [key for key in keys if key not in found]
+    if missing:
+        _error(t("agents.no_engine", keys=", ".join(missing)))
+        sys.exit(1)
 
 
 @prompt_app.command("history", help=lazy_t("agents.prompt_help_history"))

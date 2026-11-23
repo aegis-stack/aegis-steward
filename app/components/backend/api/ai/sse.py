@@ -85,7 +85,8 @@ async def _events(
         acted.append(action)
 
     # Quiet after a tool's frame is the tool at work, not the model
-    # thinking: no reason, and its engine is not asked.
+    # thinking: no reason, and its engine is not asked. Thinking's own row
+    # names no tool.
     tool_running = False
 
     async def why() -> str | None:
@@ -103,8 +104,9 @@ async def _events(
                 for action in acted:
                     yield event("page", action)
                 acted.clear()
-                tool_running = (chunk.metadata or {}).get("event") == "tool"
-                if tool_running:
+                meta = chunk.metadata or {}
+                tool_running = meta.get("event") == "tool" and bool(meta.get("tool"))
+                if meta.get("event") == "tool":
                     yield _tool(chunk)
                     continue
                 yield _chunk(chunk)

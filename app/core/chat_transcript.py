@@ -283,6 +283,8 @@ def footer_line(meta: dict[str, Any]) -> str:
         parts.append(str(meta["model"]))
     if meta.get("gen_tps"):
         parts.append(f"{meta['gen_tps']} tps")
+    if meta.get("response_time_ms"):
+        parts.append(f"{meta['response_time_ms'] / 1000:.1f}s")
     cost = meta.get("cost")
     if cost:
         parts.append(f"${cost:.4f}")

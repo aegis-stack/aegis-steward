@@ -117,6 +117,23 @@ class TestHowTheyTalk:
         assert rows["gemini-live"].max_output_tokens
         assert rows["gpt-live"].max_output_tokens is None  # Live takes none
 
+    @pytest.mark.asyncio
+    async def test_set_instructions_are_kept_through_the_startup_refresh(
+        self, seeded: AsyncSession
+    ) -> None:
+        """An engine's instructions are its row's: set (``agents
+        call-prompt``), they are an edit, which the refresh never takes back.
+        A key with no engine changes nothing."""
+        changed = await live_engines.set_instructions(
+            seeded, ["gemini-live", "nope"], "## THIS IS A LIVE VOICE CALL\nBe brief."
+        )
+        await live_engines.refresh_defaults(seeded)
+
+        assert changed == ["gemini-live"]
+        rows = await _keyed(seeded)
+        assert rows["gemini-live"].instructions.endswith("Be brief.")
+        assert rows["gpt-live"].instructions != rows["gemini-live"].instructions
+
 
 def test_the_active_profile_carries_its_engine() -> None:
     assert SETUP["live_engine"] == "VOICE_LIVE_ENGINE"

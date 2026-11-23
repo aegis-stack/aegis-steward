@@ -321,6 +321,25 @@ async def refresh_defaults(
     return len(stale)
 
 
+async def instructions_of(session: AsyncSession, keys: list[str]) -> dict[str, str]:
+    """What each engine ``keys`` names leads a call with, by key."""
+    engines = await queries.engines_keyed(session, keys)
+    return {engine.key: engine.instructions or "" for engine in engines}
+
+
+async def set_instructions(
+    session: AsyncSession, keys: list[str], instructions: str
+) -> list[str]:
+    """Give each engine ``keys`` names these instructions: an edit, which
+    the startup's refresh never takes back. Returns the keys set."""
+    engines = await queries.engines_keyed(session, keys)
+    for engine in engines:
+        engine.instructions = instructions
+    session.add_all(engines)
+    await session.commit()
+    return [engine.key for engine in engines]
+
+
 # How many recent turns a model's wait is the median of.
 WAITS = 20
 

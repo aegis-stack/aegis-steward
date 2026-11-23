@@ -211,6 +211,30 @@ class TestAgentsPrompt:
         assert result.exit_code == 1
         mock_set.assert_not_called()
 
+    @patch("app.cli.agents._set_call_prompt")
+    def test_call_prompt_sets_each_engine_named(self, mock_set, tmp_path) -> None:
+        """A call engine's instructions are on its row: set from a file."""
+        prompt = tmp_path / "call.md"
+        prompt.write_text("Be brief.")
+        mock_set.return_value = ["gpt-6-luna"]
+
+        result = invoke(
+            ["agents", "call-prompt", "gpt-6-luna", "gone", "--file", str(prompt)]
+        )
+
+        assert result.exit_code == 1, result.output
+        mock_set.assert_called_once_with(["gpt-6-luna", "gone"], "Be brief.")
+        assert "gone" in result.output
+
+    @patch("app.cli.agents._call_prompts")
+    def test_call_prompt_shows_an_engines_instructions(self, mock_read) -> None:
+        mock_read.return_value = {"gpt-6-luna": "Be brief."}
+
+        result = invoke(["agents", "call-prompt", "gpt-6-luna"])
+
+        assert result.exit_code == 0, result.output
+        assert "Be brief." in result.output
+
     @patch("app.cli.agents._load_history")
     def test_history_lists_each_change(self, mock_history) -> None:
         mock_history.return_value = [

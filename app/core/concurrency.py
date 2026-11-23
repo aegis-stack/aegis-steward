@@ -1,8 +1,9 @@
 """Running independent work concurrently, with a ceiling (``fanout``),
 CPU work off the event loop (``cpu_bound``), work not waited for
 (``background``), a stream that ends as the server starts shutting
-down (``until_closing``), and one whose silences are named
-(``announce_waiting``).
+down (``until_closing``), one whose silences are named
+(``announce_waiting``), and one with what is told meanwhile
+(``interleave``).
 
 The slow thing in this stack is rarely the server and rarely the event
 loop. It is a ``for`` loop over items that do not depend on each other,
@@ -52,6 +53,7 @@ from app.core.log import logger
 
 T = TypeVar("T")
 R = TypeVar("R")
+U = TypeVar("U")
 
 # Enough to hide latency, small enough that a provider does not notice.
 # Every caller should pass its own; this is what to use when there is no
@@ -336,3 +338,57 @@ async def announce_waiting(
     finally:
         if pending is not None and not pending.done():
             pending.cancel()
+
+
+async def interleave(
+    source: AsyncIterator[T], told: asyncio.Queue[U]
+) -> AsyncIterator[T | U]:
+    """``source`` passed through, with what is put on ``told`` meanwhile as
+    it is put: what a step tells while the source waits on it (a script's
+    reads, while its tool call runs), not once the step is done. An item
+    and what is told as it arrives: the item first (the script, then its
+    reads). Nothing told is dropped. Every step shares one context, as in
+    ``announce_waiting``."""
+    stepping = source.__aiter__()
+
+    async def step() -> T:
+        return await stepping.__anext__()
+
+    context = contextvars.copy_context()
+    loop = asyncio.get_running_loop()
+    pending: asyncio.Task[T] | None = None
+    try:
+        while True:
+            pending = loop.create_task(step(), context=context)
+            after: list[U] = []
+            while not pending.done():
+                heard = loop.create_task(told.get())
+                await asyncio.wait(
+                    {pending, heard}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not heard.done():
+                    heard.cancel()
+                elif pending.done():
+                    after.append(heard.result())
+                else:
+                    yield heard.result()
+            try:
+                item = pending.result()
+            except StopAsyncIteration:
+                for late in (*after, *_emptied(told)):
+                    yield late
+                return
+            yield item
+            for late in after:
+                yield late
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+
+
+def _emptied(queue: asyncio.Queue[U]) -> list[U]:
+    """What is left on ``queue``, taken off it."""
+    left: list[U] = []
+    while not queue.empty():
+        left.append(queue.get_nowait())
+    return left
