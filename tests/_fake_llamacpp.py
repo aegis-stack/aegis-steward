@@ -83,7 +83,6 @@ ROUTER: dict[str, Any] = {
     },
     "/models/load": {"success": True},
     "/models/unload": {"success": True},
-    # A loaded model's own props, asked by name and never loading it
-    # (``autoload=false``: one freed since the listing answers 400).
+    # A loaded model's own props, asked as ``LlamaCppEngine._own`` asks.
     f"/props?{urlencode({'model': MODEL, 'autoload': 'false'})}": ROUTES["/props"],
 }

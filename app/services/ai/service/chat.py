@@ -16,6 +16,7 @@ from app.services.ai.domains.chat.attachments import (
 )
 from app.services.ai.domains.chat.titles import conversation_title
 from app.services.ai.domains.llm.config import AIServiceConfig
+from app.services.ai.domains.llm.timing import THINK, WRITE
 from app.services.ai.domains.spend.calls import handed_off_call
 from app.services.ai.models import Conversation, MessageRole
 from app.services.ai.service.base import ConversationError
@@ -54,7 +55,7 @@ async def reply_metadata(
     provider: Any,
     model: str,
     response_time_ms: float,
-    timing: dict[str, int] | None = None,
+    timing: dict[str, int],
     tool_trace: list[dict[str, Any]],
     finish_reason: str | None,
     rag: dict[str, Any] | None = None,
@@ -70,8 +71,7 @@ async def reply_metadata(
     # Tokens per second over the model's own output time (``timing``:
     # thinking and writing), not the prompt read or the tools; the whole
     # turn where it was not timed.
-    generating = (timing["think_ms"] + timing["write_ms"]) if timing else 0
-    over = generating or response_time_ms
+    over = timing[THINK] + timing[WRITE] or response_time_ms
     gen_tps: float | None = None
     if output_tokens > 0 and over > 0:
         gen_tps = round(output_tokens * 1000 / over, 1)
@@ -80,7 +80,7 @@ async def reply_metadata(
         "provider": provider,
         "model": model,
         "response_time_ms": response_time_ms,
-        **({"timing": timing} if timing else {}),
+        "timing": timing,
         "stream_complete": True,
         # Token usage and cost for CLI status line
         "input_tokens": input_tokens,
