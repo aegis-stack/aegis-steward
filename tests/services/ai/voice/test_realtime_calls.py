@@ -134,6 +134,21 @@ class TestATurn:
         untimed.observe(audio)
         assert untimed.first_word_ms is None
 
+    def test_it_times_the_caller_stopping_to_the_turn_done(self) -> None:
+        """How long the turn took, for its footer: from the end of the
+        caller's speech to the reply's end, every step between."""
+        now = iter([3.0, 95.5])
+        log = TurnLog(clock=lambda: next(now))
+
+        for event in (
+            RealtimeInputSpeechStartEvent(item_id="a"),
+            RealtimeInputSpeechEndEvent(item_id="a"),  # 3.0
+            RealtimeTurnCompleteEvent(),  # 95.5
+        ):
+            log.observe(event)
+
+        assert log.response_time_ms == 92_500
+
     def test_a_part_ended_twice_is_said_once(self) -> None:
         """#292: one reply was saved with its text twice, back to back - the
         same spoken part reported finished twice."""
@@ -1090,6 +1105,7 @@ class TestDrivingACall:
 
         reply = (await ai_service.get_conversation(conversation.id)).messages[-1]
         assert reply.metadata["first_word_ms"] >= 0
+        assert reply.metadata["response_time_ms"] >= reply.metadata["first_word_ms"]
 
     @pytest.mark.asyncio
     async def test_a_turn_it_hands_off_names_its_row(

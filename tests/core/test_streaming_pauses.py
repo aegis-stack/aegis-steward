@@ -12,7 +12,7 @@ import contextvars
 
 import pytest
 
-from app.core.concurrency import Waiting, announce_waiting
+from app.core.concurrency import Waiting, announce_waiting, interleave
 
 
 async def _quiet(delay: float, *items: str) -> AsyncIterator[str]:
@@ -153,3 +153,59 @@ class TestTheSourceKeepsItsContext:
         ]
 
         assert out == ["first", "second", "third"]
+
+
+class TestWhatIsToldMeanwhile:
+    """What a step tells while the source waits on it (a script's reads,
+    while its tool call runs) comes as it is told, not after the step."""
+
+    async def test_it_comes_while_the_source_is_still_waiting(self) -> None:
+        told: asyncio.Queue[str] = asyncio.Queue()
+        released = asyncio.Event()
+
+        async def step() -> AsyncIterator[str]:
+            told.put_nowait("ledger")
+            await released.wait()
+            yield "done"
+
+        seen: list[str] = []
+        async with asyncio.timeout(5):
+            async for item in interleave(step(), told):
+                seen.append(item)
+                released.set()
+
+        assert seen == ["ledger", "done"]
+
+    async def test_nothing_told_is_dropped_and_its_order_holds(self) -> None:
+        """Told as the source ends, it still comes."""
+        told: asyncio.Queue[str] = asyncio.Queue()
+
+        async def step() -> AsyncIterator[str]:
+            yield "script"
+            told.put_nowait("ledger")
+            told.put_nowait("accounts")
+
+        assert await _all(interleave(step(), told)) == ["script", "ledger", "accounts"]
+
+    async def test_an_item_comes_before_what_is_told_as_it_arrives(self) -> None:
+        """The turn runs ahead of its reader: a script's read can be told
+        in the same moment its script's event arrives, and the script is
+        still shown first."""
+        told: asyncio.Queue[str] = asyncio.Queue()
+
+        async def step() -> AsyncIterator[str]:
+            told.put_nowait("ledger")
+            yield "script"
+
+        assert await _all(interleave(step(), told)) == ["script", "ledger"]
+
+    async def test_the_source_keeps_its_context(self) -> None:
+        var: contextvars.ContextVar[str] = contextvars.ContextVar("v", default="")
+
+        async def source() -> AsyncIterator[str]:
+            token = var.set("set")
+            yield "a"
+            var.reset(token)  # raises in a context other than the one set in
+            yield "b"
+
+        assert await _all(interleave(source(), asyncio.Queue())) == ["a", "b"]

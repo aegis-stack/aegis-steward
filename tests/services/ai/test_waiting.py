@@ -151,6 +151,28 @@ async def test_a_running_tool_is_not_the_model_thinking(
     assert asked == []
 
 
+async def test_quiet_after_the_model_starts_thinking_says_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thinking is a trail row, not a tool: the quiet after it is the
+    model's, so its engine is asked why."""
+
+    async def explain() -> str:
+        return "thinking"
+
+    async def thinking_then_text() -> AsyncIterator[StreamingMessage]:
+        yield _message(event="tool", tool="", label="Thinking")
+        await asyncio.sleep(0.2)
+        yield _message()
+
+    _quick(monkeypatch)
+    monkeypatch.setattr(sse, "waiting_reason", explain)
+    frames = _frames([f async for f in sse._events(thinking_then_text())])
+
+    waits = [data for name, data in frames if name == "waiting"]
+    assert waits and all(wait["reason"] == "thinking" for wait in waits)
+
+
 async def test_a_quiet_stream_sends_how_long_and_why(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

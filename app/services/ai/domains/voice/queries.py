@@ -74,6 +74,12 @@ async def all_engines(session: AsyncSession) -> list[LiveEngine]:
     return list((await session.exec(select(LiveEngine))).all())
 
 
+async def engines_keyed(session: AsyncSession, keys: list[str]) -> list[LiveEngine]:
+    """The engines ``keys`` name, in one read; a key with none is left out."""
+    found = await session.exec(select(LiveEngine).where(col(LiveEngine.key).in_(keys)))
+    return list(found.all())
+
+
 async def enabled_engines(session: AsyncSession) -> list[LiveEngine]:
     """The engines on offer, in their order, each with its catalog model,
     the org that serves it and its deployments (what it can write)."""

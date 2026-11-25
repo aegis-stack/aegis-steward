@@ -198,5 +198,10 @@ class TestFooterLine:
         assert "12.0 tps" in line
         assert "$0.0123" in line
 
+    def test_says_how_long_the_reply_took(self) -> None:
+        """A typed turn and a call turn both keep ``response_time_ms``."""
+        line = footer_line({"model": "qwen", "response_time_ms": 90_135.2})
+        assert line == "qwen  ·  90.1s"
+
     def test_empty_meta_renders_nothing(self) -> None:
         assert footer_line({}) == ""

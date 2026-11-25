@@ -383,9 +383,10 @@ async def drive(
             ),
         }
         shares: dict[str, Any] = {k: now[k] - so_far[k] for k in now}
-        if log.first_word_ms is not None:
-            shares["first_word_ms"] = log.first_word_ms
-            log.first_word_ms = None
+        for timed in ("first_word_ms", "response_time_ms"):
+            if (ms := getattr(log, timed)) is not None:
+                shares[timed] = ms
+                setattr(log, timed, None)
         await save_turn(
             ai,
             conversation_id,

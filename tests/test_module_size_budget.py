@@ -43,8 +43,8 @@ DECLARATION_FILES = ("core/parts.py",)
 
 # path -> line count when recorded. The refactoring backlog, largest first.
 BUDGET: dict[str, int] = {
-    "i18n/locales/en.py": 1349,  # template: code mode CLI
-    "i18n/locales/zh.py": 1326,  # template: code mode CLI
+    "i18n/locales/en.py": 1353,  # template: code mode CLI; agents call-prompt
+    "i18n/locales/zh.py": 1330,  # template: code mode CLI; agents call-prompt
     "i18n/locales/de.py": 1270,
     "i18n/locales/es.py": 1270,
     "i18n/locales/fr.py": 1270,

@@ -5,8 +5,11 @@ The trace is the UI's expandable run trail: one entry per tool call
 carried on the final SSE event.
 """
 
+import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
@@ -56,19 +59,73 @@ def tool_notice(
     the whole call while a script's first comment is still there; marked
     under its script (``under_script``) when a script dispatched it."""
     label = trail_label(tool_name, args)
+    return _notice(
+        {
+            "tool": tool_name,
+            "args": call_args_preview(args),
+            "label": under_script(label) if inside else label,
+        },
+        message_id=message_id,
+        conversation_id=conversation_id,
+        stream_delta=stream_delta,
+    )
+
+
+def thinking_notice(
+    *, message_id: str, conversation_id: str | None, stream_delta: bool
+) -> StreamingMessage:
+    """A trail row for the model starting to think (``steps.THINKING``):
+    a step, no tool, so the quiet after it is the model's to explain."""
+    return _notice(
+        {"tool": "", "args": "", "label": steps.THINKING},
+        message_id=message_id,
+        conversation_id=conversation_id,
+        stream_delta=stream_delta,
+    )
+
+
+def _notice(
+    step: dict[str, str],
+    *,
+    message_id: str,
+    conversation_id: str | None,
+    stream_delta: bool,
+) -> StreamingMessage:
+    """A content-free chunk for the trail: one row, ``step``."""
     return StreamingMessage(
         content="",
         is_final=False,
         is_delta=stream_delta,
         message_id=message_id,
         conversation_id=conversation_id,
-        metadata={
-            "event": "tool",
-            "tool": tool_name,
-            "args": call_args_preview(args),
-            "label": under_script(label) if inside else label,
-        },
+        metadata={"event": "tool", **step},
     )
+
+
+class Heard(NamedTuple):
+    """A tool a script called, as it started (``steps.heard``)."""
+
+    name: str
+    args: Any
+
+
+@contextmanager
+def script_reads(sandboxed: frozenset[str]) -> Iterator[asyncio.Queue[Heard]]:
+    """Each tool a script calls (``sandboxed``: those only scripts call),
+    as it starts: the trail shows a script's reads live, not once it is
+    done. A call of the model's own is its event's, so is not one. Known by
+    name, not by the reader's state: the turn runs ahead of whoever reads
+    its events, so a read starts before its script's event is read."""
+    loop = asyncio.get_running_loop()
+    heard: asyncio.Queue[Heard] = asyncio.Queue()
+
+    def told(_doing: str, name: str, detail: Any) -> None:
+        if name in sandboxed:
+            # A sync tool runs on a worker thread.
+            loop.call_soon_threadsafe(heard.put_nowait, Heard(name, detail))
+
+    with steps.watching(told):
+        yield heard
 
 
 # Trace-entry size caps: the trace persists on the message row and rides
@@ -131,7 +188,7 @@ def record_tool_result(
     if marker is not None:
         entry["component"] = marker
     # A script's dispatches keep their arguments as a direct call does; the
-    # trail's one-line preview is ``nested_tool_calls``.
+    # trail showed each as it started (``script_reads``).
     nested = sandbox_calls(event.part)
     if nested:
         entry["nested"] = [
@@ -159,11 +216,4 @@ def sandbox_calls(part: Any) -> list[tuple[ToolCallPart, ToolReturnPart | None]]
 
     return [
         (calls[call_id], returns.get(call_id)) for call_id in sorted(calls, key=order)
-    ]
-
-
-def nested_tool_calls(event: FunctionToolResultEvent) -> list[tuple[str, str]]:
-    """(name, compact args) per sandbox-dispatched call, in call order."""
-    return [
-        (c.tool_name, call_args_preview(c.args)) for c, _ in sandbox_calls(event.part)
     ]

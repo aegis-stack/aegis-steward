@@ -33,6 +33,7 @@ from pydantic_ai.messages import (
     RealtimeResponseInterruptedEvent,
     TextPart,
     TextPartDelta,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
@@ -63,6 +64,7 @@ except ImportError:  # before: it yields its codec events alone
 
 from app.core.hooks import Hook
 from app.core.log import logger
+from app.core.steps import THINKING
 
 from ..tts import realtime
 from . import turns
@@ -389,10 +391,16 @@ class CascadeConnection(RealtimeConnection):
                 async for event in stream:
                     if first:
                         first = False
-                        self._staged(None, tell=False)  # its first token: read
+                        # Its first token: read. A thought first is a stage.
+                        thinks = isinstance(event, PartStartEvent) and isinstance(
+                            event.part, ThinkingPart
+                        )
+                        self._staged(THINKING if thinks else None, tell=thinks)
                     delta = _text_of(event)
                     if not delta:
                         continue
+                    if self._stage[0] == THINKING:
+                        self._staged(None, tell=False)  # thought
                     *whole, pending = ENDS.split(pending + delta)
                     for sentence in filter(str.strip, whole):
                         await self._say(sentence, said)

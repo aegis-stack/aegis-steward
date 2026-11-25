@@ -18,10 +18,13 @@ from pydantic_ai.messages import (
     PartStartEvent,
     TextPart,
     TextPartDelta,
+    ThinkingPart,
 )
 from pydantic_ai.run import AgentRunResultEvent
 
+from app.core.concurrency import interleave
 from app.core.log import logger
+from app.services.ai.domains.chat.agent_loader import sandboxed_tools
 from app.services.ai.domains.chat.attachments import (
     ChatAttachment,
     LiftedTurn,
@@ -47,9 +50,11 @@ from app.services.ai.service.base import (
 )
 from app.services.ai.service.chat import ChatMixin, reply_metadata
 from app.services.ai.service.trace import (
-    nested_tool_calls,
+    Heard,
     record_tool_call,
     record_tool_result,
+    script_reads,
+    thinking_notice,
     tool_notice,
 )
 
@@ -207,12 +212,33 @@ class StreamingMixin(ChatMixin):
                 ),
                 reading_stage() as staged_readings,
                 card_stage() as drawn_cards,
+                script_reads(sandboxed_tools(agent_config)) as reads,
             ):
                 async with agent.run_stream_events(
                     build_user_content(conversation_context, attachments)
                 ) as events:
-                    async for event in events:
+                    async for event in interleave(events, reads):
                         text_chunk = ""
+                        if isinstance(event, Heard):
+                            # A read the running script made, as it starts.
+                            yield tool_notice(
+                                event.name,
+                                args=event.args,
+                                message_id=message_id,
+                                conversation_id=conversation.id,
+                                stream_delta=stream_delta,
+                                inside=True,
+                            )
+                            continue
+                        if isinstance(event, PartStartEvent) and isinstance(
+                            event.part, ThinkingPart
+                        ):
+                            yield thinking_notice(
+                                message_id=message_id,
+                                conversation_id=conversation.id,
+                                stream_delta=stream_delta,
+                            )
+                            continue
                         if isinstance(event, PartStartEvent) and isinstance(
                             event.part, TextPart
                         ):
@@ -238,21 +264,11 @@ class StreamingMixin(ChatMixin):
                             )
                             continue
                         elif isinstance(event, FunctionToolResultEvent):
-                            # A completing run_code call carries its sandbox-
-                            # dispatched calls as metadata; surface each one so
-                            # the UI trail shows what the script actually did.
+                            # A completing run_code call keeps its sandbox-
+                            # dispatched calls (the trail showed each live).
                             finished = record_tool_result(tool_trace, event)
                             # Cards a script drew ride that script's entry.
                             attach_cards(finished, drawn_cards)
-                            for name, args in nested_tool_calls(event):
-                                yield tool_notice(
-                                    name,
-                                    args=args,
-                                    message_id=message_id,
-                                    conversation_id=conversation.id,
-                                    stream_delta=stream_delta,
-                                    inside=True,
-                                )
                             continue
                         elif isinstance(event, AgentRunResultEvent):
                             finish_reason = getattr(
