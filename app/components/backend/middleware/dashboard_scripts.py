@@ -12,6 +12,14 @@ needs from the browser itself rides in here, ahead of Flutter's boot:
   ``FLET_MODE_KEY`` under Flutter's ``flutter.`` prefix, each value
   JSON-encoded twice. The bridge copies htmx's choice across before
   Flutter reads it, and copies Overseer's toggle back as Flutter writes.
+- **A refused socket renews the sign-in** (#647). The gate checks the
+  sign-in only when the Flet socket opens, closing it when signed out,
+  and Flet only retries. A socket that closes before it ever opened asks
+  for the dashboard; a 401 renews through ``auth.js`` (loaded here, the
+  htmx pages' one refresh), so Flet's next retry is let in, and only a
+  failed renewal goes to the dashboard, which the gate sends to sign-in
+  and back. A dead server (a restart) fails the ask, and Flet keeps
+  retrying.
 
 Injection over a vendored index.html on purpose: Flet's index markup
 changes across versions, and a response-time splice keeps working
@@ -25,7 +33,9 @@ from pathlib import Path
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.components.web_frontend.assets import static_url
 from app.core.appearance import FLET_MODE_KEY, HTMX_MODE_KEY
+from app.core.constants import DASHBOARD_PATH
 
 # Posts every pasted image file; non-file pastes (plain text) fall
 # through untouched so normal text paste keeps working.
@@ -66,7 +76,36 @@ _MODE_SCRIPT = (
 </script>"""
 )
 
-_SCRIPTS = (_PASTE_SCRIPT + _MODE_SCRIPT).encode()
+REFUSED_SOCKET_SCRIPT = (
+    """<script>
+(function (home) {
+  window.WebSocket = new Proxy(window.WebSocket, {
+    construct: function (Native, args) {
+      var socket = Reflect.construct(Native, args);
+      var opened = false;
+      socket.addEventListener("open", function () { opened = true; });
+      socket.addEventListener("close", function () {
+        if (opened) return;
+        fetch(home, { cache: "no-store" }).then(function (page) {
+          if (page.status !== 401) return;
+          _tryRefresh().then(function (ok) { if (!ok) location.assign(home); });
+        }, function () {});
+      });
+      return socket;
+    },
+  });
+})("""
+    + json.dumps(f"{DASHBOARD_PATH}/")
+    + """);
+</script>"""
+)
+
+
+def _scripts() -> bytes:
+    """Every script, ``auth.js`` first (the refused socket's renewal),
+    named as the htmx pages name it, fingerprint included."""
+    auth = f'<script src="{static_url("js/auth.js")}"></script>'
+    return (auth + _PASTE_SCRIPT + _MODE_SCRIPT + REFUSED_SOCKET_SCRIPT).encode()
 
 
 def inject_dashboard_scripts(body: bytes) -> bytes:
@@ -75,7 +114,7 @@ def inject_dashboard_scripts(body: bytes) -> bytes:
     marker = b"</head>"
     if marker not in body:
         return body
-    return body.replace(marker, _SCRIPTS + marker, 1)
+    return body.replace(marker, _scripts() + marker, 1)
 
 
 class DashboardScriptsMiddleware:
