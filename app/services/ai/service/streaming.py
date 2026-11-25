@@ -6,7 +6,6 @@ steps it took and their cost as the chat page does.
 """
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Any
 import uuid
 
@@ -176,7 +175,6 @@ class StreamingMixin(ChatMixin):
             streaming_conv.reset_stream()
             agent, conversation_context = setup.agent, setup.conversation_context
 
-            start_time = datetime.now(UTC)
             # Where the time goes: reading, thinking, writing, tools.
             turn_clock = TurnClock()
 
@@ -306,8 +304,8 @@ class StreamingMixin(ChatMixin):
                             },
                         )
 
-            end_time = datetime.now(UTC)
-            response_time_ms = (end_time - start_time).total_seconds() * 1000
+            timing = turn_clock.spent()
+            response_time_ms = float(sum(timing.values()))
 
             # Add final message to conversation using accumulated streaming content
             final_content = streaming_conv.accumulated_content or "No content received"
@@ -345,7 +343,7 @@ class StreamingMixin(ChatMixin):
                 provider=current.provider,
                 model=answered_by,
                 response_time_ms=response_time_ms,
-                timing=turn_clock.spent(),
+                timing=timing,
                 tool_trace=tool_trace,
                 finish_reason=finish_reason,
                 usage=stream_usage,

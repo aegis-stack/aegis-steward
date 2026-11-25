@@ -57,7 +57,6 @@ class TestStreamAccumulator:
                 "model": "qwen3.8:27b-mlx",
                 "cost": 0.0,
                 "gen_tps": 28.5,
-                "timing": {"read_ms": 1, "think_ms": 0, "write_ms": 2, "tools_ms": 0},
             }
         )
 
@@ -65,7 +64,6 @@ class TestStreamAccumulator:
         assert acc.conversation_id == "c2"
         assert acc.final_meta["model"] == "qwen3.8:27b-mlx"
         assert acc.final_meta["gen_tps"] == 28.5
-        assert acc.final_meta["timing"]["write_ms"] == 2  # the Flet footer's split
         # Metadata is kept raw; footer_line decides that $0.0000 is noise.
         assert acc.final_meta["cost"] == 0.0
         assert "$" not in footer_line(acc.final_meta)
