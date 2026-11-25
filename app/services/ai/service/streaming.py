@@ -37,6 +37,7 @@ from app.services.ai.domains.chat.readings import (
 )
 from app.services.ai.domains.chat.user_memory import memory_user
 from app.services.ai.domains.llm.providers import ProviderNotInstalledError
+from app.services.ai.domains.llm.timing import TurnClock
 from app.services.ai.domains.spend.recording import chat_action
 from app.services.ai.models import (
     ConversationMessage,
@@ -176,6 +177,8 @@ class StreamingMixin(ChatMixin):
             agent, conversation_context = setup.agent, setup.conversation_context
 
             start_time = datetime.now(UTC)
+            # Where the time goes: reading, thinking, writing, tools.
+            turn_clock = TurnClock()
 
             message_id = str(uuid.uuid4())
 
@@ -219,6 +222,7 @@ class StreamingMixin(ChatMixin):
                 ) as events:
                     async for event in interleave(events, reads):
                         text_chunk = ""
+                        turn_clock.observe(event)
                         if isinstance(event, Heard):
                             # A read the running script made, as it starts.
                             yield tool_notice(
@@ -341,6 +345,7 @@ class StreamingMixin(ChatMixin):
                 provider=current.provider,
                 model=answered_by,
                 response_time_ms=response_time_ms,
+                timing=turn_clock.spent(),
                 tool_trace=tool_trace,
                 finish_reason=finish_reason,
                 usage=stream_usage,

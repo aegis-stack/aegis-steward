@@ -104,6 +104,27 @@ class TestAPauseCanSayWhy:
         assert asked == 1
         assert all(w.reason == "loading" for w in waits)
 
+    async def test_a_live_reason_is_read_on_every_tick(self) -> None:
+        """A reason that moves while the stretch lasts (a prompt being
+        read) is read at each tick and wins over the stretch's; once it has
+        nothing to say, the stretch's reason is back."""
+        reads = iter(["read 1", "read 2"])
+
+        async def explain() -> str:
+            return "thinking"
+
+        out = await _all(
+            announce_waiting(
+                _quiet(0.3, "hi"),
+                every=0.05,
+                explain=explain,
+                live=lambda: next(reads, None),
+            )
+        )
+
+        reasons = [f.reason for f in out if isinstance(f, Waiting)]
+        assert reasons[:3] == ["read 1", "read 2", "thinking"]
+
     async def test_an_explainer_that_fails_does_not_fail_the_turn(self) -> None:
         async def explain() -> str:
             raise RuntimeError("the engine is not listening")

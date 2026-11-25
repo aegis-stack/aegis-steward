@@ -129,7 +129,7 @@ if TYPE_CHECKING:
         recent_model_ids,
         usage_by_model,
     )
-    from app.services.ai.domains.llm.waiting import waiting_reason
+    from app.services.ai.domains.llm.waiting import waiting_reason, watch_prefill
     from app.services.ai.domains.llm.writer import write, writer
     from app.services.ai.domains.spend import queries as spend_queries
     from app.services.ai.domains.spend import report as spend_report
