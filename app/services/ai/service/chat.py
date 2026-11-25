@@ -54,6 +54,7 @@ async def reply_metadata(
     provider: Any,
     model: str,
     response_time_ms: float,
+    timing: dict[str, int] | None = None,
     tool_trace: list[dict[str, Any]],
     finish_reason: str | None,
     rag: dict[str, Any] | None = None,
@@ -66,16 +67,20 @@ async def reply_metadata(
     input_tokens = usage.get("input_tokens", 0)
     output_tokens = usage.get("output_tokens", 0)
 
-    # Calculate TPS (tokens per second) for performance metrics
-    # This is especially useful for Ollama but works for all providers
+    # Tokens per second over the model's own output time (``timing``:
+    # thinking and writing), not the prompt read or the tools; the whole
+    # turn where it was not timed.
+    generating = (timing["think_ms"] + timing["write_ms"]) if timing else 0
+    over = generating or response_time_ms
     gen_tps: float | None = None
-    if output_tokens > 0 and response_time_ms > 0:
-        gen_tps = round(output_tokens * 1000 / response_time_ms, 1)
+    if output_tokens > 0 and over > 0:
+        gen_tps = round(output_tokens * 1000 / over, 1)
     metadata: dict[str, Any] = {
         "conversation_id": conversation_id,
         "provider": provider,
         "model": model,
         "response_time_ms": response_time_ms,
+        **({"timing": timing} if timing else {}),
         "stream_complete": True,
         # Token usage and cost for CLI status line
         "input_tokens": input_tokens,

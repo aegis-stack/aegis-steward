@@ -975,6 +975,24 @@ class TestToolUseSurfacing:
         assert "42" in run_code["result"]
         assert [n["tool"] for n in run_code["nested"]] == ["ledger", "accounts"]
 
+    async def test_the_reply_keeps_where_its_time_went(
+        self, harness: tuple[AIService, MagicMock, dict[str, Any], pytest.MonkeyPatch]
+    ) -> None:
+        """The split rides the final frame and the saved message, and tps is
+        over the model's own output time, not the prompt read or the tools."""
+        service, _recorder, _captured, monkeypatch = harness
+        _stub_resolve(monkeypatch, _scripting())
+
+        chunks = [chunk async for chunk in service.stream_chat("hello")]
+
+        meta = chunks[-1].metadata
+        assert set(meta["timing"]) == {"read_ms", "think_ms", "write_ms", "tools_ms"}
+        spent = sum(meta["timing"].values())
+        assert abs(spent - meta["response_time_ms"]) < 50
+        generating = meta["timing"]["think_ms"] + meta["timing"]["write_ms"]
+        if generating:
+            assert meta["gen_tps"] == round(5 * 1000 / generating, 1)
+
     async def test_the_saved_answer_keeps_what_the_final_frame_reported(
         self, harness: tuple[AIService, MagicMock, dict[str, Any], pytest.MonkeyPatch]
     ) -> None:

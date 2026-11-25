@@ -24,6 +24,7 @@ from app.services.ai.service import (
     ProviderError,
     StreamingMessage,
     waiting_reason,
+    watch_prefill,
 )
 
 HEADERS = {
@@ -92,12 +93,18 @@ async def _events(
     async def why() -> str | None:
         return None if tool_running else await waiting_reason()
 
+    # A prompt being read says how far it is, as the server tells it.
+    prefill = watch_prefill()
+
+    def reading() -> str | None:
+        return None if tool_running else prefill.label()
+
     try:
         with page_stage(page, send):
             yield event(
                 "connect", {"status": "connected", "message": "Streaming started"}
             )
-            async for chunk in announce_waiting(chunks, explain=why):
+            async for chunk in announce_waiting(chunks, explain=why, live=reading):
                 if isinstance(chunk, Waiting):
                     yield _waiting(chunk)
                     continue

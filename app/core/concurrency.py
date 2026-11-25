@@ -290,6 +290,7 @@ async def announce_waiting(
     *,
     every: float = QUIET_SECONDS,
     explain: Callable[[], Coroutine[object, object, str | None]] | None = None,
+    live: Callable[[], str | None] | None = None,
 ) -> AsyncIterator[T | Waiting]:
     """Pass ``source`` through, yielding a ``Waiting`` every ``every``
     seconds it is quiet. What the source raises is raised here.
@@ -297,7 +298,10 @@ async def announce_waiting(
     ``explain`` is asked once per quiet stretch, in the source's own
     context (so it reads what the source has set by then, the turn's
     model), and one that fails is no reason: a missing reason must never
-    turn a slow answer into a failed one.
+    turn a slow answer into a failed one. ``live`` is read at every tick
+    and, while it has words, says them instead: a reason that moves
+    within the stretch (a prompt being read), kept for it by whoever
+    hears of it, so reading it does no I/O.
 
     Each step runs as a task, so a timeout ends the wait and not the step;
     every step shares one context, so a ContextVar the source sets while
@@ -328,7 +332,8 @@ async def announce_waiting(
                             reason = await loop.create_task(explain(), context=context)
                         except Exception:  # noqa: BLE001 - see the docstring
                             reason = None
-                    yield Waiting(seconds=int(time.monotonic() - since), reason=reason)
+                    said = (live() if live is not None else None) or reason
+                    yield Waiting(seconds=int(time.monotonic() - since), reason=said)
                     continue
                 except StopAsyncIteration:
                     return

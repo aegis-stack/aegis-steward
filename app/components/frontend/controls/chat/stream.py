@@ -62,7 +62,14 @@ class StreamAccumulator:
             self.conversation_id = payload["conversation_id"]
         self.final_meta = {
             key: payload[key]
-            for key in ("model", "provider", "cost", "gen_tps", "response_time_ms")
+            for key in (
+                "model",
+                "provider",
+                "cost",
+                "gen_tps",
+                "response_time_ms",
+                "timing",
+            )
             if payload.get(key) is not None
         }
 
