@@ -168,10 +168,13 @@ class TestPickingAModel:
         setup = await profiles.call_setup(async_db_session)
         assert setup is not None
         spoken, _ = await profiles.give_voice(
-            async_db_session, setup, seeded, "af_heart"
+            async_db_session, setup, seeded, "local_server:af_heart"
         )
 
-        assert spoken.voices == {"openai": "marin", "kokoro": "af_heart"}
+        assert spoken.voices == {
+            "openai": "marin",
+            "local_server": "local_server:af_heart",
+        }
 
 
 class TestApplying:
@@ -184,12 +187,12 @@ class TestApplying:
         service = SimpleNamespace(_stt_service=object(), _tts_service=object())
         voice = VoiceProfile(
             name="Nova",
-            voices={"openai": "nova", "kokoro": "af_heart"},
+            voices={"openai": "nova", "local_server": "local_server:af_heart"},
             tts_speed=1.0,
             tts_instructions=None,
         )
         setup = CallSetup(
-            tts_provider="kokoro",
+            tts_provider="local_server",
             tts_model="kokoro",
             reply="answer",
             working_sound="none",
@@ -198,11 +201,14 @@ class TestApplying:
         profiles.apply(voice, settings, service, setup)
 
         assert (settings.TTS_VOICE, settings.TTS_MODEL, settings.TTS_SPEED) == (
-            "af_heart",
+            "local_server:af_heart",
             "kokoro",
             1.0,
         )
-        assert settings.TTS_VOICES == {"openai": "nova", "kokoro": "af_heart"}
+        assert settings.TTS_VOICES == {
+            "openai": "nova",
+            "local_server": "local_server:af_heart",
+        }
         assert settings.TTS_INSTRUCTIONS is None
         assert (settings.VOICE_REPLY, settings.VOICE_WORKING_SOUND) == (
             "answer",

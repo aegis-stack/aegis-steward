@@ -33,7 +33,6 @@ class TTSProvider(str, Enum):
 
     OPENAI = "openai"  # OpenAI TTS API
     GEMINI = "gemini"  # Gemini's speech models, the voices Gemini Live speaks
-    KOKORO = "kokoro"  # Kokoro in the app (kokoro-onnx)
     LOCAL_SERVER = "local_server"  # a speech server you run (tts/server.py)
 
 
@@ -70,14 +69,12 @@ DEFAULT_TTS_VOICE = OpenAIVoice.ALLOY.value
 DEFAULT_TTS_MODELS: dict[TTSProvider, str] = {
     TTSProvider.OPENAI: DEFAULT_TTS_MODEL,
     TTSProvider.GEMINI: "gemini-3.8-flash-tts",
-    TTSProvider.KOKORO: "kokoro-v1.0",
     # Kokoro-FastAPI's (the one server SPEECH_SERVER names so far).
     TTSProvider.LOCAL_SERVER: "kokoro",
 }
 DEFAULT_TTS_VOICES: dict[TTSProvider, str] = {
     TTSProvider.OPENAI: DEFAULT_TTS_VOICE,
     TTSProvider.GEMINI: "Kore",
-    TTSProvider.KOKORO: "af_heart",  # Kokoro's own pick
     # tts/server.py's id for Kokoro's af_heart: its ids name their provider.
     TTSProvider.LOCAL_SERVER: f"{TTSProvider.LOCAL_SERVER.value}:af_heart",
 }
@@ -114,7 +111,6 @@ LOCAL_PACKAGES: dict[str, dict[str, str]] = {
     STTProvider.FASTER_WHISPER: {"faster_whisper": "faster-whisper"},
     # PyAV decodes the browser's webm, which onnx-asr cannot read.
     STTProvider.PARAKEET: {"onnx_asr": '"onnx-asr[cpu,hub]"', "av": "av"},
-    TTSProvider.KOKORO: {"kokoro_onnx": "kokoro-onnx"},
 }
 
 
@@ -201,7 +197,6 @@ MEDIA_TYPES: dict[AudioFormat, str] = {
 TTS_FORMATS: dict[TTSProvider, AudioFormat] = {
     TTSProvider.OPENAI: AudioFormat.MP3,
     TTSProvider.GEMINI: AudioFormat.WAV,
-    TTSProvider.KOKORO: AudioFormat.WAV,
     # Asked of every speech server: each one known speaks it, so none needs
     # a transcode.
     TTSProvider.LOCAL_SERVER: AudioFormat.WAV,

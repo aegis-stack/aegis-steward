@@ -75,13 +75,19 @@ def _tools_use_test_session(
     # The balance sheet and the write tools live in their own modules,
     # each with their own import of the session opener.
     from app.services.change_queue import tools as queue_tools
-    from app.services.finance import ai_account_tools, ai_bill_tools, ai_write_tools
+    from app.services.finance import (
+        ai_account_tools,
+        ai_bill_tools,
+        ai_budget_tools,
+        ai_write_tools,
+    )
     from app.services.finance.domains.ledger import cleanup
     from app.services.finance.domains.planning import retirement_tool
 
     for module in (
         ai_account_tools,
         ai_bill_tools,
+        ai_budget_tools,
         retirement_tool,
         cleanup,
         queue_tools,
@@ -93,6 +99,31 @@ def _tools_use_test_session(
 def test_finance_tools_register_on_import() -> None:
     """Importing the module makes every finance tool grantable by name."""
     assert EXPECTED_TOOLS <= set(registered_tool_names())
+
+
+def test_every_read_tool_she_codes_against_says_what_it_returns() -> None:
+    """Code mode prints a read tool's return type as the signature her
+    script is written against. ``dict[str, Any]`` told her nothing:
+    asked about groceries she guessed ``categories()`` was a list,
+    crashed, and printed every category to see. Docstrings are not
+    enough - the harness drops a docstring's text after ``Args:``."""
+    from typing import get_type_hints
+
+    from app.core.tools import get_tool, load_tools
+    from app.services.finance.domains.detection.analyst.seeds import (
+        FINANCE_CHAT_TOOL_NAMES,
+    )
+
+    load_tools()
+    untyped = [
+        name
+        for name in FINANCE_CHAT_TOOL_NAMES
+        if (tool := get_tool(name)) is not None
+        and tool.effect == "read"
+        and get_type_hints(tool.func)["return"] in (Any, dict, dict[str, Any])
+    ]
+
+    assert untyped == []
 
 
 async def test_ledger_monthly_detail_reports_cashflow(
@@ -1705,6 +1736,82 @@ async def test_transactions_narrows_by_date(
 
     assert (await ai_tools.transactions(since="2026-09-10"))["total"] == 1
     assert (await ai_tools.transactions(until="2026-09-10"))["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_transactions_returns_the_rows_it_was_asked_for(
+    svc: FinanceService, session: AsyncSession
+) -> None:
+    """A month of 247 rows came back as 200 with no word why: she
+    re-fetched it in halves to get the rest. The limit asked is the limit."""
+    from app.services.finance.models import FinanceTransaction
+
+    account = await seed_account(svc)
+    session.add_all(
+        FinanceTransaction(
+            account_id=account.id,
+            source="manual",
+            amount=-100,
+            date_=date(2026, 9, 1),
+            name=f"ROW {n}",
+            owner_user_id=1,
+        )
+        for n in range(201)
+    )
+    await session.commit()
+
+    found = await ai_tools.transactions(limit=1000)
+
+    assert (found["total"], found["returned"]) == (201, 201)
+
+
+# Asks the same tool three ways on purpose: three reads of the rows.
+@pytest.mark.queryspy(allow_n_plus_one=True)
+async def test_transactions_by_category_name_is_one_call(
+    svc: FinanceService, session: AsyncSession
+) -> None:
+    """Asked what groceries cost, she printed all 250 categories to find
+    Groceries' id, then fetched the month and filtered it: two runs for
+    a question one read answers. A category is named the way she asks."""
+    account = await seed_account(svc)
+    groceries = await seed_category(session, "Food & Dining:Groceries")
+    eating_out = await seed_category(session, "Food & Dining:Eating Out")
+    today = current_date()
+    await seed_txn(svc, account.id, -80_34, today, category_id=groceries.id)
+    await seed_txn(svc, account.id, -12_00, today, category_id=eating_out.id)
+
+    found = await ai_tools.transactions(category="groceries")
+    whole = await ai_tools.transactions(category="Food & Dining:Groceries")
+    vague = await ai_tools.transactions(category="Food")
+
+    assert [r["amount_cents"] for r in found["transactions"]] == [-80_34]
+    assert whole["total"] == 1
+    assert vague["total"] == 0
+    assert "Food & Dining:Groceries" in vague.get("error", "")
+
+
+async def test_transactions_come_with_their_figures(
+    svc: FinanceService, session: AsyncSession
+) -> None:
+    """Asked what groceries cost, she fetched the rows, then ran again to
+    sum them, again to split charges from credits, again to total by
+    payee - and wrote one payee's total herself, wrong. The figures ride
+    with the rows, computed as every spending total counts them."""
+    account = await seed_account(svc)
+    groceries = await seed_category(session, "Food & Dining:Groceries")
+    today = current_date()
+    for cents, payee in ((-80_34, "Stop & Shop"), (-11_97, "Acme"), (87, "Acme")):
+        await seed_txn(
+            svc, account.id, cents, today, name=payee, category_id=groceries.id
+        )
+
+    summary = (await ai_tools.transactions(category="Groceries"))["summary"]
+
+    assert summary["complete"] is True
+    assert (summary["charges_cents"], summary["credits_cents"]) == (92_31, 87)
+    assert summary["spending_cents"] == 91_44
+    assert summary["by_payee"] == {"Stop & Shop": 80_34, "Acme": 11_10}
+    assert summary["by_category"] == {"Food & Dining:Groceries": 91_44}
 
 
 async def _tax_year(svc: FinanceService, session: AsyncSession) -> list[int]:

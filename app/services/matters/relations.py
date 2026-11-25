@@ -14,6 +14,7 @@ from sqlmodel import col, delete, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.matters.models import PartyRelation
+from app.services.matters.schemas import Relation
 
 # The kinds, and how each reads from its two ends.
 RELATIONS: dict[str, tuple[str, str]] = {
@@ -62,11 +63,14 @@ async def unrelate(
 
 async def relations_for(
     db: AsyncSession, party_ids: Iterable[int]
-) -> dict[int, list[dict[str, object]]]:
+) -> dict[int, list[Relation]]:
     """Each party's relationships, read from its own side: ``relation``
-    ("parent of", "child of", ...) and the other ``party_id``. One query."""
+    ("parent of", "child of", ...), the other ``party_id`` and its name
+    (``party``). Two queries, however many parties."""
+    from app.services.matters.service import PartyService
+
     wanted = list(dict.fromkeys(party_ids))
-    found: dict[int, list[dict[str, object]]] = {party: [] for party in wanted}
+    found: dict[int, list[Relation]] = {party: [] for party in wanted}
     if not wanted:
         return found
     rows = await db.exec(
@@ -81,10 +85,14 @@ async def relations_for(
         forward, backward = RELATIONS.get(row.relation, RELATIONS["other"])
         if row.party_id in found:
             found[row.party_id].append(
-                {"relation": forward, "party_id": row.related_party_id}
+                {"relation": forward, "party_id": row.related_party_id, "party": None}
             )
         if row.related_party_id in found:
             found[row.related_party_id].append(
-                {"relation": backward, "party_id": row.party_id}
+                {"relation": backward, "party_id": row.party_id, "party": None}
             )
+    linked = [r for related in found.values() for r in related]
+    names = await PartyService(db).names([r["party_id"] for r in linked])
+    for r in linked:
+        r["party"] = names.get(r["party_id"])
     return found

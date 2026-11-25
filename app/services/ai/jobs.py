@@ -78,6 +78,15 @@ async def read_photo_job(user_id: str, key: str, media_type: str, title: str) ->
     return True
 
 
+async def warm_chat_job(agent_slug: str | None, user_id: str) -> int | None:
+    """The chat's opening read into the local model ahead of its first
+    question (``chat.warm``): minutes of reading, so never on a request."""
+    from app.core.config import settings
+    from app.services.ai.service import AIService, warm_chat
+
+    return await warm_chat(AIService(settings), agent_slug, user_id)
+
+
 async def fold_conversation_job(conversation_id: str, upto: int) -> bool:
     """A conversation's turns that left its history window, folded into its
     running summary (``fold_conversation_task``, on every worker engine): a

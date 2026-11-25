@@ -14,6 +14,7 @@ those rows from the scoped reads.
 """
 
 from datetime import date
+import json
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -3673,3 +3674,98 @@ async def test_an_executor_crash_keeps_the_recorded_error(
         row = authenticated_client.get(f"/api/v1/changes/{change['id']}").json()
         assert row["status"] == "pending"
         assert "secret internal detail" in (row["error"] or "")
+
+
+# A layout no seed knows; the web dialog's tests map the same file.
+_UNKNOWN_CSV = ("budget.csv", (_FIXTURES / "budget.csv").read_bytes(), "text/csv")
+
+
+def _map_once(client: TestClient, date_format: str) -> Any:
+    """``POST /import/layout``: the answer to a preview's ``layout_ask``."""
+    return client.post(
+        "/api/v1/finance/import/layout",
+        files={"file": _UNKNOWN_CSV},
+        data={
+            "name": "Budget app",
+            "columns": json.dumps(
+                {"date": "When", "name": "Who", "amount": "How much"}
+            ),
+            "date_format": date_format,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_mapped_csv_layout_reads_the_file_from_then_on(
+    authenticated_client: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+    csv_profiles: None,
+    job_session: None,
+) -> None:
+    """#625: an unknown header is mapped once over the API, then imports."""
+    account_id = await _checking_account(async_db_session, acting_owner_user_id)
+
+    saved = _map_once(authenticated_client, "%Y-%m-%d")
+
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["name"] == "Budget app"
+    imported = authenticated_client.post(
+        "/api/v1/finance/import",
+        files={"file": _UNKNOWN_CSV},
+        params={"account_id": account_id},
+    )
+    assert _job_result(authenticated_client, imported)["rows_inserted"] == 1
+
+
+@pytest.mark.queryspy(allow_n_plus_one=True)  # the same map posted twice
+def test_mapping_the_same_columns_again_rewrites_that_layout(
+    authenticated_client: TestClient, csv_profiles: None
+) -> None:
+    """#625: a guess's Change re-maps its columns; the layout is the same
+    one, read the new way, not a second beside it."""
+    first = _map_once(authenticated_client, "%Y-%m-%d")
+    again = _map_once(authenticated_client, "%Y-%m-%d")
+
+    assert again.status_code == 201, again.text
+    assert again.json() == first.json()
+
+
+@pytest.mark.asyncio
+async def test_a_csv_layout_that_cannot_read_the_file_says_why(
+    authenticated_client: TestClient, csv_profiles: None
+) -> None:
+    refused = _map_once(authenticated_client, "%m/%d/%Y")
+
+    assert refused.status_code == 422
+    assert "When column" in refused.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.queryspy(allow_n_plus_one=True)  # import, then undo twice, in turn
+async def test_undo_takes_an_import_batch_back(
+    authenticated_client: TestClient,
+    async_db_session: AsyncSession,
+    acting_owner_user_id: int | None,
+    job_session: None,
+) -> None:
+    """#625: what the file added goes; a batch already undone is gone."""
+    account_id = await _checking_account(async_db_session, acting_owner_user_id)
+    data = (_FIXTURES / "sample_quicken.qif").read_bytes()
+    imported = authenticated_client.post(
+        "/api/v1/finance/import",
+        files={"file": ("sample_quicken.qif", data, "text/plain")},
+        params={"account_id": account_id},
+    )
+    batch_id = _job_result(authenticated_client, imported)["batch_id"]
+    url = f"/api/v1/finance/import/batches/{batch_id}/undo"
+
+    undone = authenticated_client.post(url)
+
+    assert undone.status_code == 200, undone.text
+    assert undone.json() == {"removed": 8, "restored": 0, "kept": 0}
+    txns = authenticated_client.get(
+        f"/api/v1/finance/transactions?account_id={account_id}"
+    )
+    assert txns.json()["items"] == []
+    assert authenticated_client.post(url).status_code == 404

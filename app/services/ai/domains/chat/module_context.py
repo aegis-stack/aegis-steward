@@ -21,7 +21,7 @@ from app.core.db import get_async_session
 from app.core.log import logger
 from app.core.tools import current_admin
 from app.services.ai.domains.chat import queries
-from app.services.ai.domains.chat.fetchers import FetchContext, run_fetcher
+from app.services.ai.domains.chat.fetchers import FetchContext, get_fetcher, run_fetcher
 from app.services.ai.models.agents import ContextModule
 from app.services.shared.deps import caller_is_admin
 
@@ -126,8 +126,11 @@ async def render_context_modules(
     token_budget: int | None = None,
     session: AsyncSession | None = None,
     subject: str | None = None,
+    local: bool = False,
 ) -> str | None:
-    """Render an agent's context modules into one labeled block, or None."""
+    """Render an agent's context modules into one labeled block, or None.
+    On a ``local`` model, a module whose fetcher is ``skip_on_local`` is
+    left off whole."""
     if not module_slugs:
         return None
 
@@ -148,12 +151,15 @@ async def render_context_modules(
                     token_budget=token_budget,
                     session=owned_session,
                     subject=subject,
+                    local=local,
                 )
         finally:
             if settled is not None:
                 current_admin.reset(settled)
 
     modules = await _load_modules(session, module_slugs)
+    if local:
+        modules = [m for m in modules if not _skipped_on_local(m)]
     per_subject = [m.id for m in modules if m.per_subject and m.id is not None]
     entries = (
         await queries.context_entries_for(session, per_subject, subject)
@@ -184,6 +190,11 @@ async def render_context_modules(
         f'<module name="{module.context_key}">\n{module.content}\n</module>'
         for module in kept
     )
+
+
+def _skipped_on_local(module: ContextModule) -> bool:
+    fetcher = get_fetcher(module.fetch_function) if module.fetch_function else None
+    return fetcher is not None and fetcher.skip_on_local
 
 
 class ContextModuleProvider:

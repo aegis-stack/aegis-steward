@@ -406,16 +406,21 @@ def await_job(
 
 
 def frames_of(client: TestClient, url: str) -> list[str]:
-    """Every SSE frame's data (joined lines) from a finished job's stream."""
+    """Every ``status`` frame's data (joined lines) from a finished job's
+    stream: what the follower swaps in, not the ``done`` that closes it."""
     frames: list[str] = []
     payload: list[str] = []
+    event = ""
     with client.stream("GET", url) as stream:
         assert stream.headers["content-type"].startswith("text/event-stream")
         for line in stream.iter_lines():
-            if line.startswith("data:"):
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
                 payload.append(line[5:].strip())
             elif line == "" and payload:
-                frames.append("\n".join(payload))
+                if event == "status":
+                    frames.append("\n".join(payload))
                 payload = []
     return frames
 

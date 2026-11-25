@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 import typer
 
 from app.cli import theme
-from app.components.inference.llamacpp import LlamaCppEngine, router_command
+from app.components.inference.llamacpp import SLOTS, LlamaCppEngine, router_command
 from app.components.inference.ollama_library import link_ollama as link
 from app.core import speech_server
 from app.core.config import settings
@@ -127,7 +127,7 @@ async def llama() -> None:
     ollama, folder = _folders()
     if (ollama / "manifests").is_dir():
         await _link(ollama, folder)
-    folder.mkdir(parents=True, exist_ok=True)
+    (folder / SLOTS).mkdir(parents=True, exist_ok=True)
     argv = router_command(
         str(folder),
         urlsplit(LlamaCppEngine.configured_url()).port or 8080,

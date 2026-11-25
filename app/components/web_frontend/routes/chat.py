@@ -14,6 +14,7 @@ from app.components.web_frontend.nav import section
 from app.components.web_frontend.rendering import render
 from app.components.web_frontend.routes.partials.chat_live import live_router
 from app.components.web_frontend.routes.partials.chat_surface import chat_router
+from app.services.ai.service import keep_warm
 from app.services.finance.service import STANDALONE_USER_ID
 
 SECTION = section("chat")
@@ -24,6 +25,9 @@ STEWARD = ChatSurface(
     surface="finance",
     agent_slug="finance-assistant",
 )
+
+# The chat a local model reads ahead for, at startup and on a model switch.
+keep_warm(STEWARD.agent_slug, STEWARD.user)
 
 
 async def _signed_in() -> None:

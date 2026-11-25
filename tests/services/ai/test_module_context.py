@@ -113,6 +113,47 @@ class TestHybridRendering:
         assert block.index("FIRST") < block.index("SECOND")
 
 
+class TestOnALocalModel:
+    """A module only there to save a turn is left off a local model's
+    prompt: it changes with the data, and a local model reads a changed
+    prompt again from the top (Inkling: 38K tokens, 107s)."""
+
+    # Renders the same modules twice on purpose: once local, once not.
+    @pytest.mark.queryspy(allow_n_plus_one=True)
+    async def test_a_skip_on_local_module_is_left_off(
+        self, session: AsyncSession
+    ) -> None:
+        async def snapshot(ctx: FetchContext) -> str | None:
+            """Live figures."""
+            return "BALANCES TODAY"
+
+        register_fetcher("snapshot", snapshot, skip_on_local=True)
+        await create_context_module(
+            slug="money",
+            name="Money",
+            prompt_content="HOW TO READ THEM",
+            fetch_function="snapshot",
+            session=session,
+        )
+        await create_context_module(
+            slug="rules",
+            name="Rules",
+            prompt_content="WHAT SHE MAY DO",
+            session=session,
+        )
+
+        local = await render_context_modules(
+            ["money", "rules"], user_id="u1", session=session, local=True
+        )
+        cloud = await render_context_modules(
+            ["money", "rules"], user_id="u1", session=session
+        )
+
+        assert local is not None and "WHAT SHE MAY DO" in local
+        assert "BALANCES TODAY" not in local and "HOW TO READ THEM" not in local
+        assert cloud is not None and "BALANCES TODAY" in cloud
+
+
 class TestTokenBudget:
     async def test_over_budget_drops_lowest_priority_first(
         self, session: AsyncSession

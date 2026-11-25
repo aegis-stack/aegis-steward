@@ -22,6 +22,7 @@ from app.services.ai.domains.chat.user_memory import (
     memory_user,
 )
 from app.services.ai.models import Conversation
+from app.services.ai.models.provider_names import LOCAL_PROVIDERS
 from app.services.ai.service.prompt import (
     HISTORY_CHAR_BUDGET_MIN,
     PromptMixin,
@@ -131,7 +132,10 @@ class TurnMixin(PromptMixin):
             admin=admin,
         ):
             agent_modules_context = await render_context_modules(
-                agent_config.context_modules, user_id=user_id, subject=subject
+                agent_config.context_modules,
+                user_id=user_id,
+                subject=subject,
+                local=self.config.provider in LOCAL_PROVIDERS,
             )
 
         # What this turn alone brings, beside the question

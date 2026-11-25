@@ -18,7 +18,7 @@ granting these tools to shared agents.
 """
 
 from datetime import date
-from typing import Any
+from typing import Any, Literal, overload
 
 from app.core.db import get_async_session
 from app.core.formatting import payee_label
@@ -32,6 +32,7 @@ from app.services.finance.domains.investments import queries as investment_queri
 from app.services.finance.domains.ledger.cash_flow import month_review
 from app.services.finance.domains.ledger.queries.accounts import EVERYONE, accounts_page
 from app.services.finance.domains.ledger.queries.categories import (
+    category_named,
     category_names_by_id,
 )
 from app.services.finance.domains.ledger.queries.flows import counted_as
@@ -41,14 +42,9 @@ from app.services.finance.domains.ledger.queries.transactions import (
 from app.services.finance.domains.ledger.transactions import (
     transaction_tags,
 )
-from app.services.finance.schemas.agent_tools import (
-    Projection,
-    TransactionRow,
-    Transactions,
-)
+from app.services.finance.schemas import agent_tools as shapes
 from app.services.finance.utils import (
     current_date,
-    current_period_month,
     month_start_before,
 )
 
@@ -61,6 +57,8 @@ _TRANSACTIONS_ROW_CAP = 5000
 # How far ahead accounts() reports scheduled flows: one full monthly
 # cycle with margin, so a mid-month plan sees next month's rent.
 _UPCOMING_WINDOW_DAYS = 35
+# Monthly detail, or the rows (``detail``); the overloads say which.
+Ledger = shapes.LedgerMonths | shapes.Transactions
 
 
 # What the monthly figures count, said with them (#294): two reviews a day
@@ -74,7 +72,19 @@ LEDGER_SCOPE = (
 )
 
 
-async def ledger(months: int = 12, detail: str = "monthly") -> dict[str, Any]:
+@overload
+async def ledger(
+    months: int = 12, detail: Literal["monthly"] = "monthly"
+) -> shapes.LedgerMonths: ...
+@overload
+async def ledger(
+    months: int = 12, *, detail: Literal["transactions"]
+) -> shapes.Transactions: ...
+@overload
+async def ledger(months: int = 12, detail: str = "monthly") -> Ledger: ...
+
+
+async def ledger(months: int = 12, detail: str = "monthly") -> Ledger:
     """Cash flow from the transaction ledger.
 
     Args:
@@ -127,12 +137,12 @@ async def ledger(months: int = 12, detail: str = "monthly") -> dict[str, Any]:
             limit=_TRANSACTIONS_ROW_CAP,
         )
         items = await transaction_rows(session, rows)
-    return {"total": total, "returned": len(items), "transactions": items}
+    return _found(total, items)
 
 
 async def transaction_rows(
     session: Any, rows: list[tuple[Any, str | None]]
-) -> list[TransactionRow]:
+) -> list[shapes.TransactionRow]:
     """A transaction as the agent reads it, whichever tool found it: one
     shape, so a field added reaches every tool (``bill_id`` once reached
     ``transactions`` and not ``ledger``, #460). ``rows`` pairs each with
@@ -189,7 +199,7 @@ async def transaction_rows(
     ]
 
 
-async def quote(ticker: str) -> dict[str, Any]:
+async def quote(ticker: str) -> shapes.Quote:
     """Latest stored closing price for a ticker in the security catalog.
 
     Args:
@@ -227,7 +237,7 @@ async def quote(ticker: str) -> dict[str, Any]:
 async def projection(
     days: int = 180,
     account_ids: list[int] | None = None,
-) -> Projection:
+) -> shapes.Projection:
     """Cash walked forward from today through the scheduled bills and
     income, over any window: 'as_of', 'horizon_days',
     'start_balance_cents', 'end_balance_cents', 'upcoming_total_cents'
@@ -243,6 +253,15 @@ async def projection(
     forward-looking number available was the fixed 60-day figure in the
     briefing, so any other horizon had to be hand-rolled from the bill
     list and then disowned as untrustworthy.
+
+    "What bills are due this week?" is ONE script, and this is it:
+
+        due = await projection(days=7)
+        print(due["upcoming_total_usd"], due["bills"])
+
+    The answer is what it prints: never read ``bills()`` for it. A bill's
+    stored 'next_expected_date' can be long past; the walk here already
+    dates each one in the window.
     """
     from app.services.finance.domains.planning.recurring.forecast import (
         project_balances,
@@ -293,18 +312,29 @@ async def transactions(
     until: str | None = None,
     tag: str | None = None,
     limit: int = 50,
-) -> Transactions:
+    category: str | None = None,
+) -> shapes.Transactions:
     """Find PARTICULAR transactions, without reading the ledger.
 
     Every filter is optional and they narrow together: ``payee`` matches
     the payee or the raw descriptor, ``amount_cents`` matches by
     magnitude (800 finds a $8.00 charge whichever way it is signed),
     ``since``/``until`` are ISO dates, ``tag`` is a tag's name (a year of
-    "Tax Related" is one call). Returns 'total' (how many match) and
+    "Tax Related" is one call), ``category`` a category's name, whole or
+    its last part ("Groceries": a month of it is one call). Returns 'total' (how many match) and
     'transactions' - id, date, payee, amount_cents, category,
     category_id, uncategorized (no category, or a catch-all bucket), tags,
     account, memo, transfer, counts_as, pending, bill_id - newest first,
-    capped at ``limit``.
+    capped at ``limit``: 'returned' below 'total' means more match, so ask
+    for a higher limit, not for halves. 'summary' is what those rows add
+    up to: spending (charges less credits), income, and spending by payee
+    and by category. "What did groceries cost last month?" is ONE script:
+
+        found = await transactions(category="Groceries", since=..., until=...)
+        print(found["summary"])
+
+    and the answer is in what it prints: never sum or group the rows in a
+    second run, and never total a payee yourself.
     'counts_as' is what every total counts it as: income, spending (signed:
     a credit here lowers spending by its amount, whatever its payee), unfiled,
     transfer, split (by its lines) or not counted. Total by it, not by sign.
@@ -342,13 +372,17 @@ async def transactions(
             }
             if (found := known.get(tag.strip().casefold())) is None:
                 names = ", ".join(sorted(t.name for t in known.values()))
-                return {
-                    "total": 0,
-                    "returned": 0,
-                    "transactions": [],
-                    "error": f"No tag is called {tag!r}. Tags: {names}.",
-                }
+                return _none_found(f"No tag is called {tag!r}. Tags: {names}.")
             tag_id = found.id
+        category_id = None
+        if category:
+            picked, near = await category_named(session, category)
+            if picked is None:
+                held = ", ".join(near) or "none"
+                return _none_found(
+                    f"No one category is {category!r}. Holding it: {held}."
+                )
+            category_id = picked.id
         service = FinanceService(session)
         rows, total = await service.list_transactions(
             owner_user_id=None,
@@ -357,7 +391,8 @@ async def transactions(
             from_date=_date(since),
             to_date=_date(until),
             tag_id=tag_id,
-            page_size=max(1, min(int(limit), 200)),
+            category_id=category_id,
+            page_size=max(1, min(int(limit), _TRANSACTIONS_ROW_CAP)),
             # A search hides nothing: the register's default hid Dad's
             # mortgage from her, and she called it "already" right (#278).
             include_transfers=True,
@@ -368,92 +403,47 @@ async def transactions(
         items = await transaction_rows(
             session, [(t, payees.get(t.merchant_id)) for t in rows]
         )
-    return {"total": total, "returned": len(items), "transactions": items}
+    return _found(total, items)
 
 
-async def budget(period_month: int | None = None) -> dict[str, Any]:
-    """The limits the user actually set, and how the month is going
-    against them: 'period_month' (YYYYMM), 'limits' (every FLEXIBLE
-    line - 'category' or 'payee', 'limit_cents', 'spent_cents',
-    'remaining_cents', and 'status' of good/warn/critical), 'commitments' (the
-    recurring bills shown for context, which are NOT limits anyone set),
-    and 'stats' (the month's totals, how many limits are over, the days
-    left in the period, and what is left: 'left_in_limits_under_budget_cents'
-    is what the limits with room still have, 'net_left_cents' that less
-    what the others went over - name which one you report).
+def _none_found(error: str) -> shapes.Transactions:
+    """A filter that names nothing: said, so she corrects it (``error``)."""
+    return {**_found(0, []), "error": error}
 
-    Reach for this whenever the question is what something is BUDGETED
-    at, what is left, or what is over - "what is our budget for
-    Medicine/Drugs?". A limit is a number the user chose and it lives
-    nowhere else: `ledger` shows what was SPENT, which is a different
-    question and cannot answer this one. ``period_month`` is YYYYMM for
-    an earlier month; omitted means the current period. A month that has
-    ended reads as it was recorded when it ended (its bills and income
-    then, not now), with 'changed_since' saying what was filed into it
-    later; one that ended before records were kept is read as it is now.
 
-    Only 'limits' carry a real spend-vs-limit status. A commitment's
-    'limit_cents' is just what that bill typically costs, so never report one
-    as a budget the user set, or as being over or under.
-    """
-    from app.services.finance.domains.planning import budgets
-
-    async with get_async_session() as session:
-        closed = (
-            await budgets.month_as_closed(
-                session, owner_user_id=None, period_month=period_month
-            )
-            if period_month is not None and period_month < current_period_month()
-            else None
-        )
-        if closed is not None:
-            summary = closed.summary  # as recorded when it ended (#319)
+def _found(total: int, rows: list[shapes.TransactionRow]) -> shapes.Transactions:
+    """Rows with their figures (``TransactionsSummary``): every extra run
+    she made was one of these sums, and a payee total she wrote herself
+    was wrong."""
+    charges = credits = income = 0
+    by_payee: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    other: dict[str, int] = {}
+    for row in rows:
+        kind, cents = row["counts_as"] or "not counted", row["amount_cents"]
+        if kind == "income":
+            income += cents
+        elif kind == "spending":
+            charges, credits = charges + max(-cents, 0), credits + max(cents, 0)
+            payee, category = row["payee"] or "(no payee)", row["category"] or "(none)"
+            by_payee[payee] = by_payee.get(payee, 0) - cents
+            by_category[category] = by_category.get(category, 0) - cents
         else:
-            summary = await budgets.budget_summary(
-                session, owner_user_id=None, period_month=period_month
-            )
-
-    def line(row: Any) -> dict[str, Any]:
-        return {
-            "category": row.category_name,
-            "category_id": row.category_id,
-            "payee": row.payee_label,
-            "payee_key": row.payee_key,
-            "limit_cents": row.allocated_amount,
-            "spent_cents": row.spent_amount,
-            # A limit that rolls over carries last months' leftover (or
-            # overspending) into this one (#360); what remains counts it.
-            "rolls_over": row.rollover,
-            "carried_cents": row.carried_amount,
-            "remaining_cents": row.available_amount - row.spent_amount,
-            "status": row.status,
-        }
-
-    limits = [line(row) for row in summary.bucket("flexible").lines]
-    commitments = [
-        line(row)
-        for bucket in summary.buckets
-        if bucket.name != "flexible"
-        for row in bucket.lines
-    ]
-    stats = summary.stats
-    remaining = [row["remaining_cents"] for row in limits]
+            other[kind] = other.get(kind, 0) + 1
     return {
-        "period_month": summary.period_month,
-        "limits": limits,
-        "commitments": commitments,
-        "stats": {
-            "flexible_spent_cents": stats.flexible_spent,
-            "flexible_allocated_cents": stats.flexible_allocated,
-            "days_left_in_period": stats.days_left_in_period,
-            "over_budget_count": stats.over_budget_count,
-            "over_budget_labels": stats.over_budget_labels,
-            "fixed_total_cents": stats.fixed_total,
-            "left_in_limits_under_budget_cents": sum(r for r in remaining if r > 0),
-            "net_left_cents": sum(remaining),
+        "total": total,
+        "returned": len(rows),
+        "transactions": rows,
+        "summary": {
+            "complete": len(rows) >= total,
+            "spending_cents": charges - credits,
+            "charges_cents": charges,
+            "credits_cents": credits,
+            "income_cents": income,
+            "by_payee": dict(sorted(by_payee.items(), key=lambda kv: -kv[1])),
+            "by_category": dict(sorted(by_category.items(), key=lambda kv: -kv[1])),
+            "not_in_spending": other,
         },
-        # Cents, as recorded ("then") and as now, when filed into since.
-        "changed_since": closed.changed_since() if closed else None,
     }
 
 
@@ -470,7 +460,6 @@ for name, func, description in (
         "Cash walked forward through scheduled bills over any window",
     ),
     ("quote", quote, "Latest stored closing price for a ticker"),
-    ("budget", budget, "The limits the user set, and spend against them this period"),
 ):
     register_tool(name, func, description=description, effect="read", replace=True)
 
@@ -479,6 +468,7 @@ for name, func, description in (
 # registers the whole finance tool surface.
 from app.services.finance.ai_account_tools import accounts  # noqa: E402,F401
 from app.services.finance.ai_bill_tools import bill_candidates, bills  # noqa: E402,F401
+from app.services.finance.ai_budget_tools import budget  # noqa: E402,F401
 from app.services.finance.ai_write_tools import categories, tags  # noqa: E402,F401
 from app.services.finance.domains.ledger.cleanup import (  # noqa: E402,F401
     cleanup_candidates,

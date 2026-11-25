@@ -42,8 +42,7 @@ def _shipped_marks() -> dict[str, str]:
     own, which no catalog org holds, as the static route serves it."""
     from app.services.ai.service import TTSProvider
 
-    kokoro = static_url("marks/kokoro.png")
-    return {TTSProvider.KOKORO.value: kokoro, TTSProvider.LOCAL_SERVER.value: kokoro}
+    return {TTSProvider.LOCAL_SERVER.value: static_url("marks/kokoro.png")}
 
 
 def _speak(voice: str, model: str) -> str:

@@ -33,6 +33,14 @@ def sse_frame(event: str, html: str) -> str:
     return f"event: {event}\n{lines}\n"
 
 
+# The last word on a stream. A stream the server ends is one the SSE
+# extension reconnects, and a finished job answers a reconnect with its
+# last frame again: the review re-rendered over whatever the reader had
+# done to it (a Change opened, an account picked) every few seconds. The
+# follower closes on this (``sse-close="done"``, ``feedback.sse_job``).
+DONE = sse_frame("done", "end")
+
+
 # What a follower is told about a job the app no longer has. Jobs run
 # IN the web process, so a restart takes the running ones with it - and
 # a 404 on the stream is invisible to the SSE extension: no frame ever
@@ -59,7 +67,7 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
     queue = await runner.subscribe_any(job_id)
     if queue is None:
         lost = sse_frame("status", render_snapshot(request, {**LOST, "id": job_id}))
-        return StreamingResponse(iter([lost]), media_type="text/event-stream")
+        return StreamingResponse(iter([lost, DONE]), media_type="text/event-stream")
 
     async def stream() -> AsyncIterator[str]:
         try:
@@ -69,6 +77,7 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
                     break
                 yield sse_frame("status", render_snapshot(request, snapshot))
                 if snapshot["status"] != "running":
+                    yield DONE
                     break
         except asyncio.CancelledError:
             raise

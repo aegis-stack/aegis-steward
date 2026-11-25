@@ -2,9 +2,9 @@
 OpenAI client at SPEECH_BASE_URL, sent only what its profile (``SERVERS``)
 says it takes.
 
-Its voices go by ids of their own (``local_server:af_heart``), since the
-in-app Kokoro has the same names and a voice's id says its provider; the
-server is sent the name it knows (``served_as``). Any such id is one of its
+Its voices go by ids of their own (``local_server:af_heart``): a voice's
+id says its provider, and the server is sent the name it knows
+(``served_as``). Any such id is one of its
 voices (``voice_of``), so a profile on one opens before the server has been
 asked; a listing has those it is known to have, and the rest once it has
 been asked for them (``ask_for_voices``).
@@ -19,7 +19,7 @@ from typing import Any
 from app.core import speech_server
 from app.core.voice_settings import setting_default
 
-from .. import library, local
+from .. import library
 from ..models import (
     DEFAULT_TTS_MODELS,
     ModelInfo,
@@ -37,6 +37,21 @@ PROVIDER_ID = TTSProvider.LOCAL_SERVER.value
 PREFIX = f"{PROVIDER_ID}:"
 
 
+# Kokoro v1.0's English voices, the ones Kokoro-FastAPI has before it is
+# asked. The prefix is the language or accent and the gender
+# (``speech_server.traits``); Kokoro names no tone. Each is named by its id:
+# half share a name with an OpenAI or Gemini voice (af_alloy, af_kore), and a
+# second "Alloy" would read as the same one.
+KOKORO_VOICES = tuple(
+    (
+        "af_heart af_alloy af_aoede af_bella af_jessica af_kore af_nicole af_nova "
+        "af_river af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam "
+        "am_michael am_onyx am_puck am_santa bf_alice bf_emma bf_isabella bf_lily "
+        "bm_daniel bm_fable bm_george bm_lewis"
+    ).split()
+)
+
+
 @dataclass(frozen=True)
 class Server:
     """What one speech server takes beyond OpenAI's speech endpoint."""
@@ -52,7 +67,7 @@ SERVERS = {
     "kokoro_fastapi": Server(
         name=speech_server.NAME,
         whole={"stream": False},  # it streams unless told not to
-        voices=local.KOKORO_VOICES,
+        voices=KOKORO_VOICES,
     ),
 }
 # The one SPEECH_SERVER names so far, so the catalog's from the start.
@@ -60,8 +75,6 @@ SERVER = SERVERS[setting_default("SPEECH_SERVER")]
 
 PROVIDER = ProviderInfo(
     id=PROVIDER_ID,
-    # Its voices share their names with the in-app Kokoro's; this says
-    # which plays them.
     name=SERVER.name,
     type="tts",
     requires_api_key=False,
@@ -85,8 +98,18 @@ def served_as(voice: str) -> str:
 
 
 def _voice(name: str) -> VoiceInfo:
-    return local.kokoro_voice(
-        name, PROVIDER_ID, [m.id for m in MODELS], id=PREFIX + name
+    """One of its voices as the catalog lists it, its accent and gender read
+    off its name (``bf_``: British, female); a name past that (a mix the
+    server saved) is listed as it is."""
+    accent, gender = speech_server.traits(name) or (None, None)
+    return VoiceInfo(
+        id=PREFIX + name,
+        name=name,
+        provider_id=PROVIDER_ID,
+        model_ids=[m.id for m in MODELS],
+        description=f"Kokoro, {accent} {gender}" if accent else "Kokoro",
+        gender=gender,
+        accent=accent,
     )
 
 

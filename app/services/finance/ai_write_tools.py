@@ -8,13 +8,12 @@ are the lookups a payload needs: ``categories`` for a categorize's
 
 from __future__ import annotations
 
-from typing import Any
-
 from app.core.db import get_async_session
 from app.core.tools import register_tool
+from app.services.finance.schemas.agent_tools import Categories, Tags
 
 
-async def categories() -> dict[str, Any]:
+async def categories() -> Categories:
     """Every assignable category: 'id', 'name' and 'classification'
     ('expense' | 'income' | 'transfer'). The id is what a
     transaction.categorize proposal's 'category_id' takes.
@@ -39,7 +38,7 @@ async def categories() -> dict[str, Any]:
     }
 
 
-async def tags() -> dict[str, Any]:
+async def tags() -> Tags:
     """Every live tag with how many transactions wear it: 'id', 'name',
     'count'. Tags are the label axis ORTHOGONAL to categories (a
     "Business" tag on a Software-categorized row). A transaction.tag

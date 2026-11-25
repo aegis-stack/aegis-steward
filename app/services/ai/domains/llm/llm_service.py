@@ -326,6 +326,10 @@ async def set_active_model(model_id: str, force: bool = False) -> SetModelResult
         )
     else:
         update_env_file(updates)
+    # A local model reads the chat's opening now, not at its first question.
+    from app.services.ai.domains.chat.warm import enqueue_warm
+
+    await enqueue_warm()
 
     message = f"Switched to model '{model_id}'"
     if provider_updated:

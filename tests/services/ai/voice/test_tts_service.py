@@ -363,11 +363,12 @@ class TestUnsaid:
     def test_says_a_missing_package_with_the_line_that_installs_it(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from app.services.ai.domains.voice.tts.providers import get_tts_provider
+        from app.services.ai.domains.voice.models import STTProvider
+        from app.services.ai.domains.voice.stt import get_stt_provider
 
         packages_installed(monkeypatch, False)
         with pytest.raises(RuntimeError) as refused:
-            get_tts_provider(TTSProvider.KOKORO)
+            get_stt_provider(STTProvider.PARAKEET)
 
         assert unsaid(refused.value) == str(refused.value)
         assert "uv add" in unsaid(refused.value)

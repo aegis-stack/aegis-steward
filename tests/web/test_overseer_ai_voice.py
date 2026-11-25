@@ -717,14 +717,14 @@ async def test_each_voice_shows_its_providers_mark(
     assert chosen.get("src").endswith("/icons/openai")
 
 
-async def test_a_voice_that_runs_in_the_app_wears_the_mark_it_ships_with(
+async def test_a_voice_on_a_server_of_yours_wears_the_mark_it_ships_with(
     client: TestClient, hers: VoiceProfile, heard: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Kokoro has no catalog org to hold a mark: its own ships with the app."""
-    packages_installed(monkeypatch, True)
-    html = _editor(client, hers, filtered="1", provider="kokoro")
+    monkeypatch.setattr(settings, "SPEECH_BASE_URL", "http://server:8880/v1")
+    html = _editor(client, hers, filtered="1", provider="local_server")
 
-    heart = one(html, '[data-voice-card="af_heart"] img')
+    heart = one(html, '[data-voice-card="local_server:af_heart"] img')
     assert heart.get("src").startswith("/static/marks/kokoro.png")
 
 

@@ -1,41 +1,92 @@
-{# A CSV layout nobody knew (issue 619): the columns it has, mapped once
-   and kept as a layout, then the review as if it had been known.
+{# A CSV layout nobody knew (issue 619): the file's first rows under its
+   columns (issue 625), each column told what it holds, mapped once and
+   kept as a layout, then the review as if it had been known.
 
-   Needs: layout (a LayoutAsk: columns, file_name, and for a known
-   layout whose dates read two ways its picked columns, name, the
-   date_formats that fit and the reason; on a retry also date_format,
-   spending_positive, errors); import_layout (the fields,
+   Needs: layout (a LayoutAsk: columns, rows, file_name, picked columns,
+   date_formats (each style that fits, told as what the file's first date
+   means that way), and for a known layout whose dates read two ways its
+   name and the reason; on a retry also date_format, spending_positive,
+   errors); import_layout (the fields,
    the date formats, where it posts) from the import route. The file
-   itself rides along from #import-form, as the review's Import does. #}
-{% from "components/macros/form.html" import field, select, text_input, checkbox, button_classes %}
+   itself rides along from #import-form, as the review's Import does.
+
+   Each column posts its name (``column``) and what it is (``field``), in
+   file order. A field belongs to one column: picking it for another
+   clears it from the first. #}
+{% from "components/macros/form.html" import select, checkbox, button_classes %}
 {% from "components/macros/feedback.html" import error_banner %}
-{% set picked = layout.picked or {} %}
+{% from "components/macros/table.html" import data_table %}
+{% from "components/macros/imports.html" import date_reading %}
+{% set as_field = layout.as_field or {} %}
+{% set picks = [] %}
+{% set columns = [] %}
+{% for column in layout.columns %}
+{% set _ = picks.append(as_field.get(column, "")) %}
+{#- The file's own name for it, as written, not in the header's capitals. -#}
+{% set _ = columns.append({"label": '<span class="normal-case font-mono text-aegis-text">'|safe ~ column ~ '</span>'|safe, "align": "left", "hide_below": none}) %}
+{% endfor %}
 {#- Only the styles the file fits, when it fits more than one. -#}
-{% set formats = layout.date_formats or import_layout.date_formats %}
-<section id="import-layout" class="space-y-4">
+{% set formats = layout.date_formats %}
+{% macro sample(item) %}
+<tr{% if item is mapping %} data-column-picks{% endif %}>
+  {% for column in layout.columns %}
+  <td class="px-3 py-1.5 align-top whitespace-nowrap" :class="picks[{{ loop.index0 }}] && 'bg-aegis-teal/10'">
+    {%- if item is mapping -%}
+    <input type="hidden" name="column" value="{{ column }}">
+    {{ select("field", import_layout.fields|as_options, as_field.get(column), blank="Skip this column", attrs='x-model="picks[' ~ loop.index0 ~ ']" @change="pick(' ~ loop.index0 ~ ')" aria-label="What ' ~ column ~ ' holds"') }}
+    {%- else -%}{{ item[loop.index0] if loop.index0 < item|length else "" }}{%- endif -%}
+  </td>
+  {% endfor %}
+  <td></td>{#- data_table's actions column, empty here -#}
+</tr>
+{% endmacro %}
+<section id="import-layout" class="space-y-4"{% if not folded %} data-wide{% endif %}>{#- every column side by side; folded in the review, its wrapper widens -#}
   <header class="space-y-0.5">
-    <h3 class="text-sm font-semibold text-aegis-text">A layout this app does not know yet</h3>
-    <p class="text-xs text-aegis-muted" data-reason>{{ layout.reason or "Say which column is which, once. Files with these columns are read this way from then on." }}</p>
+    {% if not folded %}<h3 class="text-sm font-semibold text-aegis-text">A layout this app does not know yet</h3>{% endif %}
+    <p class="text-xs text-aegis-muted" data-reason>{{ layout.reason or "Say what each column holds, once. Files with these columns are read this way from then on." }}</p>
   </header>
   {{ error_banner(layout.errors or []) }}
-  <form id="import-layout-form" class="space-y-3" data-map-columns>
+  <form id="import-layout-form" class="space-y-3" data-map-columns
+        x-data='{ picks: {{ picks|tojson }}, pick(at) { this.picks = this.picks.map((f, i) => i !== at && f === this.picks[at] ? "" : f) } }'>
     {#- A retry opens with the same narrowing and reason; of several
         files, this one is mapped. -#}
     <input type="hidden" name="layout_file" value="{{ layout.file_name or '' }}">
-    {% for format in layout.date_formats or [] %}<input type="hidden" name="offered_format" value="{{ format }}">{% endfor %}
-    {% if layout.reason %}<input type="hidden" name="reason" value="{{ layout.reason }}">{% endif %}
-    {% call field("Call this layout") %}{{ text_input("layout_name", layout.name or (layout.file_name or "My file").rsplit(".", 1)[0], required=True, remember=False) }}{% endcall %}
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-      {% for key, label in import_layout.fields %}
-      {% call field(label) %}{{ select("col_" ~ key, layout.columns|as_options, picked.get(key), blank="Not in this file", block=True) }}{% endcall %}
-      {% endfor %}
+    {% if layout.reason %}
+    {% for format in layout.date_formats %}<input type="hidden" name="offered_format" value="{{ format }}">{% endfor %}
+    <input type="hidden" name="reason" value="{{ layout.reason }}">
+    {% endif %}
+    {#- Named for the file; nobody needs to name it. -#}
+    <input type="hidden" name="layout_name" value="{{ layout.name or '' }}">
+    <p class="text-xs text-aegis-muted">Across the top, your file's columns with its first rows. Under each, pick what that column is here.</p>
+    <div class="rounded border border-aegis-border" data-sample>
+      {{ data_table(columns, [{"picks": true}] + (layout.rows or []), flush=False, row=sample) }}
     </div>
-    {% call field("Dates are written like") %}{{ select("date_format", formats|as_options, layout.date_format, blank=None, block=True) }}{% endcall %}
-    {{ checkbox("spending_positive", layout.spending_positive, "Spending is a positive amount", value="1") }}
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+      {#- Each reading told in the file's own first date; one that fits
+          is said, not asked. -#}
+      {% if formats|length == 1 %}
+      {% for format, reading in formats.items() %}
+      <input type="hidden" name="date_format" value="{{ format }}">
+      {{ date_reading(reading) }}
+      {% endfor %}
+      {% else %}
+      {#- One click, each reading in the file's own date. -#}
+      <fieldset class="space-y-1.5" data-date-choice>
+        <legend class="text-xs text-aegis-muted">Which does your date mean?</legend>
+        <div class="flex flex-wrap gap-1.5">
+          {% for format, reading in formats.items() %}
+          <label><input type="radio" name="date_format" value="{{ format }}" class="sr-only peer"{% if format == (layout.date_format or (formats|first)) %} checked{% endif %}><span class="chip cursor-pointer">{{ reading }}</span></label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      {% endif %}
+      <div x-show="picks.includes('amount')" x-cloak>{{ checkbox("spending_positive", layout.spending_positive, "Spending is a positive amount", value="1") }}</div>
+    </div>
     <p class="text-xxs text-aegis-muted">Date and payee are needed, and either an amount or money out and money in. An account column sends each row to its own account.</p>
   </form>
   <div class="flex items-center justify-end gap-3">
-    <button type="button" data-dialog-close class="{{ button_classes('default') }}">Cancel</button>
+    {% if folded %}<button type="button" @click="changing = false" class="{{ button_classes('default') }}">Back</button>
+    {% else %}<button type="button" data-dialog-close class="{{ button_classes('default') }}">Cancel</button>{% endif %}
     <button type="button" hx-post="{{ import_layout.path }}" hx-target="#import-result" hx-include="#import-form, #import-layout-form"
             hx-encoding="multipart/form-data" class="{{ button_classes() }}" data-save-layout>Save and review</button>
   </div>

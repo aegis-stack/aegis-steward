@@ -37,6 +37,16 @@ async def read_photo_task(
     return {"key": key, "read": await read_photo_job(user_id, key, media_type, title)}
 
 
+async def warm_chat_task(
+    ctx: dict[str, Any], agent_slug: str | None, user_id: str
+) -> int | None:
+    """Read the chat's opening into the local model before anyone asks:
+    a long prompt read, so never on the request path."""
+    from app.services.ai.service import warm_chat_job
+
+    return await warm_chat_job(agent_slug, user_id)
+
+
 async def fold_conversation_task(
     ctx: dict[str, Any], conversation_id: str, upto: int
 ) -> bool:

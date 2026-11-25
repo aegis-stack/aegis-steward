@@ -16,13 +16,18 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from starlette.responses import Response
 
 from app.components.backend.api.finance.accounts import list_accounts
-from app.components.backend.api.finance.base import read_upload
-from app.components.backend.api.finance.imports import keep_answers, start_files_job
+from app.components.backend.api.finance.imports import (
+    keep_answers,
+    layout_file_of,
+    save_csv_layout,
+    start_files_job,
+    take_back,
+    undoable_batch,
+)
 from app.components.web_frontend.nav import section
 from app.components.web_frontend.rendering import (
     dialog,
     dialog_done,
-    or_404,
     templates,
     where_from,
 )
@@ -30,18 +35,15 @@ from app.services.finance.constants import PREVIEW_DETAIL_CAP
 from app.services.finance.deps import get_finance_service, get_owner_user_id
 from app.services.finance.schemas import LayoutAsk
 from app.services.finance.service import (
-    DATE_FORMATS,
     FIELDS,
     UPLOADS,
     FinanceService,
-    LayoutError,
-    can_undo,
-    files_in,
+    ImportUndone,
+    date_choices,
     files_label,
     formats_label,
-    header_preview,
+    header_and_sample,
     imports_job,
-    offered,
     run_title,
 )
 
@@ -77,7 +79,6 @@ templates.env.globals["import_review"] = {
 templates.env.globals["import_frame"] = imports_job.frame
 templates.env.globals["import_layout"] = {
     "fields": FIELDS,
-    "date_formats": DATE_FORMATS,
     "path": router.prefix + "/layout",
 }
 
@@ -208,41 +209,51 @@ async def save_layout(
     review, as if the file had been known all along. Of several files,
     the one the form was for (#618)."""
     form = await request.form()
-    columns = {key: str(form.get(f"col_{key}") or "") for key, _ in FIELDS}
+    # One pick per column, in file order (#625); the form keeps a field
+    # to one column.
+    columns = {
+        str(field): str(column)
+        for column, field in zip(
+            form.getlist("column"), form.getlist("field"), strict=False
+        )
+        if field
+    }
     try:
-        named = [
-            entry
-            for f in file
-            for entry in files_in(await read_upload(f), str(f.filename))[0]
-        ]
-    except (HTTPException, ValueError) as exc:
-        return _error(request, str(getattr(exc, "detail", exc)))
-    mapped_name, data = next((e for e in named if e[0] == layout_file), named[0])
+        mapped_name, data = await layout_file_of(file, layout_file)
+    except HTTPException as exc:
+        return _error(request, str(exc.detail))
     try:
-        await service.save_layout(
-            owner_user_id=owner_user_id,
-            file_bytes=data,
+        await save_csv_layout(
+            data,
             name=layout_name,
             columns=columns,
             date_format=date_format,
             spending_positive=bool(spending_positive),
+            service=service,
+            owner_user_id=owner_user_id,
         )
-    except LayoutError as exc:
+    except HTTPException as exc:
+        header, rows = header_and_sample(data)
         ask = LayoutAsk(
-            columns=header_preview(data),
+            columns=header,
+            rows=rows,
             file_name=mapped_name,
             name=layout_name,
             picked=columns,
-            date_formats=offered([str(f) for f in form.getlist("offered_format")]),
+            date_formats=date_choices(
+                header,
+                rows,
+                columns.get("date"),
+                [str(f) for f in form.getlist("offered_format")],
+            ),
             reason=str(form.get("reason") or "") or None,
         )
         layout = ask.model_dump() | {
             "date_format": date_format,
             "spending_positive": bool(spending_positive),
-            "errors": [str(exc)],
+            "errors": [str(exc.detail)],
         }
         return _fragment(request, "partials/imports/layout.html", 422, layout=layout)
-    await service.db.commit()
     for upload in file:
         await upload.seek(0)
     return await _follow(request, file, account_id, "preview", service, owner_user_id)
@@ -257,20 +268,13 @@ def undo_path(batch_id: int) -> str:
 templates.env.globals["import_undo_path"] = undo_path
 
 
-def _took_back(title: str, done: Any) -> str:
+def _took_back(title: str, done: ImportUndone) -> str:
     said = [f"removed {done.removed:,} rows"]
     if done.restored:
         said.append(f"put back {done.restored:,} changes")
     if done.kept:
         said.append(f"kept {done.kept:,} you have edited since")
     return f"Undid {title}: " + ", ".join(said) + "."
-
-
-async def _undoable(
-    service: FinanceService, batch_id: int, owner_user_id: int | None
-) -> Any:
-    batch = await service.get_import_batch(batch_id, owner_user_id=owner_user_id)
-    return or_404(batch if can_undo(batch) else None)
 
 
 @router.get("/{batch_id:int}/undo", include_in_schema=False)
@@ -280,7 +284,7 @@ async def undo_confirm(
     service: FinanceService = Depends(get_finance_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> Response:
-    batch = await _undoable(service, batch_id, owner_user_id)
+    batch = await undoable_batch(batch_id, service=service, owner_user_id=owner_user_id)
     return dialog(
         request,
         "partials/imports/undo.html",
@@ -296,11 +300,9 @@ async def undo(
     service: FinanceService = Depends(get_finance_service),
     owner_user_id: int | None = Depends(get_owner_user_id),
 ) -> Response:
-    """Take one file back (#621): what it added goes, what it changed
-    goes back, and a row edited since stays."""
-    batch = await _undoable(service, batch_id, owner_user_id)
-    done = await service.undo_import(batch, owner_user_id=owner_user_id)
-    await service.db.commit()
+    """The confirm's undo (``take_back``), said as a toast."""
+    batch = await undoable_batch(batch_id, service=service, owner_user_id=owner_user_id)
+    done = await take_back(batch, service=service, owner_user_id=owner_user_id)
     return dialog_done(
         where_from(request, SECTION.path), _took_back(run_title(batch), done)
     )

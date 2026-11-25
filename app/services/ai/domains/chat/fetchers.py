@@ -53,6 +53,9 @@ class RegisteredFetcher:
     name: str
     func: FetcherFunc
     description: str | None = None
+    # Only there to save the model a tool call: left off a local model's
+    # prompt, which it changes with the data (``render_context_modules``).
+    skip_on_local: bool = False
 
 
 _registry: dict[str, RegisteredFetcher] = {}
@@ -64,6 +67,7 @@ def register_fetcher(
     *,
     description: str | None = None,
     replace: bool = False,
+    skip_on_local: bool = False,
 ) -> None:
     """Register a fetcher under a name.
 
@@ -74,7 +78,9 @@ def register_fetcher(
         raise ValueError(
             f"Fetcher '{name}' is already registered; pass replace=True to rebind it"
         )
-    _registry[name] = RegisteredFetcher(name=name, func=func, description=description)
+    _registry[name] = RegisteredFetcher(
+        name=name, func=func, description=description, skip_on_local=skip_on_local
+    )
 
 
 def unregister_fetcher(name: str) -> None:

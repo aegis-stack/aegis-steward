@@ -144,7 +144,7 @@ class TestWhatAReplyDid:
         conversation.add_message(MessageRole.USER, "and then?")
         after = _build(conversation, budget=50_000)
 
-        history = before.rsplit("\n\nUser: and now?", 1)[0]
+        history = before.rsplit("\n\nToday is ", 1)[0]
         assert "Assistant steps" in history
         assert after.startswith(history)
 
@@ -200,6 +200,27 @@ class TestTheDays:
             (False, True),
             (False, False),
         ]
+
+    def test_the_question_says_what_day_it_is(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing told her the date: asked about "last month" on November
+        26 she took September, the last month in her data she read as
+        whole. Today rides the message, on the clock her tools read."""
+        from datetime import datetime
+
+        from app.core import time
+        from app.services.ai.service.prompt import PromptMixin
+
+        monkeypatch.setattr(time, "utcnow", lambda: datetime(2026, 11, 26, 15))
+
+        text = PromptMixin._build_conversation_context(  # type: ignore[arg-type]
+            None, thread([], "what did I spend last month?"), history_budget=10_000
+        )
+
+        assert text.endswith(
+            "Today is Thursday, 2026-11-26.\n\nwhat did I spend last month?"
+        )
 
 
 class TestTheReport:

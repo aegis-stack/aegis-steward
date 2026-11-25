@@ -151,6 +151,7 @@ class TestLookUpContactFallsBackToSearch:
         found = await ai_tools.look_up_contact(
             "Maple Nursing Care Center", ["maplenursingcarecenter.com"]
         )
+        assert "error" not in found
 
         assert tried[0] == ["maplenursingcarecenter.com"]
         assert "maplenursingcare.org/about" in tried[1]
@@ -177,6 +178,7 @@ class TestLookUpContactFallsBackToSearch:
         monkeypatch.setattr(domain_lookup, "contact_page", contact_page)
 
         found = await ai_tools.look_up_contact("Delta Dental", ["deltadentalins.com"])
+        assert "error" not in found
 
         assert found["found_by"] == "guess"
         assert brave == []

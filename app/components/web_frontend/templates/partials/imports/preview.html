@@ -16,17 +16,20 @@
 {% set cap = import_review.cap %}
 {% from "components/macros/layout.html" import card, ranked_rows, badge %}
 {% from "components/macros/form.html" import button_classes, select %}
-{% from "components/macros/imports.html" import count_cells, count_dots, footnote, named, more %}
+{% from "components/macros/imports.html" import count_cells, count_dots, footnote, named, more, date_reading %}
+{% from "components/macros/table.html" import data_table %}
 {% if preview.layout_ask %}
 {% with layout = preview.layout_ask %}{% include "partials/imports/layout.html" %}{% endwith %}
 {% else %}
-<section id="import-preview" class="space-y-4">
+<section id="import-preview" class="space-y-4" x-data="{ changing: false }" :data-wide="changing ? '' : null">
   <header class="space-y-0.5">
     <h3 class="text-sm font-semibold text-aegis-text">Review import</h3>
     {# "Looks like a Chase Credit Card file, into Amex" - what the app
        thinks the file is, and the one line that catches a statement aimed
        at the wrong account before Import is pressed. #}
-    {% if preview.layout %}
+    {% if preview.guess %}
+    <p class="text-sm text-aegis-text" data-target>Read from its column names{% if preview.account_name %}, into {{ preview.account_name }}{% endif %}</p>
+    {% elif preview.layout %}
     <p class="text-sm text-aegis-text" data-target>Looks like a {{ preview.layout }} file{% if preview.account_name %}, into {{ preview.account_name }}{% endif %}</p>
     {% endif %}
     <p class="text-xs text-aegis-muted" data-file-summary>
@@ -36,6 +39,41 @@
     </p>
   </header>
 
+  {#- A layout nobody knew, read from its column names (issue 625): how,
+      the first rows as they land, and whether they walk the file's own
+      running balance. Kept for these columns; Change opens the form. -#}
+  {% if preview.guess %}
+  {% set guess = preview.guess %}
+  {% set field_names = dict(import_layout.fields) %}
+  {% set as_field = guess.ask.as_field %}
+  <div data-guess>
+    <div x-show="!changing" class="space-y-3">
+      <ul class="flex flex-wrap items-center gap-1.5" data-read-as>
+        {% for column in guess.ask.columns if column in as_field %}
+        <li class="chip"><span class="font-mono">{{ column }}</span> &rarr; <span class="text-aegis-teal">{{ field_names[as_field[column]] }}</span></li>
+        {% endfor %}
+        <li><button type="button" class="text-xs text-aegis-teal hover:underline" @click="changing = true" data-change-layout>Change</button></li>
+      </ul>
+      <div class="rounded border border-aegis-border" data-read-rows>
+        {{ data_table([
+             {"key": "day", "label": "Date", "kind": "date"},
+             {"key": "name", "label": "Payee"},
+             {"key": "amount", "label": "Amount", "kind": "money", "align": "right", "toned": True},
+           ], guess.rows, flush=False, actions=none) }}
+      </div>
+      {% if guess.balance_matches %}
+      <p data-tone="ok" class="toned text-xs" data-balance-check>These add up to the file's running balance on every row.</p>
+      {% elif guess.balance_matches is false %}
+      <p data-tone="warn" class="tone text-xs" data-balance-check>These do not add up to the file's running balance. Check money in and money out with Change.</p>
+      {% endif %}
+      {% for reading in guess.ask.date_formats.values() %}{{ date_reading(reading) }}{% endfor %}
+    </div>
+    <div x-show="changing" x-cloak>{% with layout = guess.ask, folded = True %}{% include "partials/imports/layout.html" %}{% endwith %}</div>
+  </div>
+  {% endif %}
+
+  {#- Changing the layout, the form is the whole step. -#}
+  <div x-show="!changing" class="space-y-4">
   {% if preview.nothing_to_import %}
   {# A dead end: one button, nothing to decide. No cells — a row of zeroes
      wearing the chrome that means "this reaches your ledger" says the
@@ -125,7 +163,7 @@
   </div>
 
   {% if preview.files_skipped %}{{ footnote("Left out, not a file this app reads: " ~ preview.files_skipped|join(", ")) }}{% endif %}
-  {{ footnote("Nothing has been written yet.") }}
+  {{ footnote("No transactions written yet. This way of reading the columns is kept for the next file like it." if preview.guess else "Nothing has been written yet.") }}
   <div class="flex items-center justify-end gap-3">
     <button type="button" data-dialog-close class="{{ button_classes('default') }}">Cancel</button>
     {# Outside the form, so it inherits nothing from it: the encoding has
@@ -135,5 +173,6 @@
             class="{{ button_classes() }}">Import {{ "{:,}".format(preview.changes) }} change{{ "" if preview.changes == 1 else "s" }}</button>
   </div>
   {% endif %}
+  </div>
 </section>
 {% endif %}

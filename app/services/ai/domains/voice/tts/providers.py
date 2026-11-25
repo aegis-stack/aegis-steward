@@ -350,10 +350,6 @@ def get_tts_provider(
             model=model or DEFAULT_TTS_MODELS[provider],
             voice=voice or DEFAULT_TTS_VOICES[provider],
         )
-    elif provider == TTSProvider.KOKORO:
-        from .kokoro import KokoroProvider  # it imports this module
-
-        return KokoroProvider(voice=voice or DEFAULT_TTS_VOICES[provider])
     elif provider == TTSProvider.LOCAL_SERVER and server_url:
         from .server import ServerTTSProvider  # it imports this module
 

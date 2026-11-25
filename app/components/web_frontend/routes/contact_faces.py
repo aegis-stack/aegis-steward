@@ -128,7 +128,6 @@ async def overview(
         context = await face(db, party_id, "overview", owner_user_id)
         contact = context["party"].contact or {}
         related = (await relations_for(db, [party_id]))[party_id]
-        kin = await PartyService(db).names([int(r["party_id"]) for r in related])
     return _page(
         request,
         {
@@ -139,7 +138,7 @@ async def overview(
                 if contact.get(key)
             ],
             "lines": reach_lines(contact),
-            "family": [{**r, "party": kin.get(int(r["party_id"]))} for r in related],
+            "family": related,
         },
     )
 
