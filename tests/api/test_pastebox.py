@@ -9,17 +9,20 @@ consumer drains first owns the paste.
 """
 
 import base64
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from starlette.types import Message, Receive, Scope, Send
 
 from app.components.backend.middleware.dashboard_scripts import (
+    REFUSED_SOCKET_SCRIPT,
     DashboardScriptsMiddleware,
     inject_dashboard_scripts,
 )
 from app.core.appearance import FLET_MODE_KEY, HTMX_MODE_KEY
 from app.core.pastebox import Pastebox
+from tests.web import node
 
 _PNG = b"\x89PNG fake bytes"
 
@@ -138,6 +141,74 @@ class TestModeBridgeInjection:
         from app.components.web_frontend.rendering import APPEARANCE
 
         assert HTMX_MODE_KEY in APPEARANCE
+
+
+AUTH_JS = Path("app/components/web_frontend/static/js/auth.js")
+
+
+def _socket_then(
+    *, opened: bool, probe: int | None, renews: bool = False
+) -> dict[str, object]:
+    """Run ``auth.js`` and the refused-socket script in node, as the page
+    runs them, against a fake socket that closes (after opening, or
+    never). The dashboard answers ``probe`` (None: the server is down) and
+    a renewal answers ``renews``. What the page did."""
+    script = (
+        f"const PROBE = {json.dumps(probe)}, RENEWS = {json.dumps(renews)};\n"
+        """
+        const did = { probes: 0, renewals: 0, went: null };
+        globalThis.window = globalThis;
+        globalThis.document = { addEventListener() {}, querySelector() { return null; } };
+        window.location = { pathname: "/dashboard/login", assign: (to) => { did.went = to; } };
+        window.fetch = async (path) => {
+          if (path === "/api/v1/auth/refresh") { did.renewals++; return { ok: RENEWS }; }
+          did.probes++;
+          if (PROBE === null) throw new TypeError("down");
+          return { status: PROBE };
+        };
+        window.WebSocket = class extends EventTarget {};
+        """
+        + AUTH_JS.read_text()
+        + REFUSED_SOCKET_SCRIPT.removeprefix("<script>").removesuffix("</script>")
+        + f"const OPENED = {json.dumps(opened)};\n"
+        + """
+        const socket = new WebSocket("ws://host/dashboard/ws");
+        if (OPENED) socket.dispatchEvent(new Event("open"));
+        socket.dispatchEvent(new Event("close"));
+        setTimeout(() => console.log(JSON.stringify(did)), 0);
+        """
+    )
+    return node.run(script)
+
+
+class TestRefusedSocket:
+    """#647: the refused-socket script (see ``dashboard_scripts``)."""
+
+    def test_signed_out_renews_and_stays(self) -> None:
+        did = _socket_then(opened=False, probe=401, renews=True)
+        assert did == {"probes": 1, "renewals": 1, "went": None}
+
+    def test_signed_out_without_a_renewal_goes_to_the_dashboard(self) -> None:
+        did = _socket_then(opened=False, probe=401, renews=False)
+        assert did == {"probes": 1, "renewals": 1, "went": "/dashboard/"}
+
+    def test_signed_in_lets_flet_retry(self) -> None:
+        did = _socket_then(opened=False, probe=200)
+        assert did == {"probes": 1, "renewals": 0, "went": None}
+
+    def test_a_down_server_lets_flet_retry(self) -> None:
+        did = _socket_then(opened=False, probe=None)
+        assert did == {"probes": 1, "renewals": 0, "went": None}
+
+    def test_a_socket_dropped_after_opening_is_not_asked(self) -> None:
+        did = _socket_then(opened=True, probe=401)
+        assert did == {"probes": 0, "renewals": 0, "went": None}
+
+    def test_auth_js_rides_the_page_first(self) -> None:
+        head = inject_dashboard_scripts(b"<html><head></head></html>").split(
+            b"</head>"
+        )[0]
+        assert head.index(b"js/auth") < head.index(REFUSED_SOCKET_SCRIPT.encode())
 
 
 class TestPasteCaptureUnderPathsend:
