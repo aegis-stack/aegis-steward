@@ -13,6 +13,7 @@ import csv
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import io
+from itertools import islice
 import re
 from typing import TYPE_CHECKING
 
@@ -95,14 +96,31 @@ def _sheet_rows(data: bytes) -> list[list[str]]:
     return rows
 
 
+# Rows of an unknown file shown under its columns, so each can be told
+# apart by what it holds (#625).
+SAMPLE_ROWS = 5
+
+
+def header_and_sample(data: bytes) -> tuple[list[str], list[list[str]]]:
+    """The likeliest header of an unknown layout, the widest of the first
+    rows so a title or preamble line before it is passed over, and the
+    first ``SAMPLE_ROWS`` non-blank rows under it."""
+    rows = _read_rows(data)
+    head = [[cell.strip() for cell in row] for row in rows[:20]]
+    if not head:
+        return [], []
+    at = max(range(len(head)), key=lambda i: sum(1 for cell in head[i] if cell))
+    below = ([cell.strip() for cell in row] for row in rows[at + 1 :])
+    return head[at], list(islice((row for row in below if any(row)), SAMPLE_ROWS))
+
+
 def header_preview(data: bytes) -> list[str]:
-    """The likeliest header of an unknown layout: the widest of the first
-    rows, so a title or preamble line before it is passed over."""
-    rows = [[cell.strip() for cell in row] for row in _read_rows(data)[:20]]
-    return max(rows, key=lambda row: sum(1 for cell in row if cell), default=[])
+    """``header_and_sample``'s header alone."""
+    return header_and_sample(data)[0]
 
 
-def _row_matches(row: list[str], profile: FinanceImportProfile) -> bool:
+def row_matches(row: list[str], profile: FinanceImportProfile) -> bool:
+    """``row`` is ``profile``'s header: the same columns, in any order."""
     trimmed = [cell.strip() for cell in row]
     signature = [cell.strip() for cell in profile.header_signature]
     if trimmed == signature:
@@ -158,7 +176,7 @@ def detect_profile(
     rows = _read_rows(data)
     for index, row in enumerate(rows):
         for profile in profiles:
-            if _row_matches(row, profile):
+            if row_matches(row, profile):
                 return profile, index
     for index, row in enumerate(rows):
         cells = {cell.strip() for cell in row}

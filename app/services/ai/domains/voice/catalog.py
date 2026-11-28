@@ -228,9 +228,9 @@ _TTS_VOICES += [
     )
     for name, (gender, tone) in _GEMINI_VOICES.items()
 ]
-_TTS_PROVIDERS += [local.TTS_PROVIDER, server.PROVIDER]
-_TTS_MODELS += local.TTS_MODELS + server.MODELS
-_TTS_VOICES += local.VOICES + server.VOICES
+_TTS_PROVIDERS += [server.PROVIDER]
+_TTS_MODELS += server.MODELS
+_TTS_VOICES += server.VOICES
 
 # Each voice and speech model by id, for the lookups a page makes per row.
 _VOICES_BY_ID = {v.id: v for v in _TTS_VOICES}

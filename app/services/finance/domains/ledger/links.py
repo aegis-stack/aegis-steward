@@ -9,12 +9,12 @@ many, and a link can be taken back off.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.finance.domains.ledger import queries
 from app.services.finance.models import FinanceTransaction, FinanceTransactionLink
+from app.services.finance.schemas.agent_tools import Charges
 
 
 async def link(db: AsyncSession, transaction_id: int, label: str) -> bool:
@@ -44,7 +44,7 @@ async def linked(
     return found
 
 
-async def filed(db: AsyncSession, labels: list[str]) -> dict[str, dict[str, Any]]:
+async def filed(db: AsyncSession, labels: list[str]) -> dict[str, Charges]:
     """Each label's transactions as her reads carry them: the rows a
     proposal can name, and their signed total - what a case cost, what
     was paid a contact. One query for every place listed."""

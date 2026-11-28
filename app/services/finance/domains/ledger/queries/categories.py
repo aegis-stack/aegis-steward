@@ -144,6 +144,27 @@ async def all_categories(
     return list((await db.exec(query)).all())
 
 
+async def category_named(
+    db: AsyncSession, name: str
+) -> tuple[FinanceCategory | None, list[str]]:
+    """The live category ``name`` means, the way a person says one: its
+    whole name ("Food & Dining:Groceries") or its last part ("groceries"),
+    either case. None when that picks no single one, with the names that
+    hold ``name`` (what to say instead)."""
+    wanted = name.strip().casefold()
+    rows = (
+        await db.exec(
+            select(FinanceCategory).where(FinanceCategory.is_archived == False)  # noqa: E712
+        )
+    ).all()
+    picked = [r for r in rows if r.name.casefold() == wanted] or [
+        r for r in rows if r.name.rsplit(":", 1)[-1].casefold() == wanted
+    ]
+    if len(picked) == 1:
+        return picked[0], []
+    return None, sorted(r.name for r in rows if wanted in r.name.casefold())
+
+
 async def category_usage_rows(
     db: AsyncSession,
     *,

@@ -11,8 +11,12 @@ import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.services.finance.adapters.importers import layouts
+from app.services.finance.adapters.importers.base import ParsedTransaction
 from app.services.finance.adapters.importers.csv_profiles import (
+    SAMPLE_ROWS,
+    UnknownCsvLayoutError,
     detect_profile,
+    header_preview,
     parse_csv,
 )
 from app.services.finance.adapters.importers.queries import (
@@ -95,12 +99,60 @@ async def test_a_mapping_that_cannot_read_the_file_says_why(
 
 @pytest.mark.asyncio
 @pytest.mark.queryspy(threshold=3)  # the same layout saved twice, on purpose
-async def test_a_name_already_taken_is_refused(
+async def test_mapping_the_same_columns_again_rewrites_the_layout(
+    async_db_session: AsyncSession, csv_profiles: None
+) -> None:
+    """#625: the review's Change maps a guessed layout again; files with
+    these columns are read the new way, not by the first of two."""
+    await _save(async_db_session)
+    await _save(async_db_session, columns={**COLUMNS, "memo": ""})
+
+    mine = [p for p in await profiles(async_db_session) if not p.is_system]
+    assert [(p.name, "Note" in p.column_mapping) for p in mine] == [
+        ("Budget app", False)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.queryspy(threshold=3)  # two layouts saved, on purpose
+async def test_a_name_already_taken_gets_a_number(
     async_db_session: AsyncSession, csv_profiles: None
 ) -> None:
     await _save(async_db_session)
-    with pytest.raises(layouts.LayoutError, match="already"):
-        await _save(async_db_session)
+    other = b"Day,Payee,Out,In\n03/02/2026,Corner Cafe,4.75,\n"
+    await _save(
+        async_db_session,
+        other,
+        columns={"date": "Day", "name": "Payee", "debit": "Out", "credit": "In"},
+        date_format="%m/%d/%Y",
+    )
+
+    names = [p.name for p in await profiles(async_db_session) if not p.is_system]
+    assert names == ["Budget app", "Budget app (2)"]
+
+
+def _walk(*rows: tuple[int, int]) -> list[ParsedTransaction]:
+    return [
+        ParsedTransaction(
+            date=date(2026, 11, 1), amount=a, source="csv", running_balance=b
+        )
+        for a, b in rows
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rows", "matches"),
+    [
+        (_walk((-8417, 241583), (185000, 426583)), True),  # oldest first
+        (_walk((185000, 426583), (-8417, 241583)), True),  # newest first
+        (_walk((8417, 241583), (-185000, 426583)), False),  # in and out swapped
+        (_walk((-8417, 241583)), None),  # one balance proves nothing
+    ],
+)
+def test_the_amounts_are_checked_against_the_running_balance(
+    rows: list[ParsedTransaction], matches: bool | None
+) -> None:
+    assert layouts.balance_matches(rows) is matches
 
 
 @pytest.mark.asyncio
@@ -125,3 +177,44 @@ async def test_your_layout_for_a_known_header_is_read_first(
     profile, header = detect_profile(data, await profiles(async_db_session))
     assert profile is not None and profile.name == "My YNAB"
     assert parse_csv(data, profile, header_index=header)[0].date == date(2026, 4, 3)
+
+
+def test_the_ask_shows_the_rows_under_the_header() -> None:
+    """#625: the preamble line is passed over, a blank line skipped, and
+    no more than ``SAMPLE_ROWS`` rows ride along."""
+    body = b"".join(b"2026-03-%02d,Shop,-1.00,\n" % day for day in range(1, 9))
+    data = FILE.replace(b"2026-03-03", b"\n2026-03-03") + body
+    unknown = UnknownCsvLayoutError(header_preview(data), [])
+
+    ask = layouts.layout_ask(unknown, "budget.csv", data)
+
+    assert ask.columns == ["When", "Who", "How much", "Note"]
+    assert ask.rows[:2] == [
+        ["2026-03-02", "Corner Cafe", "-4.75", "latte"],
+        ["2026-03-03", "Employer", "2500.00", ""],
+    ]
+    assert len(ask.rows) == SAMPLE_ROWS
+
+
+def test_the_ask_opens_with_what_the_column_names_suggest() -> None:
+    """#625: a guess from the file's own names and dates, to confirm;
+    a column no name explains is left to the person."""
+    data = (
+        b"Posted Date,Description,Withdrawal,Deposit,Running Balance\n"
+        b"11/03/2026,Grocery,84.17,,2415.83\n"
+        b"11/14/2026,Water,62.40,,2353.43\n"
+    )
+    unknown = UnknownCsvLayoutError(header_preview(data), [])
+
+    ask = layouts.layout_ask(unknown, "checking.csv", data)
+
+    assert ask.picked == {
+        "date": "Posted Date",
+        "name": "Description",
+        "debit": "Withdrawal",
+        "credit": "Deposit",
+        "balance": "Running Balance",
+    }
+    assert ask.name == "checking"
+    # Only the reading every sample date fits, told in the file's own date.
+    assert ask.date_formats == {"%m/%d/%Y": "11/03/2026 is November 3, 2026"}

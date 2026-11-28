@@ -11,6 +11,7 @@ from app.core.formatting import format_date, payee_label
 from app.services.change_queue import ChangeDisplayRow
 from app.services.finance.domains.detection.insights.formatting import format_usd
 from app.services.finance.domains.ledger import transactions
+from app.services.finance.schemas.agent_tools import Charge
 
 # How a card names a row its payload points at and the ledger does not
 # have: an id made up, or a row gone since.
@@ -74,7 +75,7 @@ async def payee_of(db: AsyncSession, txn: Any) -> str:
     return payee_label(named, txn.merchant_name, txn.name)
 
 
-def candidate_row(txn: Any) -> dict[str, Any]:
+def candidate_row(txn: Any) -> Charge:
     """A transaction as a match shortlist names it: the id a proposal
     takes, and enough to recognise it. Bills and claims read one shape."""
     return {

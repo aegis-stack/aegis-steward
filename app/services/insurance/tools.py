@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from app.core.db import get_async_session
 from app.core.formatting import iso_date
 from app.core.tools import register_tool
 from app.services.finance.domains.writes.display import candidate_row
+from app.services.insurance.schemas import ClaimCandidates, Policies
 from app.services.insurance.service import InsuranceService
 from app.services.matters.service import PartyService
 
 
-async def policies() -> dict[str, Any]:
+async def policies() -> Policies:
     """Every insurance policy on file, with its claims.
 
     Returns a dict with key 'policies': entries carrying 'id',
@@ -70,7 +69,7 @@ async def policies() -> dict[str, Any]:
     return {"policies": rows}
 
 
-async def claim_candidates(claim_id: int) -> dict[str, Any]:
+async def claim_candidates(claim_id: int) -> ClaimCandidates:
     """The charges that could have paid this claim: outflows within a
     month of the visit whose amount is within a tenth of what the EOB
     said was owed. Each candidate's 'id' is what a claim.paid proposal's

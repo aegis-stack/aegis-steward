@@ -363,6 +363,11 @@ class TestPreviewOffTheRequest:
         none(response.text, "html")  # a fragment, never the shell
         follower = one(response.text, "[sse-connect]")
         assert follower.get("hx-ext") == "sse" and follower.get("sse-swap") == "status"
+        # Reported live 2026-11-25: the stream closed after the review and
+        # the extension reconnected, re-sending the finished job's last
+        # frame: the review swapped back over Change every few seconds.
+        # The stream ends on ``done`` and the follower closes on it.
+        assert follower.get("sse-close") == "done"
         none(response.text, "#import-preview")
 
         panel = follow(live_client, response.text)[1]
@@ -511,6 +516,7 @@ class TestImportJob:
         assert "event: status" in answer.text
         assert "restarted" in answer.text
         assert "data-import-retry" in answer.text
+        assert answer.text.rstrip().endswith("event: done\ndata: end")
 
 
 class TestJobFrames:
@@ -699,16 +705,28 @@ class TestBalances:
         )
 
 
+def _picks(html: str) -> list[str]:
+    """What each column of the map-once form is said to hold, in order."""
+    return [
+        (one(pick, "option[selected]").get("value") or "")
+        for pick in select(
+            html, '#import-layout [data-column-picks] select[name="field"]'
+        )
+    ]
+
+
 class TestUnknownLayout:
-    """An unknown CSV is mapped once and kept, not refused (#619)."""
+    """An unknown CSV is mapped once and kept, not refused (#619), from
+    its first rows shown under its columns (#625)."""
 
-    FILE = (
-        "budget.csv",
-        b"When,Who,How much\n2026-03-02,Corner Cafe,-4.75\n",
-        "text/csv",
-    )
+    FILE = ("budget.csv", (FIXTURES / "budget.csv").read_bytes(), "text/csv")
+    # One pick per column, in file order, as the form posts them.
+    MAPPED = {
+        "column": ["When", "Who", "How much"],
+        "field": ["date", "name", "amount"],
+    }
 
-    def test_it_says_which_columns_it_saw(
+    def test_it_shows_its_columns_over_its_first_rows(
         self,
         live_client: TestClient,
         ledger: Ledger,
@@ -717,9 +735,99 @@ class TestUnknownLayout:
     ) -> None:
         panel = review(live_client, self.FILE, account_id=str(ledger.checking))
 
+        assert (
+            one(panel, "#import-layout").get("data-wide") is not None
+        )  # the page's width
+        sample = one(panel, "#import-layout [data-map-columns] [data-sample]")
+        heads = [text(th) for th in select(sample, "thead th")]
+        assert heads[:3] == ["When", "Who", "How much"]
+        assert _picks(panel) == ["", "", ""]
+        rows = select(sample, "tbody tr:not([data-column-picks])")
+        assert [text(td) for td in select(rows[0], "td")][:3] == [
+            "2026-03-02",
+            "Corner Cafe",
+            "-4.75",
+        ]
+
+    CHECKING = (
+        "checking.csv",
+        b"Posted Date,Description,Withdrawal,Deposit,Running Balance\n"
+        b"03/03/2026,Grocery Outlet,84.17,,2415.83\n"
+        b"03/14/2026,Payroll Deposit,,1850.00,4265.83\n",
+        "text/csv",
+    )
+
+    @pytest.mark.queryspy(allow_n_plus_one=True)  # two reviews in turn
+    def test_columns_its_names_explain_go_straight_to_the_review(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        """#625: a guess that reads the file is shown, not asked: how each
+        column was read, the rows as they land, the balance they walk."""
+        panel = review(live_client, self.CHECKING, account_id=str(ledger.checking))
+
+        guess = one(panel, "#import-preview [data-guess]")
+        assert [text(li) for li in select(guess, "[data-read-as] li.chip")] == [
+            "Posted Date \u2192 Date",
+            "Description \u2192 Payee",
+            "Withdrawal \u2192 Money out",
+            "Deposit \u2192 Money in",
+            "Running Balance \u2192 Running balance",
+        ]
+        rows = select(guess, "[data-read-rows] tbody tr")
+        assert [text(td) for td in select(rows[0], "td")][1:] == [
+            "Grocery Outlet",
+            "-$84.17",
+        ]
+        assert "running balance on every row" in text(
+            one(guess, "[data-balance-check]")
+        )
+        assert "No transactions written yet" in text(one(panel, "#import-preview"))
+        # Change folds the form in, its picks the guess; not wide until opened.
+        folded = one(guess, "#import-layout")
+        assert folded.get("data-wide") is None
+        assert _picks(panel) == ["date", "name", "debit", "credit", "balance"]
+
+        # Kept: the next file with these columns is a known layout.
+        again = review(live_client, self.CHECKING, account_id=str(ledger.checking))
+        assert not select(again, "[data-guess]")
+
+    def test_a_lone_amount_with_no_balance_is_asked_not_guessed(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        """Spending could be written either sign; nothing in the file says."""
+        upload = ("card.csv", b"Date,Payee,Amount\n2026-03-02,Cafe,4.75\n", "text/csv")
+        panel = review(live_client, upload, account_id=str(ledger.checking))
+
+        assert one(panel, "#import-layout").get("data-wide") is not None
+        assert not select(panel, "[data-guess]")
+
+    def test_dates_that_read_one_way_are_told_not_asked(
+        self,
+        live_client: TestClient,
+        ledger: Ledger,
+        csv_profiles: None,
+        job_session: None,
+    ) -> None:
+        upload = (
+            "dated.csv",
+            b"Date,Who,How much\n2026-03-02,Cafe,-4.75\n",
+            "text/csv",
+        )
+        panel = review(live_client, upload, account_id=str(ledger.checking))
+
         form = one(panel, "#import-layout [data-map-columns]")
-        options = select(form, 'select[name="col_date"] option')
-        assert [o.get("value") for o in options] == ["", "When", "Who", "How much"]
+        assert not select(form, 'select[name="date_format"]')
+        kept = one(form, 'input[type="hidden"][name="date_format"]')
+        assert kept.get("value") == "%Y-%m-%d"
+        assert "2026-03-02 is March 2, 2026" in text(one(form, "[data-date-reading]"))
 
     def test_mapping_it_once_opens_the_review(
         self,
@@ -734,9 +842,7 @@ class TestUnknownLayout:
             data={
                 "account_id": str(ledger.checking),
                 "layout_name": "Budget app",
-                "col_date": "When",
-                "col_name": "Who",
-                "col_amount": "How much",
+                **self.MAPPED,
                 "date_format": "%Y-%m-%d",
             },
         )
@@ -757,18 +863,14 @@ class TestUnknownLayout:
             files={"file": self.FILE},
             data={
                 "layout_name": "Budget app",
-                "col_date": "When",
-                "col_name": "Who",
-                "col_amount": "How much",
+                **self.MAPPED,
                 "date_format": "%m/%d/%Y",
             },
         )
         assert response.status_code == 422
         assert "When column" in text(one(response.text, "#import-layout"))
-        assert (
-            one(response.text, 'select[name="col_date"] option[selected]').get("value")
-            == "When"
-        )
+        assert _picks(response.text) == ["date", "name", "amount"]
+        assert "Corner Cafe" in text(one(response.text, "#import-layout [data-sample]"))
 
     def test_a_known_layout_whose_dates_read_two_ways_asks_which(
         self,
@@ -787,11 +889,16 @@ class TestUnknownLayout:
         panel = review(live_client, upload)
 
         form = one(panel, "#import-layout [data-map-columns]")
-        assert one(form, 'select[name="col_date"] option[selected]').get("value") == (
-            "Date"
-        )
-        formats = select(form, 'select[name="date_format"] option')
-        assert [o.get("value") for o in formats] == ["%m/%d/%Y", "%d/%m/%Y"]
+        assert _picks(panel)[2] == "date"  # YNAB's third column
+        formats = select(form, "[data-date-choice] label")
+        assert [one(o, "input").get("value") for o in formats] == [
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+        ]
+        assert [text(o) for o in formats] == [
+            "03/04/2026 is March 4, 2026",
+            "03/04/2026 is April 3, 2026",
+        ]
         assert "YNAB" in text(one(panel, "#import-layout [data-reason]"))
 
 
@@ -937,9 +1044,7 @@ class TestSeveralFiles:
                 "account_id": str(ledger.checking),
                 "layout_file": "statements/budget.csv",
                 "layout_name": "Budget app",
-                "col_date": "When",
-                "col_name": "Who",
-                "col_amount": "How much",
+                **TestUnknownLayout.MAPPED,
                 "date_format": "%Y-%m-%d",
             },
         )

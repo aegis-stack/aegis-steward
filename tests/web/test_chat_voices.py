@@ -367,26 +367,6 @@ class TestCalls:
         assert not select(html, "[data-call-summary]")
         assert not select(html, "[data-call-model][aria-current=true]")
 
-    def test_speaks_lists_the_speaking_models(
-        self,
-        hx: TestClient,
-        voices: dict[str, VoiceProfile],
-        calls: list[str],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Kokoro was installed and nowhere to pick: Speaks listed the saved
-        voices alone (2026-11-21)."""
-        packages_installed(monkeypatch, True)
-        calls.append(LOCAL)
-        url = chat_calls.address(VOICES, chat_calls.CHAIN, chat_calls.SPEAKS)
-        html = hx.get(url).text
-
-        kokoro = one(html, '[data-speak-model="kokoro-v1.0"]')
-        assert chat_calls.LOCAL["label"] in text(kokoro)
-        current = one(html, "[data-speak-model][aria-current=true]")
-        assert current.get("data-speak-model") == "gpt-4o-mini-tts-2025-03-20"
-        assert not select(html, "[data-call-model]")
-
     @pytest.mark.parametrize("answers", [True, False])
     @pytest.mark.parametrize(
         ("part", "setting", "mark", "served"),
@@ -440,21 +420,21 @@ class TestCalls:
         calls: list[str],
         async_db_session: AsyncSession,
     ) -> None:
-        """By its own provider; the voice stays hers. Marin has no Kokoro
-        voice, so Kokoro speaks its own and the part says she has none
+        """By its own provider; the voice stays hers. Marin has no voice on
+        Kokoro-FastAPI, so it speaks its own and the part says she has none
         there."""
         calls.append(LOCAL)
-        response = hx.post(f"{VOICES}/speaks", data={"model_id": "kokoro-v1.0"})
+        response = hx.post(f"{VOICES}/speaks", data={"model_id": "kokoro"})
 
         setup = await _setup(async_db_session)
-        assert (setup.tts_model, setup.tts_provider) == ("kokoro-v1.0", "kokoro")
+        assert (setup.tts_model, setup.tts_provider) == ("kokoro", "local_server")
         await async_db_session.refresh(voices["marin"])
         assert voices["marin"].voices == {"openai": "marin"}
-        assert (settings.TTS_MODEL, settings.TTS_VOICE) == ("kokoro-v1.0", None)
+        assert (settings.TTS_MODEL, settings.TTS_VOICE) == ("kokoro", None)
         speaks = one(response.text, f'[data-call-part="{chat_calls.SPEAKS}"]')
-        assert text(one(speaks, "[data-name]")).startswith("Kokoro v1.0")
+        assert text(one(speaks, "[data-name]")).startswith("Kokoro")
         assert chat_calls.LOCAL["label"] in text(speaks)
-        assert call_setup.unvoiced(voices["marin"], "kokoro") in text(speaks)
+        assert call_setup.unvoiced(voices["marin"], "local_server") in text(speaks)
 
     def test_hears_lists_the_hearing_models_the_voices_marked(
         self, hx: TestClient, voices: dict[str, VoiceProfile], calls: list[str]

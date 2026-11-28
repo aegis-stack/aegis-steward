@@ -64,7 +64,7 @@ async def _built(
     config = replace(
         agent_loader.default_agent_config(), context_modules=("finance_changes",)
     )
-    ai = SimpleNamespace(config=SimpleNamespace(model="m"))
+    ai = SimpleNamespace(config=SimpleNamespace(model="m", provider="openai"))
     ai._prepare_agent_and_context = prepare
     setup = await turn.TurnMixin._build_turn(
         ai,  # type: ignore[arg-type]

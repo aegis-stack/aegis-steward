@@ -306,6 +306,7 @@ async def test_paper_returns_a_read_document_without_reading_it_again(
     )
 
     found = await ai_tools.paper(document_id)
+    assert "error" not in found
 
     assert found["read"] is True
     assert found["title"] == "Doe J Request.pdf"
@@ -345,6 +346,7 @@ async def test_paper_waits_for_the_worker_and_returns_the_text(
     document_id = await _on_file(async_db_session, pages=None)
 
     found = await ai_tools.paper(document_id)
+    assert "error" not in found
 
     assert queued == [document_id]
     assert found["read"] is True
@@ -366,6 +368,7 @@ async def test_paper_says_so_when_the_read_outlasts_the_wait(
     document_id = await _on_file(async_db_session, pages=None)
 
     found = await ai_tools.paper(document_id)
+    assert "error" not in found
 
     assert found["read"] is False
     assert found["reading"] == "job-1"
@@ -484,6 +487,7 @@ async def test_a_documents_figures_come_back_with_it(
 
     (listed,) = (await ai_tools.documents(q="1099-NEC"))["documents"]
     read = await ai_tools.paper(int(form.id or 0))
+    assert "error" not in read
 
     expected = {"box 1 nonemployee compensation": "$86,380.00"}
     assert listed["figures"] == expected

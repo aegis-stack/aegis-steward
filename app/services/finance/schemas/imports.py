@@ -43,17 +43,47 @@ class BalanceCheck(BaseModel):
 
 
 class LayoutAsk(BaseModel):
-    """What the map-once form opens with (#619): the file's columns, and
+    """What the map-once form opens with (#619): the file's columns and
+    a few of its rows (#625), and
     for a known layout whose dates read two ways, its mapping filled in,
     the styles that fit, and why it asks."""
 
     columns: list[str]
+    # The first rows under them, cell for cell, to tell the columns apart.
+    rows: list[list[str]] = Field(default_factory=list)
     file_name: str | None = None
     picked: dict[str, str] = Field(default_factory=dict)
     name: str | None = None
     # Format -> example, only the styles that fit.
     date_formats: dict[str, str] = Field(default_factory=dict)
+    # On a retry, the style picked.
+    date_format: str | None = None
     reason: str | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def as_field(self) -> dict[str, str]:
+        """Column -> field: what each picked column is read as."""
+        return {column: field for field, column in self.picked.items()}
+
+
+class ReadRow(BaseModel):
+    """A row as a layout reads it: what lands in the ledger."""
+
+    day: date | None = None
+    name: str | None = None
+    amount: int  # cents, signed: spending negative
+
+
+class LayoutGuess(BaseModel):
+    """A layout nobody knew, read from what its column names suggest
+    (#625): the review shows how, with the first rows as read and whether
+    they walk the file's running balance; ``ask`` opens the form to
+    Change it."""
+
+    ask: LayoutAsk
+    rows: list[ReadRow] = Field(default_factory=list)
+    balance_matches: bool | None = None
 
 
 class ImportResultResponse(BaseModel):
@@ -132,6 +162,7 @@ class ImportPreviewResponse(BaseModel):
     # A CSV layout to map once (#619): an unknown one, or a known one
     # whose dates read two ways.
     layout_ask: LayoutAsk | None = None
+    guess: LayoutGuess | None = None
     layout: str | None = None
     account_name: str | None = None
     rows_inserted: int = 0

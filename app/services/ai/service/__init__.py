@@ -76,6 +76,7 @@ if TYPE_CHECKING:
         list_user_facts,
         update_user_fact,
     )
+    from app.services.ai.domains.chat.warm import enqueue_warm, keep_warm, warm_chat
     from app.services.ai.domains.llm import active_model
     from app.services.ai.domains.llm.base import ProviderError as ProviderSetupError
     from app.services.ai.domains.llm.config import get_ai_config
@@ -195,7 +196,11 @@ if TYPE_CHECKING:
         to_spoken,
     )
     from app.services.ai.domains.voice.tts.service import unsaid
-    from app.services.ai.jobs import fold_conversation_job, read_photo_job
+    from app.services.ai.jobs import (
+        fold_conversation_job,
+        read_photo_job,
+        warm_chat_job,
+    )
     from app.services.ai.models import (
         AIProvider,
         MessageRole,

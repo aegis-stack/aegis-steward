@@ -40,6 +40,11 @@
 </p>
 {% endmacro %}
 
+{# What a file's dates mean, told in its own first date (issue 625). #}
+{% macro date_reading(reading) %}
+<p class="text-xs text-aegis-muted" data-date-reading>Dates read as written: {{ reading }}.</p>
+{% endmacro %}
+
 {# One named thing a commit would mint: its kind, then its name. #}
 {% macro named(kind, name, tone="muted") %}
 <li class="flex items-center gap-2 min-w-0 text-sm">

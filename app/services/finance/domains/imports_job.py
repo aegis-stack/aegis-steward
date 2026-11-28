@@ -86,9 +86,10 @@ async def _preview(
     owner_user_id: int | None,
     on_label: SetLabel | None,
 ) -> dict[str, Any]:
-    """The dry run: the plan the import would execute, writing nothing.
-    Several files add up into one review; the first whose CSV layout
-    nobody knows answers alone, with its columns, to map once."""
+    """The dry run: the plan the import would execute, writing nothing
+    but a guessed CSV layout (``layouts.read_as_guessed``). Several files
+    add up into one review; the first whose CSV layout nobody knows and
+    its column names do not explain answers alone, to map once."""
     from app.services.finance.service import FinanceService, files_in, merge_reviews
 
     service = FinanceService(session)
@@ -111,8 +112,13 @@ async def _review(
     owner_user_id: int | None,
 ) -> ImportPreviewResponse:
     from app.services.finance.schemas import ImportPreviewResponse
-    from app.services.finance.service import UnknownCsvLayoutError, layout_ask
+    from app.services.finance.service import (
+        UnknownCsvLayoutError,
+        layout_ask,
+        read_as_guessed,
+    )
 
+    guess = None
     try:
         plan = await service.preview_file(
             owner_user_id=owner_user_id,
@@ -121,11 +127,23 @@ async def _review(
             account_id=account_id,
         )
     except UnknownCsvLayoutError as unknown:
-        ask = layout_ask(unknown, file_name)
-        return ImportPreviewResponse(file_name=file_name, rows_total=0, layout_ask=ask)
+        # A whole-file read for its first rows: off the worker's loop.
+        ask = await asyncio.to_thread(layout_ask, unknown, file_name, data)
+        found = await read_as_guessed(
+            service.db, unknown, ask, data, file_name, account_id, owner_user_id
+        )
+        if found is None:
+            return ImportPreviewResponse(
+                file_name=file_name, rows_total=0, layout_ask=ask
+            )
+        plan, guess = found
     if plan.needs_account:
         raise ValueError(NEEDS_ACCOUNT)
-    return await service.preview_payload(plan)
+    if guess is not None:
+        await service.db.commit()  # the guessed layout, kept now it is shown
+    review = await service.preview_payload(plan)
+    review.guess = guess
+    return review
 
 
 def capped_review(review: ImportPreviewResponse) -> dict[str, Any]:

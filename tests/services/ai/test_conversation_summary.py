@@ -306,7 +306,7 @@ class TestEveryTurnFolds:
         monkeypatch.setattr(turn, "enqueue_fold", lambda *args: args)
         monkeypatch.setattr(turn, "background", folded.append)
         ai = SimpleNamespace(
-            config=SimpleNamespace(model="m"),
+            config=SimpleNamespace(model="m", provider="openai"),
             # With RAG, what this turn alone brings (``_this_turn``).
             _this_turn=lambda _rag, now: now,
         )

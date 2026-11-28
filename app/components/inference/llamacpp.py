@@ -86,15 +86,22 @@ def _served(
     return models
 
 
+# Where a router keeps saved prompt caches, inside its models folder.
+SLOTS = ".slots"
+
+
 def router_command(folder: str, port: int, context: int, extra: str = "") -> list[str]:
     """A llama-server router over ``folder``, with the flags chat needs
     (``make llama`` runs it); ``extra`` is any further flags, as typed.
     One model in memory at a time: picking another unloads the last, and
-    two large ones at once fail with "Compute error"."""
+    two large ones at once fail with "Compute error". A prompt's cache is
+    saved to and restored from ``<folder>/.slots`` (``slot``)."""
     return [
         "llama-server",
         "--models-dir",
         folder,
+        "--slot-save-path",
+        f"{folder}/{SLOTS}",
         "--jinja",
         "-c",
         str(context),
@@ -148,6 +155,14 @@ class LlamaCppEngine(BaseInferenceEngine):
         server has neither (it serves the model it was started with), and
         refuses."""
         await self._post(f"/models/{action}", {"model": model_name}, 60.0)
+
+    async def slot(self, action: str, model: str, filename: str) -> None:
+        """Save slot 0's prompt cache to ``filename``, or restore it from
+        there (``action``): a read of a long prompt, kept across restarts
+        (``chat.warm``). The router passes it to ``model``'s server, which
+        loads it first; one started without ``--slot-save-path`` refuses."""
+        query = urlencode({"action": action, "model": model})
+        await self._post(f"/slots/0?{query}", {"filename": filename}, 120.0)
 
     async def _holds(self, client: httpx.AsyncClient, model: str) -> bool:
         """Whether ``model`` is in memory (``_warm``); a single-model server

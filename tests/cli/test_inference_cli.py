@@ -133,6 +133,8 @@ def test_llama_links_ollama_then_becomes_the_router(
             "llama-server",
             "--models-dir",
             str(tmp_path / "models"),
+            "--slot-save-path",
+            f"{tmp_path / 'models'}/.slots",
             "--jinja",
             "-c",
             "65536",
@@ -163,7 +165,7 @@ def test_llama_without_ollama_serves_the_folder_alone(
     monkeypatch.setattr(os, "execvp", lambda path, argv: became.append(argv))
 
     assert invoke(["inference", "llama"]).exit_code == 0
-    assert (tmp_path / "models").is_dir() and became
+    assert (tmp_path / "models" / ".slots").is_dir() and became
     # Unset, it still starts with what chat needs of it.
     assert type(settings).model_fields["LLAMACPP_ARGS"].default == "-fa on -np 2 -kvu"
 

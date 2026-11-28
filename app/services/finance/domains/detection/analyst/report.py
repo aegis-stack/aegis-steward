@@ -240,6 +240,9 @@ register_fetcher(
         "Accounts, net-worth trend, card/loan detail, portfolio, cashflow, "
         "spending vs norm, recent transactions, open anomalies, cash forecast."
     ),
+    # Saves a tool call, and changes with every sync: a local model read
+    # her whole prompt again after each (38K tokens, 107s on Inkling).
+    skip_on_local=True,
 )
 
 

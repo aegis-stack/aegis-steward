@@ -437,8 +437,8 @@ class TestEveryVoiceIsDescribed:
     def test_every_voice_has_a_gender_and_a_tone(self) -> None:
         for voice in get_tts_voices():
             assert voice.gender in ("female", "male", "neutral"), voice.id
-            kokoro = (TTSProvider.KOKORO, TTSProvider.LOCAL_SERVER)
-            assert voice.tone or voice.provider_id in kokoro, voice.id
+            kokoro = TTSProvider.LOCAL_SERVER
+            assert voice.tone or voice.provider_id == kokoro, voice.id
 
 
 class TestWhatEachModelSteers:

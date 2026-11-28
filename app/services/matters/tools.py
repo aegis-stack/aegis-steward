@@ -17,8 +17,6 @@ matter adds change types, not tools.
 
 from __future__ import annotations
 
-from typing import Any
-
 from app.core.db import get_async_session
 from app.core.formatting import iso_date
 from app.core.tools import register_tool
@@ -32,6 +30,7 @@ from app.services.documents.queries import tagged_with
 from app.services.documents.service import DocumentService
 from app.services.finance.service import links
 from app.services.finance.utils import current_date
+from app.services.matters import schemas as shapes
 from app.services.matters.drawing import titles as paper_titles
 from app.services.matters.facts import FactService, monthly_cents
 from app.services.matters.matters import MatterService
@@ -48,7 +47,7 @@ from app.services.matters.service import PartyService
 ATTRIBUTE_LABELS = dict(FACT_ATTRIBUTES)
 
 
-async def parties() -> dict[str, Any]:
+async def parties() -> shapes.Parties:
     """The people and organizations the app knows about.
 
     Returns a dict with key 'parties': a list of entries carrying 'id',
@@ -78,7 +77,6 @@ async def parties() -> dict[str, Any]:
         policies = await InsuranceService(db).policies_covering_any()
         paid = await links.filed(db, [party_tag(p.id) for p in found])
         related = await relations_for(db, [p.id for p in found])
-        names = {p.id: p.name for p in found}
     return {
         "parties": [
             {
@@ -97,16 +95,14 @@ async def parties() -> dict[str, Any]:
                     p.id for p in policies if party.id in (p.covered_party_ids or [])
                 ],
                 "transactions": paid[party_tag(party.id)],
-                "relations": [
-                    {**r, "party": names.get(r["party_id"])} for r in related[party.id]
-                ],
+                "relations": related[party.id],
             }
             for party in found
         ]
     }
 
 
-async def matters(status: str = "open") -> dict[str, Any]:
+async def matters(status: str = "open") -> shapes.Matters:
     """The cases letters belong to.
 
     Args:
@@ -169,7 +165,7 @@ async def matters(status: str = "open") -> dict[str, Any]:
 
 async def requests(
     matter_id: int | None = None, outstanding: bool = True
-) -> dict[str, Any]:
+) -> shapes.Requests:
     """What has been asked for, by when, and what still stands.
 
     Args:
@@ -238,7 +234,7 @@ async def facts(
     matter_id: int | None = None,
     account_id: int | None = None,
     attribute: str | None = None,
-) -> dict[str, Any]:
+) -> shapes.Facts:
     """What can be said about someone's money, and how it is known.
 
     Args:
@@ -299,7 +295,7 @@ async def facts(
     }
 
 
-async def paper(document_id: int) -> dict[str, Any]:
+async def paper(document_id: int) -> shapes.DocumentText | shapes.NotFound:
     """The text of one document on file, page by page - the letter a
     request came from, a statement attached to an ask, a fact's source.
     The ids come from `matters`, `requests` and `facts` ('document_id'),
@@ -353,7 +349,7 @@ async def documents(
     unattributed: bool = False,
     matter_id: int | None = None,
     party_id: int | None = None,
-) -> dict[str, Any]:
+) -> shapes.Shelf:
     """What is on the shelf, by NAME rather than id: {'documents': [...]},
     newest first, each with 'id', 'title', 'kind', 'form_type', 'tax_year',
     'document_date', 'pages' and 'from' ({'party_id','name'}). 'q' matches
@@ -394,7 +390,7 @@ register_tool(
 
 async def look_up_contact(
     name: str, domains: list[str], party_id: int | None = None
-) -> dict[str, Any]:
+) -> shapes.WebLookup | shapes.NotFound:
     """Confirm an organization's website by FETCHING it, then read it.
 
     You supply the candidate domains you believe - "deltadentalins.com",
@@ -451,7 +447,7 @@ register_tool(
 )
 
 
-async def contact_details(party_id: int) -> dict[str, Any]:
+async def contact_details(party_id: int) -> shapes.ContactDetails | shapes.NotFound:
     """How to reach a party, read off the paper already filed against them.
 
     Returns {'party_id', 'name', 'offers'}: each offer carries 'field'

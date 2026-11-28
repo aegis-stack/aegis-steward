@@ -24,7 +24,9 @@ async def bills() -> Bills:
     'category' are as the Bills page shows them. The id is what a
     recurring.match proposal's 'stream_id' takes, and what a
     transaction's 'bill_id' names: a payment already the bill's is no
-    match candidate.
+    match candidate. This is the bill LIST, for matching and fixing them;
+    what falls due when is ``projection``'s ('next_expected_date' here
+    can be long past).
     """
     # Not the raw expected_amount: null unless typed, 40 bills read "no amount".
     from app.services.finance.domains.ledger.queries.accounts import account_names

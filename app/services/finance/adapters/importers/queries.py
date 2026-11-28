@@ -145,15 +145,14 @@ async def prior_batch(
     ).first()
 
 
-async def profile_named(db: AsyncSession, name: str) -> bool:
-    """Whether a live import profile is already called ``name``."""
+async def profile_names(db: AsyncSession) -> set[str]:
+    """What the live import profiles are called."""
     found = await db.exec(
-        select(FinanceImportProfile.id).where(
-            FinanceImportProfile.name == name,
+        select(FinanceImportProfile.name).where(
             FinanceImportProfile.deleted_at.is_(None),  # type: ignore[union-attr]
         )
     )
-    return found.first() is not None
+    return set(found.all())
 
 
 async def csv_profiles(db: AsyncSession) -> list[FinanceImportProfile]:

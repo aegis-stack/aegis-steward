@@ -34,13 +34,15 @@ def _local() -> Any:
     return _setup(
         STT_PROVIDER="faster_whisper",
         STT_MODEL="large-v3",
-        TTS_PROVIDER="kokoro",
-        TTS_MODEL="kokoro-v1.0",
+        TTS_PROVIDER="local_server",
+        TTS_MODEL="kokoro",
     )
 
 
 MARIN = VoiceProfile(
-    name="Marin", voices={"openai": "marin", "kokoro": "af_heart"}, tts_speed=1.2
+    name="Marin",
+    voices={"openai": "marin", "local_server": "local_server:af_heart"},
+    tts_speed=1.2,
 )
 
 
@@ -57,7 +59,7 @@ def test_it_names_what_hears_and_what_speaks_and_where_each_runs() -> None:
         model="gpt-4o-mini-tts-2025-03-20",
     )
     assert call_setup.hears(local).local
-    assert call_setup.speaks(MARIN, local).name == "Kokoro v1.0 · Marin"
+    assert call_setup.speaks(MARIN, local).name == "Kokoro · Marin"
 
 
 def test_a_voice_with_none_on_the_speaking_provider_says_so() -> None:

@@ -12,6 +12,7 @@ from app.components.worker.tasks.chat_tasks import (
     announce_approval_task,
     fold_conversation_task,
     read_photo_task,
+    warm_chat_task,
 )
 from app.components.worker.tasks.document_tasks import extract_document_task
 from app.components.worker.tasks.eval_tasks import (
@@ -77,6 +78,9 @@ class WorkerSettings:
     if present("app.services.ai.domains.chat.summary"):
         # A long conversation's turns out of view, folded into its summary.
         functions.append(fold_conversation_task)
+    if present("app.services.ai.domains.chat.warm"):
+        # A local model reads the chat's opening ahead: minutes, cold.
+        functions.append(func(warm_chat_task, timeout=15 * 60))
     if present("app.services.rag"):
         # A batch waits for the one model this process embeds with.
         functions.append(func(embed_files_task, timeout=30 * 60))

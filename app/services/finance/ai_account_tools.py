@@ -39,6 +39,7 @@ from app.services.finance.domains.planning.goals import goal_metadata
 from app.services.finance.domains.planning.recurring.upcoming import (
     scheduled_by_account,
 )
+from app.services.finance.schemas.agent_tools import Account, Accounts, Holding
 
 
 async def _named(
@@ -57,7 +58,7 @@ async def _named(
     )
 
 
-async def accounts(whose: str = "ours") -> dict[str, Any]:
+async def accounts(whose: str = "ours") -> Accounts:
     """The full balance sheet: every account with its balance and role.
 
     Args:
@@ -173,7 +174,7 @@ async def accounts(whose: str = "ours") -> dict[str, Any]:
             )
         )
 
-    holdings_by_account: dict[int, list[dict[str, Any]]] = {}
+    holdings_by_account: dict[int, list[Holding]] = {}
     for holding, security, market_value_cents in holdings:
         holdings_by_account.setdefault(holding.account_id, []).append(
             {
@@ -184,9 +185,9 @@ async def accounts(whose: str = "ours") -> dict[str, Any]:
             }
         )
 
-    out: list[dict[str, Any]] = []
+    out: list[Account] = []
     for account in account_rows:
-        entry: dict[str, Any] = {
+        entry: Account = {
             "id": account.id,
             "name": account.name,
             "account_type": account.account_type,

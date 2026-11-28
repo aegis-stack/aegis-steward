@@ -949,7 +949,13 @@ class TestTheSettings:
         voice, OpenAI her OpenAI one, from the same profile."""
         from app.services.ai.domains.voice.realtime_calls import _model_settings
 
-        voice = _voice({"gemini": "Kore", "openai": "marin", "kokoro": "af_heart"})
+        voice = _voice(
+            {
+                "gemini": "Kore",
+                "openai": "marin",
+                "local_server": "local_server:af_heart",
+            }
+        )
         assert (
             _model_settings("google:gemini-3.8-live", voice, None)["google_voice"]
             == "Kore"
@@ -965,7 +971,7 @@ class TestTheSettings:
         there (``chat_calls``)."""
         from app.services.ai.domains.voice.realtime_calls import _model_settings
 
-        voice = _voice({"kokoro": "af_heart"})
+        voice = _voice({"local_server": "local_server:af_heart"})
         assert "openai_voice" not in _model_settings("openai:gpt-live-1", voice, None)
         assert "openai_voice" not in _model_settings(
             "openai:gpt-realtime-2.1", voice, None

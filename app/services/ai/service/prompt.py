@@ -9,6 +9,7 @@ contexts + the agent row into something the framework can run.
 from datetime import date
 from typing import Any
 
+from app.core import time
 from app.core.chat_transcript import steps_line
 from app.services.ai.domains.chat.agent_loader import AgentConfig, agent_capabilities
 from app.services.ai.domains.chat.code_mode import with_sandbox_rules
@@ -66,6 +67,15 @@ def _day_line(on: date) -> str:
     and the first turn after it read the whole history afresh.
     """
     return f"--- {on.isoformat()} ---"
+
+
+def today_line() -> str:
+    """The date, beside the question: nothing else told the model what day
+    it is, and asked about "last month" it guessed from the data. On the
+    clock the tools read (``time.today``), so their dates agree with it.
+    Here, not in the system prompt, so a prompt cache keeps the head."""
+    day = time.today()
+    return f"Today is {day:%A}, {day.isoformat()}."
 
 
 def _history_start(lengths: list[int], budget: int) -> int:
@@ -346,6 +356,7 @@ class PromptMixin(ContextsMixin):
                     earlier_summary,
                     history,
                     right_now,
+                    today_line() if question else None,
                     question,
                 ),
             )
